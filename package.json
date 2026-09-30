@@ -1,0 +1,8 @@
+{
+  "name": "agent-drove",
+  "private": true,
+  "packageManager": "pnpm@8.15.9",
+  "scripts": {
+    "test": "pnpm -r run test"
+  }
+}
