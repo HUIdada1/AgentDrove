@@ -165,6 +165,7 @@ export class Orchestrator {
       createdAt: now,
       attempt: request.attempt ?? 1,
       sessionId: request.sessionId,
+      resumeLatest: request.resumeLatest,
       parentId: request.parentId,
       retryOf: request.retryOf,
     }
@@ -422,6 +423,7 @@ export class Orchestrator {
           prompt: task.prompt,
           cwd: task.cwd,
           sessionId: task.sessionId,
+          resumeLatest: task.resumeLatest,
           attachments: task.attachments,
           toolPolicy: task.toolPolicy,
           mode: task.mode,

@@ -131,6 +131,8 @@ export interface TaskRecord {
   state: TaskState
   /** 运行后提取到的会话 id,续聊链的锚点 */
   sessionId?: string
+  /** 无具体会话 id 时续接该工作区最近会话(zcode -c 语义),随任务落库 */
+  resumeLatest?: boolean
   parentId?: string
   error?: string
   attachments: TaskAttachment[]

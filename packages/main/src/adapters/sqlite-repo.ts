@@ -74,9 +74,10 @@ const MIGRATIONS: ((db: SqliteDb) => void)[] = [
       );
     `)
   },
-  // v3:任务档位落库(--mode 必须显式,任务级可覆盖默认档)
+  // v3:任务档位与 -c 续聊语义落库(--mode 必须显式;无会话 id 的续聊按 resume_latest 透传)
   (db) => {
     db.exec(`ALTER TABLE tasks ADD COLUMN mode TEXT NOT NULL DEFAULT 'build';`)
+    db.exec(`ALTER TABLE tasks ADD COLUMN resume_latest INTEGER;`)
   },
 ]
 
@@ -127,10 +128,10 @@ export class SqliteStore
     this.db
       .prepare(
         `INSERT OR REPLACE INTO tasks
-         (id, agent_id, model_id, prompt, cwd, state, session_id, parent_id, error,
+         (id, agent_id, model_id, prompt, cwd, state, session_id, resume_latest, parent_id, error,
           attachments_json, tool_policy_json, mode, origin, created_at, started_at, finished_at,
           retry_of, attempt)
-         VALUES (@id, @agentId, @modelId, @prompt, @cwd, @state, @sessionId, @parentId, @error,
+         VALUES (@id, @agentId, @modelId, @prompt, @cwd, @state, @sessionId, @resumeLatest, @parentId, @error,
           @attachmentsJson, @toolPolicyJson, @mode, @origin, @createdAt, @startedAt, @finishedAt,
           @retryOf, @attempt)`,
       )
@@ -368,6 +369,7 @@ interface TaskRow {
   cwd: string
   state: TaskRecord['state']
   session_id: string | null
+  resume_latest: number | null
   parent_id: string | null
   error: string | null
   attachments_json: string | null
@@ -419,6 +421,7 @@ function rowFromTask(task: TaskRecord) {
     cwd: task.cwd,
     state: task.state,
     sessionId: task.sessionId ?? null,
+    resumeLatest: task.resumeLatest ? 1 : null,
     parentId: task.parentId ?? null,
     error: task.error ?? null,
     attachmentsJson: JSON.stringify(task.attachments ?? []),
@@ -442,6 +445,7 @@ function taskFromRow(row: TaskRow): TaskRecord {
     cwd: row.cwd,
     state: row.state,
     sessionId: row.session_id ?? undefined,
+    resumeLatest: row.resume_latest === 1 ? true : undefined,
     parentId: row.parent_id ?? undefined,
     error: row.error ?? undefined,
     attachments: row.attachments_json
