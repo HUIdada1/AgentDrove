@@ -43,6 +43,8 @@ export interface SpawnRequest {
   cwd: string
   /** 在继承系统环境基础上的覆盖项(如 LANG) */
   env?: Record<string, string>
+  /** .cmd/.bat 入口在 Windows 上必须经 shell 解析,否则 ENOENT */
+  shell?: boolean
   onStdout(chunk: Buffer): void
   onStderr(chunk: Buffer): void
 }
@@ -59,9 +61,22 @@ export interface ProcessRunner {
   spawn(request: SpawnRequest): ProcessHandle
 }
 
+export interface FileStat {
+  size: number
+  mtimeMs: number
+  isDirectory: boolean
+}
+
 /** 文件能力只暴露核心用得到的最小面,便于测试替身 */
 export interface FileSystem {
   exists(path: string): boolean
   isWritable(path: string): boolean
   ensureDir(path: string): void
+  /** 直接子项名(不含 . ..) */
+  readDir(path: string): string[]
+  stat(path: string): FileStat | null
+  /** 递归复制目录或文件 */
+  copy(src: string, dest: string): void
+  /** 递归删除文件或目录 */
+  remove(path: string): void
 }

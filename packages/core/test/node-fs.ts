@@ -7,10 +7,12 @@ import {
   readdirSync,
   rmSync,
   statSync,
+  writeFileSync,
 } from 'node:fs'
-import type { FileStat, FileSystem } from '@agent-drove/core'
+import type { FileStat, FileSystem } from '../src/index.js'
 
-export class NodeFileSystem implements FileSystem {
+/** core 测试的真实文件系统适配器(行为与 main 的 NodeFileSystem 一致) */
+export class TempFs implements FileSystem {
   exists(path: string): boolean {
     return existsSync(path)
   }
@@ -49,3 +51,5 @@ export class NodeFileSystem implements FileSystem {
     rmSync(path, { recursive: true, force: true })
   }
 }
+
+export { writeFileSync, mkdirSync, rmSync }

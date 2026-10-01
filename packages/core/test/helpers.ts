@@ -2,9 +2,11 @@ import { normalize } from 'node:path'
 import type {
   Clock,
   FileSystem,
+  FileStat,
   ProcessHandle,
   ProcessRunner,
   SpawnRequest,
+  TaskRecord,
 } from '../src/index.js'
 import { MemoryTaskRepository, PassthroughSink } from '../src/index.js'
 import { MODEL_CLIENT_FOLLOW, type AgentProfile } from '../src/index.js'
@@ -124,6 +126,33 @@ export class FakeFileSystem implements FileSystem {
 
   ensureDir(path: string): void {
     this.writable.add(norm(path))
+  }
+
+  readDir(path: string): string[] {
+    const prefix = norm(path) + '\\'
+    const names = new Set<string>()
+    for (const p of this.writable) {
+      if (p.startsWith(prefix)) {
+        const rest = p.slice(prefix.length)
+        names.add(rest.split('\\')[0])
+      }
+    }
+    return [...names]
+  }
+
+  stat(): FileStat | null {
+    return null
+  }
+
+  copy(src: string, dest: string): void {
+    if (this.writable.has(norm(src))) this.writable.add(norm(dest))
+  }
+
+  remove(path: string): void {
+    const target = norm(path)
+    for (const p of [...this.writable]) {
+      if (p === target || p.startsWith(target + '\\')) this.writable.delete(p)
+    }
   }
 }
 

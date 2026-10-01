@@ -9,6 +9,7 @@ export class NodeProcessRunner implements ProcessRunner {
       env: { ...process.env, ...request.env },
       stdio: ['ignore', 'pipe', 'pipe'],
       windowsHide: true,
+      shell: request.shell,
     })
     child.stdout?.on('data', (chunk: Buffer) => request.onStdout(chunk))
     child.stderr?.on('data', (chunk: Buffer) => request.onStderr(chunk))
