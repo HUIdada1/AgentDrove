@@ -8,3 +8,5 @@ coverage/
 Thumbs.db
 .env
 *.local
+# 方案文档仅本地保留,不入版本库
+docs/
