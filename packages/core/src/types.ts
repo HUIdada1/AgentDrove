@@ -9,12 +9,14 @@ export interface ModelPreset {
 export type ModelSwitchKind = 'cli-arg' | 'config-file' | 'profile' | 'none'
 
 export interface AgentCapabilities {
-  /** 是否支持无头执行(如 zcode -p) */
+  /** 是否支持无头执行(如 zcode -p);trae 这类只有 GUI 通道的客户端为 false */
   headless: boolean
-  /** 是否支持会话续接(-c/-r) */
+  /** 是否支持会话续接(--resume/-c) */
   sessionResume: boolean
-  /** 模型切换的实现方式 */
+  /** 模型切换的实现方式;none = 模型跟随客户端当前会话(zcode 实测无 --model 参数) */
   modelSwitch: ModelSwitchKind
+  /** 附件透传能力(不支持的客户端派发前提示,不静默丢弃) */
+  attachments: boolean
 }
 
 export type QuotaKind = 'daily' | 'credits' | 'subscription'
@@ -26,24 +28,37 @@ export type QuotaKind = 'daily' | 'credits' | 'subscription'
 export interface PlanInfo {
   name: string
   quotaKind: QuotaKind
-  /** 该套餐覆盖的模型档位;缺省回落到 profile.models */
+  /** 该套餐覆盖的模型档位;为空时回落到档案的 models 目录 */
   modelIds: ModelId[]
-  /** 每日任务硬上限(风控节流,与套餐真实额度无关) */
+  /** 每日任务硬上限,入队时检查(默认 20) */
   dailyTaskCap: number
+  /** 每客户端并发上限(默认 1) */
+  maxConcurrency: number
 }
+
+/** 模型跟随客户端时任务记录的哨兵值(zcode 无模型参数,见 R2 实测降级) */
+export const MODEL_CLIENT_FOLLOW = 'client-follow'
 
 export interface AgentProfile {
   id: AgentId
   label: string
   /** 对应注册到 Orchestrator 的 driver id */
   driver: string
-  /** 可执行入口描述(命令 + 路径),供 L1 driver 使用 */
+  /** 可执行入口(GUI 主程序),供唤起与探测 */
   entry: string
+  /** 无头 CLI 入口;headless 客户端必填 */
+  cliEntry?: string
+  version?: string
+  logoPath?: string
   models: ModelPreset[]
+  /** failover 换端时的模型映射目标;modelSwitch=none 时填哨兵 client-follow */
   defaultModel: ModelId
-  maxConcurrency: number
   capabilities: AgentCapabilities
-  plan?: PlanInfo
+  plan: PlanInfo
+  /** 停用后拒绝新任务入队,failover 候选也会跳过 */
+  enabled: boolean
+  /** driver 兼容版本范围声明,越界仅发 warning 不阻断 */
+  supportedVersions?: string
 }
 
 export type TaskState =
@@ -52,26 +67,79 @@ export type TaskState =
   | 'completed'
   | 'failed'
   | 'canceled'
+  | 'interrupted'
+
+/** zcode --mode 档位;无头缺省是 yolo,派发必须显式传,绝不依赖客户端默认值 */
+export type TaskMode = 'build' | 'edit' | 'plan' | 'yolo'
+
+export type TaskOrigin =
+  | 'panel' // 主面板发布框
+  | 'hotkey' // 全局热键迷你条
+  | 'selection' // 选中文本发送
+  | 'tray' // 托盘快速派发
+  | 'mcp' // MCP 网关
+  | 'failover' // 失败降级/重试派生
+
+export interface TaskAttachment {
+  /** 引用原路径,不复制本体 */
+  path: string
+  kind: 'file' | 'image' | 'directory'
+}
+
+export interface ToolPolicy {
+  /** 工具级禁用清单(zcode --disallowed-tools,不支持命令级 pattern) */
+  denyList?: string[]
+  maxTurns?: number | null
+}
 
 export interface TaskInput {
   prompt: string
-  cwd?: string
+  cwd: string
+  /** 续聊目标会话(--resume <id>) */
+  sessionId?: string
+  /** 无目标会话时续接该工作区最近会话(zcode -c 语义) */
+  resumeLatest?: boolean
+  attachments?: TaskAttachment[]
+  toolPolicy?: ToolPolicy
+  mode?: TaskMode
 }
 
 export type TaskEvent =
-  | { type: 'state-changed'; from: TaskState; to: TaskState; at: number }
-  | { type: 'message'; channel: 'stdout' | 'stderr' | 'agent'; text: string; at: number }
-  | { type: 'artifact'; kind: string; path?: string; at: number }
+  | { kind: 'state-changed'; from: TaskState; to: TaskState }
+  | { kind: 'message'; channel: 'stdout' | 'stderr' | 'agent'; text: string }
+  | { kind: 'progress'; text: string }
+  | { kind: 'usage'; inputTokens?: number; outputTokens?: number }
+  | { kind: 'artifact'; path: string; change: 'added' | 'modified' | 'deleted' }
+  | { kind: 'warning'; text: string }
+
+export type TaskEventKind = TaskEvent['kind']
+
+/** 落库形态:payload 是事件本体,kind 冗余存储便于按类查询 */
+export interface StoredEvent {
+  taskId: string
+  seq: number
+  at: number
+  event: TaskEvent
+}
 
 export interface TaskRecord {
   id: string
   agentId: AgentId
   modelId: ModelId
-  input: TaskInput
+  prompt: string
+  cwd: string
   state: TaskState
+  /** 运行后提取到的会话 id,续聊链的锚点 */
+  sessionId?: string
+  parentId?: string
   error?: string
+  attachments: TaskAttachment[]
+  toolPolicy?: ToolPolicy
+  mode: TaskMode
+  origin: TaskOrigin
   createdAt: number
   startedAt?: number
   finishedAt?: number
-  events: TaskEvent[]
+  retryOf?: string
+  attempt: number
 }
