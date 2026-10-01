@@ -1,6 +1,7 @@
 {
   "name": "@agent-console/core",
   "version": "0.1.0",
+  "author": "沐辉",
   "private": true,
   "type": "module",
   "scripts": {
