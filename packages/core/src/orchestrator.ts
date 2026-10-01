@@ -215,6 +215,30 @@ export class Orchestrator {
     return true
   }
 
+  /**
+   * 续聊(6.5):新任务以 parent_id 记链,sessionId 透传 `--resume <id>`;
+   * 无会话 id(V2 有结论前提取不到)降级 `-c` 续接该工作区最近会话,UI 需标注。
+   * running 父任务拒绝续聊,不允许并发续聊。
+   */
+  continueConversation(taskId: string, prompt: string): TaskRecord {
+    const parent = this.taskOf(taskId)
+    if (!parent) throw new Error(`unknown task: ${taskId}`)
+    if (parent.state === 'running') {
+      throw new Error('任务运行中:请等待完成或先取消,再继续对话')
+    }
+    return this.submit({
+      agentId: parent.agentId,
+      prompt,
+      cwd: parent.cwd,
+      sessionId: parent.sessionId,
+      resumeLatest: !parent.sessionId,
+      modelId: parent.modelId,
+      mode: parent.mode,
+      parentId: parent.id,
+      origin: 'panel',
+    })
+  }
+
   /** 托盘/IPC 的"暂停调度"入口;恢复时立即重扫队列 */
   setPaused(paused: boolean): void {
     this.throttle.setPaused(paused)
