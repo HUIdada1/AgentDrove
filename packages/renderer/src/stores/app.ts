@@ -1,4 +1,4 @@
-import { ref, shallowRef } from 'vue'
+import { ref, shallowRef, watch } from 'vue'
 import type {
   AgentView,
   AppConfig,
@@ -21,6 +21,7 @@ const settings = ref<AppConfig | null>(null)
 const workspaces = ref<WorkspaceRow[]>([])
 const updateStatus = ref<UpdateStatus>({ phase: 'idle' })
 const view = ref<'panel' | 'settings'>('panel')
+const railCollapsed = ref(false)
 const selectedTaskId = ref<string | null>(null)
 const selection = ref<Set<string>>(new Set())
 const filter = ref({ search: '', agentId: '', state: '' })
@@ -35,6 +36,7 @@ export function useAppStore() {
     workspaces,
     updateStatus,
     view,
+    railCollapsed,
     selectedTaskId,
     selection,
     filter,
@@ -43,7 +45,26 @@ export function useAppStore() {
     refreshTasks,
     refreshSettings,
     refreshWorkspaces,
+    setTheme,
   }
+}
+
+/** 主题落到 <html data-theme>,auto 跟随系统;样式约定见 styles.css */
+function applyTheme(theme: AppConfig['ui']['theme'] | undefined): void {
+  const resolved =
+    theme === 'light' || theme === 'dark'
+      ? theme
+      : window.matchMedia('(prefers-color-scheme: light)').matches
+        ? 'light'
+        : 'dark'
+  document.documentElement.dataset.theme = resolved
+}
+
+export async function setTheme(theme: AppConfig['ui']['theme']): Promise<void> {
+  if (!settings.value) return
+  settings.value = { ...settings.value, ui: { ...settings.value.ui, theme } }
+  await window.api.settingsUpdate({ ui: { ...settings.value.ui, theme } })
+  applyTheme(theme)
 }
 
 export async function refreshAgents(): Promise<void> {
@@ -77,6 +98,11 @@ export function installAppBridge(): void {
   void refreshTasks()
   void refreshSettings()
   void refreshWorkspaces()
+  watch(
+    () => settings.value?.ui.theme,
+    (theme) => applyTheme(theme),
+    { immediate: true },
+  )
   window.api.onTasksEventsBatch((events) => {
     const next = new Map(liveEvents.value)
     for (const event of events) {

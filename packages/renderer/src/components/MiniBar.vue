@@ -1,5 +1,9 @@
 <script setup lang="ts">
 import { onMounted, onUnmounted, ref } from 'vue'
+import GlassButton from '../ui/GlassButton.vue'
+import GlassInput from '../ui/GlassInput.vue'
+import GlassSelect from '../ui/GlassSelect.vue'
+import Logo from './Logo.vue'
 import type { AgentView } from '@agent-drove/shared'
 
 // 迷你条是独立窗口生命周期,刻意不依赖面板 store,直连 api 保持轻量
@@ -57,22 +61,27 @@ function onKeydown(event: KeyboardEvent): void {
 
 <template>
   <div class="mini">
-    <div class="panel">
-      <select v-model="agentId" title="客户端">
-        <option v-for="a in agents.filter((agent) => agent.enabled)" :key="a.id" :value="a.id">
-          {{ a.label }}
-        </option>
-      </select>
-      <textarea
-        ref="area"
-        v-model="prompt"
-        rows="3"
-        placeholder="把任务派发给客户端…(Enter 派发 / Esc 关闭)"
-        @keydown="onKeydown"
+    <div class="panel glass">
+      <Logo :size="20" class="mark" />
+      <GlassSelect
+        v-model="agentId"
+        class="who"
+        title="客户端"
+        :options="agents.filter((a) => a.enabled).map((a) => ({ value: a.id, label: a.label }))"
       />
-      <button class="primary" :disabled="submitting || !prompt.trim() || !agentId" @click="submit">
+      <div class="field">
+        <GlassInput
+          ref="area"
+          v-model="prompt"
+          multiline
+          :rows="2"
+          placeholder="把任务派发给客户端…(Enter 派发 / Esc 关闭)"
+          @keydown="onKeydown"
+        />
+      </div>
+      <GlassButton variant="primary" :disabled="submitting || !prompt.trim() || !agentId" @click="submit">
         派发
-      </button>
+      </GlassButton>
     </div>
   </div>
 </template>
@@ -81,7 +90,7 @@ function onKeydown(event: KeyboardEvent): void {
 .mini {
   height: 100vh;
   padding: 10px;
-  background: var(--bg0);
+  background: var(--bg-veil), var(--bg);
 }
 
 .panel {
@@ -89,24 +98,27 @@ function onKeydown(event: KeyboardEvent): void {
   display: flex;
   align-items: stretch;
   gap: 8px;
-  background: var(--bg1);
-  border: 1px solid var(--line);
-  border-radius: var(--radius);
-  padding: 10px;
+  padding: 10px 12px;
 }
 
-textarea {
+.mark {
+  align-self: center;
+  flex: none;
+}
+
+.who {
+  align-self: center;
+  max-width: 128px;
+}
+
+.field {
   flex: 1;
   min-width: 0;
-  background: var(--bg2);
+  display: flex;
 }
 
-select {
-  align-self: center;
-  max-width: 130px;
-}
-
-button {
-  align-self: center;
+.field :deep(.g-field) {
+  height: 100%;
+  resize: none;
 }
 </style>

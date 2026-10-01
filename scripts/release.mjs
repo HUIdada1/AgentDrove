@@ -25,6 +25,7 @@
 import crypto from 'node:crypto'
 import fs from 'node:fs'
 import path from 'node:path'
+import { createRequire } from 'node:module'
 import { spawnSync } from 'node:child_process'
 import { fileURLToPath } from 'node:url'
 
@@ -117,6 +118,13 @@ for (const [cmd, stepArgs] of buildSteps) run(cmd, stepArgs)
 // ---------------- ④ electron-builder NSIS ----------------
 log('\n[release] 步骤 2/4: electron-builder 出 NSIS 安装包')
 run('npx', ['electron-builder', '--win', 'nsis', '--publish', 'never'], { cwd: mainDir })
+
+// 打包过程会把 better-sqlite3 重编到 Electron ABI,发版后立即恢复 Node ABI,
+// 否则本地 vitest(跑在 node 上)加载原生模块直接报 NODE_MODULE_VERSION 不匹配
+log('\n[release] 恢复 better-sqlite3 的 Node ABI(打包把它重编成了 Electron ABI)')
+const nodeRequire = createRequire(path.join(mainDir, 'package.json'))
+const sqliteDir = path.dirname(nodeRequire.resolve('better-sqlite3/package.json'))
+run('npx', ['node-gyp', 'rebuild', '--release'], { cwd: sqliteDir })
 
 // ---------------- ⑤ 轨道 B 热更产物 ----------------
 async function loadAsarLib() {

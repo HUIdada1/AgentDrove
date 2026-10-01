@@ -1,6 +1,9 @@
 <script setup lang="ts">
 import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { useAppStore } from '../stores/app'
+import GlassButton from '../ui/GlassButton.vue'
+import GlassInput from '../ui/GlassInput.vue'
+import GlassSelect from '../ui/GlassSelect.vue'
 import type { SubmitTaskDto } from '@agent-drove/shared'
 
 const store = useAppStore()
@@ -108,45 +111,59 @@ function onKeydown(event: KeyboardEvent): void {
 </script>
 
 <template>
-  <section class="composer" @dragover.prevent @drop.prevent="onDrop">
-    <textarea
+  <section class="composer glass" @dragover.prevent @drop.prevent="onDrop">
+    <GlassInput
       v-model="prompt"
-      rows="3"
+      multiline
+      :rows="3"
       :placeholder="batchMode ? '每行一条任务,批量入队…(Enter 提交 / Shift+Enter 换行)' : '把任务派发给客户端…(Enter 提交 / Shift+Enter 换行)'"
       @keydown="onKeydown"
     />
 
     <div class="toolbar">
-      <select v-model="agentId" title="客户端">
-        <option v-for="a in activeAgents" :key="a.id" :value="a.id">
-          {{ a.label }}
-        </option>
-      </select>
-      <select v-model="mode" title="档位">
-        <option value="build">build</option>
-        <option value="edit">edit</option>
-        <option value="plan">plan</option>
-      </select>
-      <input v-model="workspace" class="ws" placeholder="工作目录(留空=默认目录)" spellcheck="false" />
-      <button class="ghost" @click="pickAttachment">附件 {{ attachments.length || '' }}</button>
-      <button class="ghost" :class="{ on: batchMode }" @click="batchMode = !batchMode">批量</button>
-      <button class="ghost" :class="{ on: advanced }" @click="advanced = !advanced">高级</button>
+      <GlassSelect
+        v-model="agentId"
+        class="who"
+        title="客户端"
+        :options="activeAgents.map((a) => ({ value: a.id, label: a.label }))"
+      />
+      <GlassSelect
+        v-model="mode"
+        title="档位"
+        :options="[
+          { value: 'build', label: 'build' },
+          { value: 'edit', label: 'edit' },
+          { value: 'plan', label: 'plan' },
+        ]"
+      />
+      <GlassInput v-model="workspace" class="ws" mono placeholder="工作目录(留空=默认目录)" />
+      <GlassButton variant="ghost" size="sm" @click="pickAttachment">
+        附件{{ attachments.length ? ` ${attachments.length}` : '' }}
+      </GlassButton>
+      <GlassButton variant="ghost" size="sm" :class="{ on: batchMode }" @click="batchMode = !batchMode">
+        批量
+      </GlassButton>
+      <GlassButton variant="ghost" size="sm" :class="{ on: advanced }" @click="advanced = !advanced">
+        高级
+      </GlassButton>
       <span class="spacer" />
-      <button class="primary" :disabled="submitting || !prompt.trim()" @click="submit">派发</button>
+      <GlassButton variant="primary" :disabled="submitting || !prompt.trim()" @click="submit">
+        派发
+      </GlassButton>
     </div>
 
     <div v-if="advanced" class="advanced">
       <label>
         派生工作区源目录(git → worktree / 其他 → 整拷)
-        <input v-model="workspaceSource" placeholder="留空=直接使用上面的工作目录" spellcheck="false" />
+        <GlassInput v-model="workspaceSource" mono placeholder="留空=直接使用上面的工作目录" />
       </label>
       <label>
         禁用工具(逗号分隔,工具级)
-        <input v-model="denyList" placeholder="如 Bash,Write" spellcheck="false" />
+        <GlassInput v-model="denyList" placeholder="如 Bash,Write" />
       </label>
       <label>
         max-turns
-        <input v-model="maxTurns" type="number" min="1" placeholder="不限" />
+        <GlassInput v-model="maxTurns" placeholder="不限" />
       </label>
       <div v-if="selectedAgent && !selectedAgent.capabilities.attachments" class="hint">
         {{ selectedAgent.label }} 附件能力待核实,附件不会透传。
@@ -166,43 +183,36 @@ function onKeydown(event: KeyboardEvent): void {
 
 <style scoped>
 .composer {
-  padding: 12px 14px 8px;
-  border-bottom: 1px solid var(--line);
-  background: var(--bg1);
-}
-
-textarea {
-  width: 100%;
-  background: var(--bg2);
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 12px 14px 10px;
 }
 
 .toolbar {
-  margin-top: 8px;
   display: flex;
   align-items: center;
   gap: 6px;
 }
 
-.toolbar select {
-  padding: 4px 8px;
+.who {
+  max-width: 130px;
 }
 
 .ws {
   flex: 1;
-  min-width: 120px;
-  font-family: var(--mono);
-  font-size: 12px;
+  min-width: 100px;
 }
 
-.ghost.on {
-  color: var(--accent);
-  border-color: rgba(77, 163, 255, 0.4);
+.toolbar :deep(.on),
+:deep(.on) {
+  color: var(--accent-strong);
+  border-color: var(--accent-line);
 }
 
 .advanced {
-  margin-top: 8px;
   display: grid;
-  grid-template-columns: 1fr 1fr 120px;
+  grid-template-columns: 1fr 1fr 110px;
   gap: 8px;
 }
 
@@ -214,10 +224,6 @@ textarea {
   color: var(--muted);
 }
 
-.advanced input {
-  font-size: 12px;
-}
-
 .hint {
   grid-column: 1 / -1;
   color: var(--warn);
@@ -225,7 +231,6 @@ textarea {
 }
 
 .chips {
-  margin-top: 8px;
   display: flex;
   flex-wrap: wrap;
   gap: 6px;
@@ -235,8 +240,8 @@ textarea {
   display: inline-flex;
   align-items: center;
   gap: 4px;
-  background: var(--bg3);
-  border: 1px solid var(--line);
+  background: var(--glass-bg-strong);
+  border: 1px solid var(--glass-edge);
   border-radius: 999px;
   padding: 2px 10px;
   font-size: 11px;
@@ -247,10 +252,10 @@ textarea {
   background: none;
   padding: 0 2px;
   color: var(--muted);
+  cursor: pointer;
 }
 
 .notice {
-  margin-top: 8px;
   color: var(--err);
   font-size: 12px;
 }

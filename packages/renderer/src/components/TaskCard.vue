@@ -48,8 +48,8 @@ const time = computed(() => {
       <span class="agent">{{ task.agentId }}</span>
       <span class="model">{{ task.modelId === 'client-follow' ? '跟随客户端' : task.modelId }}</span>
       <span class="badge">{{ STATE_TEXT[task.state] }}</span>
-      <span v-if="duration" class="dur">{{ duration }}</span>
-      <span class="time">{{ time }}</span>
+      <span v-if="duration" class="num dur">{{ duration }}</span>
+      <span class="num time">{{ time }}</span>
     </div>
     <div class="body">{{ summary }}</div>
     <div v-if="task.error" class="err">{{ task.error.slice(0, 90) }}</div>
@@ -66,12 +66,25 @@ const time = computed(() => {
 
 <style scoped>
 .card {
-  border: 1px solid var(--line);
-  border-radius: var(--radius);
-  background: var(--bg1);
-  padding: 10px 12px;
+  position: relative;
+  border-radius: var(--radius-md);
+  background: var(--glass-bg);
+  backdrop-filter: var(--glass-blur);
+  border: 1px solid var(--glass-edge);
+  box-shadow: inset 0 1px 0 var(--glass-specular);
+  padding: 9px 12px;
   cursor: pointer;
-  transition: border-color var(--fast), transform var(--fast), background var(--fast);
+  transition: transform var(--fast) var(--ease), border-color var(--fast) var(--ease),
+    background var(--fast) var(--ease);
+}
+
+.card::after {
+  content: '';
+  position: absolute;
+  inset: 0;
+  border-radius: inherit;
+  pointer-events: none;
+  background: linear-gradient(160deg, rgba(255, 255, 255, 0.06), transparent 40%);
 }
 
 .card:hover {
@@ -80,20 +93,38 @@ const time = computed(() => {
 }
 
 .card.selected {
-  border-color: rgba(77, 163, 255, 0.55);
-  background: var(--bg2);
+  border-color: var(--accent-line);
+  background: var(--accent-dim);
 }
 
-.card.s-running {
-  border-left: 2px solid var(--accent);
+/* 左缘状态色条:扫一眼即知列内任务状态分布 */
+.card::before {
+  content: '';
+  position: absolute;
+  left: 0;
+  top: 10px;
+  bottom: 10px;
+  width: 2.5px;
+  border-radius: 2px;
+  background: var(--faint);
+  opacity: 0.55;
 }
 
-.card.s-failed {
-  border-left: 2px solid var(--err);
+.card.s-running::before {
+  background: var(--accent);
+  opacity: 1;
 }
 
-.card.s-completed {
-  border-left: 2px solid var(--ok);
+.card.s-completed::before {
+  background: var(--ok);
+}
+
+.card.s-failed::before {
+  background: var(--err);
+}
+
+.card.s-canceled::before {
+  background: var(--faint);
 }
 
 .top {
@@ -116,7 +147,7 @@ const time = computed(() => {
 .badge {
   margin-left: auto;
   font-size: 11px;
-  padding: 1px 8px;
+  padding: 1px 9px;
   border-radius: 999px;
   background: rgba(148, 174, 196, 0.12);
   color: var(--muted);
@@ -124,17 +155,17 @@ const time = computed(() => {
 
 .s-running .badge {
   background: var(--accent-dim);
-  color: var(--accent);
+  color: var(--accent-strong);
   animation: breathe 1.6s ease-in-out infinite;
 }
 
 .s-completed .badge {
-  background: rgba(61, 220, 151, 0.14);
+  background: color-mix(in srgb, var(--ok) 15%, transparent);
   color: var(--ok);
 }
 
 .s-failed .badge {
-  background: rgba(255, 107, 107, 0.14);
+  background: color-mix(in srgb, var(--err) 15%, transparent);
   color: var(--err);
 }
 
@@ -146,14 +177,12 @@ const time = computed(() => {
 
 .dur,
 .time {
-  font-family: var(--mono);
   font-size: 11px;
-  color: var(--muted);
+  color: var(--faint);
 }
 
 .body {
   margin-top: 6px;
-  color: var(--text);
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -177,8 +206,8 @@ const time = computed(() => {
   font-size: 10px;
   color: var(--muted);
   border: 1px solid var(--line);
-  border-radius: 4px;
-  padding: 0 5px;
+  border-radius: 5px;
+  padding: 0 6px;
 }
 
 .spacer {

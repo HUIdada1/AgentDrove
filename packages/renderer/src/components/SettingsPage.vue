@@ -252,7 +252,7 @@ async function runExport(kind: 'data' | 'report'): Promise<void> {
   gap: 12px;
   padding: 12px 20px;
   border-bottom: 1px solid var(--line);
-  background: var(--bg1);
+  background: var(--glass-bg);
 }
 
 .title {
@@ -289,9 +289,11 @@ async function runExport(kind: 'data' | 'report'): Promise<void> {
 }
 
 .card {
-  border: 1px solid var(--line);
-  border-radius: var(--radius);
-  background: var(--bg1);
+  border: 1px solid var(--glass-edge);
+  border-radius: var(--radius-md);
+  background: var(--glass-bg);
+  backdrop-filter: var(--glass-blur);
+  box-shadow: inset 0 1px 0 var(--glass-specular);
   padding: 12px 14px;
   display: flex;
   flex-direction: column;
@@ -349,7 +351,7 @@ async function runExport(kind: 'data' | 'report'): Promise<void> {
   width: 34px;
   height: 20px;
   border-radius: 999px;
-  background: var(--bg3);
+  background: var(--field-bg);
   border: 1px solid var(--line);
   position: relative;
   padding: 0;
@@ -369,7 +371,7 @@ async function runExport(kind: 'data' | 'report'): Promise<void> {
 
 .toggle.on {
   background: var(--accent-dim);
-  border-color: rgba(77, 163, 255, 0.45);
+  border-color: var(--accent-line);
 }
 
 .toggle.on i {
@@ -380,7 +382,7 @@ async function runExport(kind: 'data' | 'report'): Promise<void> {
 .hotkey {
   align-self: flex-start;
   font-family: var(--mono);
-  background: var(--bg2);
+  background: var(--field-bg);
   border: 1px solid var(--line);
   border-radius: 8px;
   padding: 4px 10px;
@@ -435,7 +437,7 @@ async function runExport(kind: 'data' | 'report'): Promise<void> {
   border: 1px solid rgba(255, 107, 107, 0.35);
   background: rgba(255, 107, 107, 0.08);
   color: var(--err);
-  border-radius: var(--radius);
+  border-radius: var(--radius-md);
   padding: 8px 10px;
   font-size: 12px;
 }

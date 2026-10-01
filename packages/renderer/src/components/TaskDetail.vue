@@ -1,12 +1,12 @@
 <script setup lang="ts">
 import { computed, onUnmounted, ref, watch } from 'vue'
 import { useAppStore } from '../stores/app'
-import Timeline from './Timeline.vue'
+import GlassButton from '../ui/GlassButton.vue'
 import type { TaskRecord, WorkspaceRow } from '@agent-drove/shared'
 
+/** 右栏:元信息 + 操作区 + 工作区/产物管理;会话流已移至中栏 */
 const store = useAppStore()
 const task = ref<TaskRecord | null>(null)
-const continueText = ref('')
 const switching = ref(false)
 const mergeResult = ref<{ merged: string[]; conflicts: string[] } | null>(null)
 
@@ -31,8 +31,7 @@ watch(
   { immediate: true },
 )
 
-// 轮询兜底状态迁移推送丢失,切换面板时释放
-const timer = setInterval(async () => {
+const poll = setInterval(async () => {
   if (!store.selectedTaskId.value) return
   const fresh = await window.api.tasksGet(store.selectedTaskId.value)
   if (fresh && fresh.state !== task.value?.state) {
@@ -40,7 +39,7 @@ const timer = setInterval(async () => {
     await store.refreshAgents()
   }
 }, 800)
-onUnmounted(() => clearInterval(timer))
+onUnmounted(() => clearInterval(poll))
 
 async function cancel(): Promise<void> {
   if (!task.value) return
@@ -61,14 +60,6 @@ async function resubmitOn(target: string): Promise<void> {
   if (!task.value) return
   const next = await window.api.tasksResubmitOn(task.value.id, target)
   switching.value = false
-  await store.refreshTasks()
-  store.selectedTaskId.value = next.id
-}
-
-async function continueConversation(): Promise<void> {
-  if (!task.value || !continueText.value.trim()) return
-  const next = await window.api.tasksContinue(task.value.id, continueText.value.trim())
-  continueText.value = ''
   await store.refreshTasks()
   store.selectedTaskId.value = next.id
 }
@@ -104,47 +95,58 @@ async function cleanWorkspace(): Promise<void> {
 function fmt(ts?: number): string {
   if (!ts) return '—'
   const d = new Date(ts)
-  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')} ${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}:${String(d.getSeconds()).padStart(2, '0')}`
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')} ${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}:${String(d.getSeconds()).padStart(2, '0')}`
+}
+
+const STATE_TEXT: Record<string, string> = {
+  queued: '排队',
+  running: '运行中',
+  completed: '已完成',
+  failed: '失败',
+  canceled: '已取消',
+  interrupted: '已中断',
 }
 </script>
 
 <template>
-  <aside class="detail">
+  <aside class="detail glass">
     <template v-if="task">
       <header class="head">
-        <span class="title">任务详情</span>
-        <span class="id" :title="task.id">{{ task.id.slice(0, 8) }}</span>
+        <span class="title">详情</span>
+        <span class="id num" :title="task.id">{{ task.id.slice(0, 8) }}</span>
       </header>
 
       <dl class="meta">
         <div><dt>客户端</dt><dd>{{ agentLabel }}</dd></div>
+        <div><dt>状态</dt><dd>{{ STATE_TEXT[task.state] }}</dd></div>
         <div><dt>模型</dt><dd>{{ task.modelId === 'client-follow' ? '跟随客户端' : task.modelId }}</dd></div>
         <div><dt>档位</dt><dd>{{ task.mode }}</dd></div>
-        <div><dt>状态</dt><dd>{{ task.state }}</dd></div>
-        <div><dt>创建</dt><dd>{{ fmt(task.createdAt) }}</dd></div>
-        <div><dt>结束</dt><dd>{{ fmt(task.finishedAt) }}</dd></div>
+        <div><dt>创建</dt><dd class="num">{{ fmt(task.createdAt) }}</dd></div>
+        <div><dt>结束</dt><dd class="num">{{ fmt(task.finishedAt) }}</dd></div>
         <div class="wide"><dt>工作区</dt><dd class="mono" :title="task.cwd">{{ task.cwd }}</dd></div>
         <div v-if="task.sessionId" class="wide"><dt>会话</dt><dd class="mono">{{ task.sessionId }}</dd></div>
         <div v-if="task.error" class="wide"><dt>错误</dt><dd class="err">{{ task.error }}</dd></div>
       </dl>
 
       <div class="actions">
-        <button v-if="task.state === 'running'" @click="cancel">取消</button>
-        <button v-if="task.state !== 'running'" @click="retry">重试</button>
-        <button v-if="otherAgents.length > 0 && task.state !== 'running'" @click="switching = !switching">
+        <GlassButton v-if="task.state === 'running'" @click="cancel">取消</GlassButton>
+        <GlassButton v-if="task.state !== 'running'" @click="retry">重试</GlassButton>
+        <GlassButton v-if="otherAgents.length > 0 && task.state !== 'running'" @click="switching = !switching">
           换客户端
-        </button>
-        <button v-if="task.state === 'interrupted'" class="danger" @click="markFailed">标记为失败</button>
-        <button @click="openClient">打开客户端</button>
-        <button @click="openWorkspace">打开工作区</button>
-        <button v-if="taskWorkspaces[0]" @click="mergeArtifacts">合并产物</button>
-        <button v-if="taskWorkspaces[0]" @click="cleanWorkspace">立即清理</button>
+        </GlassButton>
+        <GlassButton v-if="task.state === 'interrupted'" variant="danger" @click="markFailed">
+          标记失败
+        </GlassButton>
+        <GlassButton @click="openClient">打开客户端</GlassButton>
+        <GlassButton @click="openWorkspace">打开工作区</GlassButton>
+        <GlassButton v-if="taskWorkspaces[0]" @click="mergeArtifacts">合并产物</GlassButton>
+        <GlassButton v-if="taskWorkspaces[0]" @click="cleanWorkspace">立即清理</GlassButton>
       </div>
 
       <div v-if="switching" class="switch">
-        <button v-for="a in otherAgents" :key="a.id" @click="resubmitOn(a.id)">
-          派发给 {{ a.label }}({{ a.defaultModel === 'client-follow' ? '跟随客户端' : a.defaultModel }})
-        </button>
+        <GlassButton v-for="a in otherAgents" :key="a.id" size="sm" @click="resubmitOn(a.id)">
+          派发给 {{ a.label }}
+        </GlassButton>
       </div>
 
       <div v-if="mergeResult" class="merge">
@@ -155,29 +157,33 @@ function fmt(ts?: number): string {
         <div v-if="!mergeResult.merged.length && !mergeResult.conflicts.length">没有可合并的变更</div>
       </div>
 
-      <div class="continue">
-        <textarea
-          v-model="continueText"
-          rows="2"
-          placeholder="继续对话:追加提示词,派生新任务(会话失效时留空会按新会话派发)"
-          @keydown.enter.exact.prevent="continueConversation"
-        />
-      </div>
-
-      <Timeline :task-id="task.id" />
+      <section class="ws">
+        <h4>工作区登记</h4>
+        <p v-if="taskWorkspaces.length === 0" class="muted">直接使用的工作目录,无派生工作区。</p>
+        <div v-for="row in taskWorkspaces" :key="row.id" class="ws-row">
+          <span class="kind">{{ row.kind }}</span>
+          <span class="path mono" :title="row.path">{{ row.path }}</span>
+          <span class="status" :class="row.status">{{ row.status }}</span>
+        </div>
+      </section>
     </template>
-    <div v-else class="placeholder">选中左侧任务查看详情与时间线</div>
+
+    <div v-else class="placeholder">
+      <p class="big">详情</p>
+      <p class="sub">选中任务后,这里展示元信息与可用操作。</p>
+    </div>
   </aside>
 </template>
 
 <style scoped>
 .detail {
-  background: var(--bg1);
-  padding: 14px;
   display: flex;
   flex-direction: column;
   gap: 10px;
-  overflow: hidden;
+  min-height: 0;
+  height: 100%;
+  padding: 12px 14px;
+  overflow-y: auto;
 }
 
 .head {
@@ -188,22 +194,22 @@ function fmt(ts?: number): string {
 
 .title {
   font-weight: 600;
+  letter-spacing: 0.5px;
 }
 
 .id {
-  font-family: var(--mono);
   font-size: 11px;
-  color: var(--muted);
+  color: var(--faint);
 }
 
 .meta {
   margin: 0;
   display: grid;
   grid-template-columns: 1fr 1fr;
-  gap: 6px 12px;
+  gap: 8px 12px;
+  background: var(--field-bg);
   border: 1px solid var(--line);
-  border-radius: var(--radius);
-  background: var(--bg2);
+  border-radius: var(--radius-md);
   padding: 10px 12px;
 }
 
@@ -226,6 +232,7 @@ function fmt(ts?: number): string {
 
 .mono {
   font-family: var(--mono);
+  font-size: 11.5px;
 }
 
 .err {
@@ -244,7 +251,7 @@ function fmt(ts?: number): string {
   gap: 6px;
   padding: 8px;
   border: 1px dashed var(--line-strong);
-  border-radius: var(--radius);
+  border-radius: var(--radius-md);
 }
 
 .merge {
@@ -252,14 +259,83 @@ function fmt(ts?: number): string {
   color: var(--muted);
 }
 
-.continue textarea {
-  width: 100%;
-  background: var(--bg2);
+.ws {
+  border-radius: var(--radius-md);
+  border: 1px solid var(--line);
+  background: var(--glass-bg);
+  padding: 10px 12px;
+  margin-top: auto;
+}
+
+.ws h4 {
+  margin: 0 0 6px;
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--muted);
+  letter-spacing: 0.3px;
+}
+
+.ws-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 11.5px;
+  padding: 3px 0;
+}
+
+.ws-row .kind {
+  flex: none;
+  color: var(--accent-strong);
+  border: 1px solid var(--accent-line);
+  border-radius: 5px;
+  padding: 0 6px;
+  font-size: 10px;
+}
+
+.ws-row .path {
+  flex: 1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--muted);
+}
+
+.ws-row .status.done {
+  color: var(--ok);
+}
+
+.ws-row .status.active {
+  color: var(--accent-strong);
+}
+
+.muted {
+  color: var(--faint);
+  font-size: 11.5px;
+  margin: 0;
 }
 
 .placeholder {
-  color: var(--muted);
-  margin-top: 40px;
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
   text-align: center;
+  padding: 0 24px;
+}
+
+.big {
+  margin: 0;
+  font-size: 15px;
+  font-weight: 600;
+  letter-spacing: 1px;
+  color: var(--muted);
+}
+
+.sub {
+  margin: 0;
+  font-size: 12px;
+  color: var(--faint);
 }
 </style>

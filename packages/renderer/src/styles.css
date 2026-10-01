@@ -1,21 +1,80 @@
+/* ============================================================
+   AgentDrove 设计系统:冷调青蓝 · 液态玻璃 · 明暗双主题
+   液态玻璃 ≠ 毛玻璃:低透明度面 + backdrop 饱和度提升 + 1px
+   内侧高光(上亮下暗)模拟边缘折射,而不是厚重的白色磨砂。
+   ============================================================ */
+
 :root {
-  /* 冷色科技风:低饱和深底 + 冷蓝焦点,禁用大面积渐变 */
-  --bg0: #0c1116;
-  --bg1: #10171e;
-  --bg2: #151f29;
-  --bg3: #1b2833;
-  --line: rgba(148, 174, 196, 0.1);
-  --line-strong: rgba(148, 174, 196, 0.22);
-  --text: #dfe7ee;
-  --muted: #7f8d9b;
-  --accent: #4da3ff;
-  --accent-dim: rgba(77, 163, 255, 0.14);
-  --ok: #3ddc97;
-  --warn: #ffb454;
-  --err: #ff6b6b;
-  --radius: 10px;
-  --fast: 120ms;
+  /* 品牌色:去饱和冷青蓝,明暗两档 */
+  --accent: #4d9ede;
+  --accent-strong: #6db4ee;
+  --accent-dim: rgba(77, 158, 222, 0.16);
+  --accent-line: rgba(77, 158, 222, 0.45);
+
+  --ok: #46c793;
+  --warn: #d9a44a;
+  --err: #e0645f;
+
+  --fast: 130ms;
+  --ease: cubic-bezier(0.3, 0.7, 0.4, 1);
+  --radius-lg: 16px;
+  --radius-md: 12px;
+  --radius-sm: 9px;
   --mono: 'Cascadia Mono', 'JetBrains Mono', Consolas, monospace;
+  --sans: 'Segoe UI Variable Display', 'Segoe UI', 'Microsoft YaHei UI', system-ui, sans-serif;
+}
+
+/* —— 暗色(默认):近黑蓝灰底,玻璃面微亮 —— */
+:root,
+:root[data-theme='dark'] {
+  color-scheme: dark;
+  --bg: #0d1319;
+  --bg-veil: radial-gradient(120% 90% at 20% 0%, rgba(48, 96, 138, 0.14), transparent 60%),
+    radial-gradient(100% 80% at 85% 100%, rgba(38, 90, 120, 0.1), transparent 55%);
+  --text: #dbe5ee;
+  --muted: #7e8f9e;
+  --faint: #5b6b79;
+
+  --glass-bg: rgba(255, 255, 255, 0.045);
+  --glass-bg-strong: rgba(255, 255, 255, 0.08);
+  --glass-blur: blur(18px) saturate(1.45);
+  --glass-edge: rgba(160, 200, 230, 0.14);
+  --glass-specular: rgba(255, 255, 255, 0.11);
+  --glass-under: rgba(0, 0, 0, 0.22);
+  --glass-shadow: 0 12px 32px rgba(4, 10, 16, 0.45);
+  --field-bg: rgba(8, 14, 20, 0.42);
+  --line: rgba(158, 192, 218, 0.1);
+  --line-strong: rgba(158, 192, 218, 0.24);
+}
+
+/* —— 亮色:银青灰底,玻璃面偏白 —— */
+:root[data-theme='light'] {
+  color-scheme: light;
+  --bg: #e8edf2;
+  --bg-veil: radial-gradient(120% 90% at 20% 0%, rgba(120, 170, 210, 0.2), transparent 60%),
+    radial-gradient(100% 80% at 85% 100%, rgba(100, 155, 195, 0.14), transparent 55%);
+  --text: #1c2630;
+  --muted: #5d6d7c;
+  --faint: #8fa0ae;
+
+  --glass-bg: rgba(255, 255, 255, 0.55);
+  --glass-bg-strong: rgba(255, 255, 255, 0.72);
+  --glass-blur: blur(18px) saturate(1.35);
+  --glass-edge: rgba(255, 255, 255, 0.75);
+  --glass-specular: rgba(255, 255, 255, 0.9);
+  --glass-under: rgba(70, 100, 130, 0.14);
+  --glass-shadow: 0 12px 32px rgba(60, 90, 115, 0.18);
+  --field-bg: rgba(255, 255, 255, 0.6);
+  --line: rgba(70, 100, 130, 0.14);
+  --line-strong: rgba(70, 100, 130, 0.3);
+
+  --accent: #2f7fc1;
+  --accent-strong: #3d8fd0;
+  --accent-dim: rgba(47, 127, 193, 0.12);
+  --accent-line: rgba(47, 127, 193, 0.4);
+  --ok: #1d9e6d;
+  --warn: #b07f28;
+  --err: #c74f4a;
 }
 
 * {
@@ -27,63 +86,68 @@ body,
 #app {
   height: 100%;
   margin: 0;
-  background: var(--bg0);
-  color: var(--text);
-  font: 13px/1.55 'Segoe UI', 'Microsoft YaHei UI', system-ui, sans-serif;
   overflow: hidden;
 }
 
+body {
+  background: var(--bg);
+  color: var(--text);
+  font: 13px/1.55 var(--sans);
+  -webkit-font-smoothing: antialiased;
+}
+
+/* 环境底:柔光斑 + 细噪点,避免纯平的"数字感" */
+#app {
+  position: relative;
+  background: var(--bg-veil), var(--bg);
+}
+
+#app::before {
+  content: '';
+  position: fixed;
+  inset: 0;
+  pointer-events: none;
+  opacity: 0.05;
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='140' height='140'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.85' numOctaves='2'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)'/%3E%3C/svg%3E");
+}
+
+/* —— 液态玻璃面:调用方只管叠 class,配方集中在这里 —— */
+.glass {
+  position: relative;
+  background: var(--glass-bg);
+  backdrop-filter: var(--glass-blur);
+  -webkit-backdrop-filter: var(--glass-blur);
+  border: 1px solid var(--glass-edge);
+  border-radius: var(--radius-lg);
+  box-shadow: var(--glass-shadow), inset 0 1px 0 var(--glass-specular),
+    inset 0 -1px 0 var(--glass-under);
+}
+
+/* 顶缘流光:玻璃的"高光带",hover 时轻微增强 */
+.glass::after {
+  content: '';
+  position: absolute;
+  inset: 0;
+  border-radius: inherit;
+  pointer-events: none;
+  background: linear-gradient(160deg, rgba(255, 255, 255, 0.07), transparent 38%);
+  opacity: 0.7;
+  transition: opacity var(--fast) var(--ease);
+}
+
+.glass:hover::after {
+  opacity: 1;
+}
+
+.glass-strong {
+  background: var(--glass-bg-strong);
+}
+
+/* —— 基础控件:统一走 ui/ 玻璃组件,这里只留全局兜底 —— */
 button {
   font: inherit;
   color: var(--text);
-  background: var(--bg2);
-  border: 1px solid var(--line);
-  border-radius: 8px;
-  padding: 4px 12px;
-  cursor: pointer;
   white-space: nowrap;
-  transition: border-color var(--fast), background var(--fast), transform var(--fast);
-}
-
-button:hover {
-  border-color: var(--line-strong);
-  background: var(--bg3);
-}
-
-button:active {
-  transform: translateY(1px);
-}
-
-button.primary {
-  background: var(--accent-dim);
-  border-color: rgba(77, 163, 255, 0.45);
-  color: var(--accent);
-}
-
-button.primary:hover {
-  background: rgba(77, 163, 255, 0.22);
-}
-
-button.danger {
-  color: var(--err);
-  border-color: rgba(255, 107, 107, 0.35);
-}
-
-button.ghost {
-  background: transparent;
-  border-color: transparent;
-  color: var(--muted);
-}
-
-button.ghost:hover {
-  color: var(--text);
-  border-color: var(--line);
-}
-
-button:disabled {
-  opacity: 0.45;
-  cursor: default;
-  transform: none;
 }
 
 input,
@@ -91,22 +155,13 @@ textarea,
 select {
   font: inherit;
   color: var(--text);
-  background: var(--bg1);
-  border: 1px solid var(--line);
-  border-radius: 8px;
-  padding: 6px 10px;
   outline: none;
-  transition: border-color var(--fast);
 }
 
-input:focus,
-textarea:focus,
-select:focus {
-  border-color: rgba(77, 163, 255, 0.55);
-}
-
-textarea {
-  resize: none;
+:focus-visible {
+  outline: 2px solid var(--accent-line);
+  outline-offset: 1px;
+  border-radius: var(--radius-sm);
 }
 
 ::-webkit-scrollbar {
@@ -115,7 +170,7 @@ textarea {
 }
 
 ::-webkit-scrollbar-thumb {
-  background: rgba(148, 174, 196, 0.16);
+  background: var(--line-strong);
   border-radius: 4px;
 }
 
@@ -123,8 +178,13 @@ textarea {
   background: transparent;
 }
 
+.num {
+  font-family: var(--mono);
+  font-variant-numeric: tabular-nums;
+}
+
 .view {
-  animation: view-in var(--fast) ease-out;
+  animation: view-in var(--fast) var(--ease);
 }
 
 @keyframes view-in {
@@ -140,5 +200,6 @@ textarea {
   * {
     animation: none !important;
     transition: none !important;
+    backdrop-filter: none !important;
   }
 }
