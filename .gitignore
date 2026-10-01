@@ -10,3 +10,8 @@ Thumbs.db
 *.local
 # 方案文档仅本地保留,不入版本库
 docs/
+
+# B 线:构建发版产物与热更 bundles
+packages/*/release/
+bundles/
+*.bak-*

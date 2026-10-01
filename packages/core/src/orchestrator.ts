@@ -51,6 +51,8 @@ export interface SubmitRequest {
   parentId?: string
   retryOf?: string
   attempt?: number
+  /** 组合根预生成 id 的场景(派生工作区需先于任务登记) */
+  id?: string
 }
 
 export interface OrchestratorDeps {
@@ -68,6 +70,8 @@ export interface OrchestratorDeps {
   onRunStart?: (task: TaskRecord) => unknown
   /** run 到达收尾(含取消/失败)后扫描产物 */
   onRunEnd?: (task: TaskRecord, baseline: unknown) => void | Promise<void>
+  /** 放行后的健康闸(6.7):不通过则任务落 failed(自动返还,可触发降级);走缓存而非 bypass */
+  healthAtRelease?: (agentId: AgentId) => Promise<{ ok: boolean; reason?: string }>
 }
 
 export type TerminalListener = (task: TaskRecord) => void
@@ -152,7 +156,7 @@ export class Orchestrator {
     this.throttle.checkCapAtSubmit(profile)
     const now = this.clock.now()
     const task: TaskRecord = {
-      id: randomUUID(),
+      id: request.id ?? randomUUID(),
       agentId: profile.id,
       modelId,
       prompt: request.prompt,
@@ -400,6 +404,19 @@ export class Orchestrator {
     profile: ReturnType<Registry['get']>,
     driver: AgentDriver,
   ): Promise<void> {
+    // 健康闸在进入 running 之前:不通过走 queued→failed,
+    // 未运行即终态自动返还计数,并经终态钩子交给降级决策
+    if (this.deps.healthAtRelease) {
+      const report = await this.deps.healthAtRelease(profile.id).catch(() => ({
+        ok: false,
+        reason: '健康检查失败',
+      }))
+      if (!report.ok) {
+        this.failTask(task, `客户端不健康:${report.reason ?? '未知原因'}`)
+        this.tryRelease()
+        return
+      }
+    }
     this.transition(task, 'running')
     const controller = new AbortController()
     this.controllers.set(task.id, controller)

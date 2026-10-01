@@ -152,6 +152,32 @@ describe('编排器 × 节流器', () => {
     })
   })
 
+  it('放行健康闸不通过:任务 failed、计数返还、错误带原因', async () => {
+    const registry = new Registry()
+    registry.register({ ...zcodeProfile })
+    const repo = new MemoryTaskRepository()
+    const ledger = new MemoryUsageLedger()
+    const throttle = new Throttle(ledger, { now: () => Date.now(), monotonic: () => performance.now() }, {
+      globalConcurrency: 4,
+      minIntervalMs: 0,
+      jitterMs: 0,
+    })
+    const orchestrator = new Orchestrator(registry, {
+      repo,
+      sink: new PassthroughSink(repo),
+      defaultCwd: 'C:/tmp/ws',
+      throttle,
+      healthAtRelease: async () => ({ ok: false, reason: '未登录' }),
+    })
+    orchestrator.registerDriver(new MockDriver('zcode'))
+    const task = orchestrator.submit({ agentId: 'zcode', prompt: '不健康场景' })
+    await waitFor(() => task.state === 'failed')
+    expect(task.error).toContain('客户端不健康')
+    expect(task.error).toContain('未登录')
+    expect(ledger.countOf('zcode', localDayOf(Date.now()))).toBe(0)
+    expect(task.startedAt).toBeUndefined() // 未运行即失败
+  })
+
   it('modelSwitch=none 的档案任务统一记哨兵', () => {
     const { orchestrator } = setup({})
     orchestrator.registerDriver(new MockDriver('zcode'))

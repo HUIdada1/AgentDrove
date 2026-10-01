@@ -38,7 +38,7 @@ export class ArtifactScanner {
     return { kind: 'worktree', repo, worktree, baseHead }
   }
 
-  snapshotDir(dir: string): ArtifactBaseline {
+  snapshotDir(dir: string): Extract<ArtifactBaseline, { kind: 'snapshot' }> {
     return { kind: 'snapshot', dir, files: this.walk(dir) }
   }
 

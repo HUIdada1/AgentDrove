@@ -2,20 +2,31 @@
   "name": "@agent-drove/main",
   "version": "0.1.0",
   "author": "沐辉",
+  "description": "AgentDrove 桌面端:统一调度本机 AI agent 客户端,池化套餐额度",
   "private": true,
   "type": "module",
+  "main": "dist/app.cjs",
   "scripts": {
+    "build": "tsc -p tsconfig.build.json",
+    "bundle": "node scripts/bundle.mjs",
     "test": "vitest run",
     "headless": "tsx src/headless.ts"
   },
   "dependencies": {
-    "@agent-drove/core": "workspace:*",
     "better-sqlite3": "^11.10.0",
+    "electron-updater": "^6.3.9",
     "yaml": "^2.6.1"
   },
   "devDependencies": {
+    "@agent-drove/core": "workspace:*",
+    "@agent-drove/shared": "workspace:*",
+    "@electron/asar": "^3.2.10",
+    "@electron/rebuild": "^3.7.1",
     "@types/better-sqlite3": "^7.6.12",
     "@types/node": "^22.10.0",
+    "electron": "^33.2.1",
+    "electron-builder": "^25.1.8",
+    "esbuild": "^0.24.0",
     "tsx": "^4.19.2",
     "typescript": "^5.5.4",
     "vitest": "^2.1.9"

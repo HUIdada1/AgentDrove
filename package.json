@@ -1,9 +1,13 @@
 {
   "name": "agent-drove",
+  "version": "0.1.0",
   "author": "沐辉",
   "private": true,
   "packageManager": "pnpm@8.15.9",
   "scripts": {
-    "test": "pnpm -r run test"
+    "build": "pnpm --filter @agent-drove/core build && pnpm --filter @agent-drove/shared build && pnpm --filter @agent-drove/renderer build && pnpm --filter @agent-drove/main bundle",
+    "test": "pnpm -r run test",
+    "pack": "pnpm run build && cd packages/main && npx electron-builder --win nsis",
+    "release": "node scripts/release.mjs"
   }
 }

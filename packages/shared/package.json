@@ -1,5 +1,5 @@
 {
-  "name": "@agent-drove/core",
+  "name": "@agent-drove/shared",
   "version": "0.1.0",
   "author": "沐辉",
   "private": true,
@@ -11,15 +11,12 @@
     }
   },
   "scripts": {
-    "build": "tsc -p tsconfig.build.json",
-    "test": "vitest run"
+    "build": "tsc -p tsconfig.json"
   },
   "dependencies": {
-    "iconv-lite": "^0.6.3"
+    "@agent-drove/core": "workspace:*"
   },
   "devDependencies": {
-    "@types/node": "^22.10.0",
-    "typescript": "^5.5.4",
-    "vitest": "^2.1.9"
+    "typescript": "^5.5.4"
   }
 }

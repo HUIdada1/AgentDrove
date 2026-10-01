@@ -4,6 +4,8 @@ import Database from 'better-sqlite3'
 import type {
   JournalEntry,
   JournalStore,
+  ModelPreset,
+  PlanInfo,
   StoredEvent,
   TaskRecord,
   TaskRepository,
@@ -227,6 +229,19 @@ export class SqliteStore
     return { taskCount: row?.task_count ?? 0, estimated: row?.estimated ?? 0 }
   }
 
+  /** 周报/导出用:全量用量行 */
+  allUsageRows(): Array<{ agentId: string; day: string; taskCount: number; estimated: number }> {
+    const rows = this.db
+      .prepare('SELECT agent_id, day, task_count, estimated FROM usage ORDER BY day DESC')
+      .all() as Array<{ agent_id: string; day: string; task_count: number; estimated: number }>
+    return rows.map((row) => ({
+      agentId: row.agent_id,
+      day: row.day,
+      taskCount: row.task_count,
+      estimated: row.estimated,
+    }))
+  }
+
   // ---- JournalStore ----
 
   append(entry: JournalEntry): void {
@@ -296,6 +311,72 @@ export class SqliteStore
 
   delete(id: string): void {
     this.db.prepare('DELETE FROM workspaces WHERE id = ?').run(id)
+  }
+
+  // ---- agents 持久化(重启恢复启用状态与最近探测信息)----
+
+  upsertAgent(profile: {
+    id: string
+    label: string
+    driver: string
+    entry: string
+    version?: string
+    logoPath?: string
+    plan: PlanInfo
+    models: ModelPreset[]
+    defaultModel: string
+    enabled: boolean
+    supportedVersions?: string
+  }): void {
+    this.db
+      .prepare(
+        `INSERT OR REPLACE INTO agents
+         (id, label, driver, entry, version, logo_path, plan_json, models_json,
+          default_model, enabled, supported_versions)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      )
+      .run(
+        profile.id,
+        profile.label,
+        profile.driver,
+        profile.entry,
+        profile.version ?? null,
+        profile.logoPath ?? null,
+        JSON.stringify(profile.plan),
+        JSON.stringify(profile.models),
+        profile.defaultModel,
+        profile.enabled ? 1 : 0,
+        profile.supportedVersions ?? null,
+      )
+  }
+
+  allAgents(): Array<{
+    id: string
+    label: string
+    driver: string
+    entry: string
+    version?: string
+    logoPath?: string
+    plan: PlanInfo
+    models: ModelPreset[]
+    defaultModel: string
+    enabled: boolean
+    supportedVersions?: string
+  }> {
+    const rows = this.db.prepare('SELECT * FROM agents').all() as AgentRow[]
+    return rows.map((row) => ({
+      id: row.id,
+      label: row.label,
+      driver: row.driver,
+      entry: row.entry,
+      version: row.version ?? undefined,
+      logoPath: row.logo_path ?? undefined,
+      plan: JSON.parse(row.plan_json) as PlanInfo,
+      models: JSON.parse(row.models_json) as ModelPreset[],
+      defaultModel: row.default_model,
+      enabled: row.enabled === 1,
+      supportedVersions: row.supported_versions ?? undefined,
+    }))
   }
 
   // ---- 保留期清理(5.4)----
@@ -399,6 +480,20 @@ interface JournalRow {
   agent_id: string | null
   task_id: string | null
   detail: string | null
+}
+
+interface AgentRow {
+  id: string
+  label: string
+  driver: string
+  entry: string
+  version: string | null
+  logo_path: string | null
+  plan_json: string
+  models_json: string
+  default_model: string
+  enabled: number
+  supported_versions: string | null
 }
 
 interface WorkspaceSqlRow {

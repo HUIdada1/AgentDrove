@@ -1,0 +1,144 @@
+:root {
+  /* 冷色科技风:低饱和深底 + 冷蓝焦点,禁用大面积渐变 */
+  --bg0: #0c1116;
+  --bg1: #10171e;
+  --bg2: #151f29;
+  --bg3: #1b2833;
+  --line: rgba(148, 174, 196, 0.1);
+  --line-strong: rgba(148, 174, 196, 0.22);
+  --text: #dfe7ee;
+  --muted: #7f8d9b;
+  --accent: #4da3ff;
+  --accent-dim: rgba(77, 163, 255, 0.14);
+  --ok: #3ddc97;
+  --warn: #ffb454;
+  --err: #ff6b6b;
+  --radius: 10px;
+  --fast: 120ms;
+  --mono: 'Cascadia Mono', 'JetBrains Mono', Consolas, monospace;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body,
+#app {
+  height: 100%;
+  margin: 0;
+  background: var(--bg0);
+  color: var(--text);
+  font: 13px/1.55 'Segoe UI', 'Microsoft YaHei UI', system-ui, sans-serif;
+  overflow: hidden;
+}
+
+button {
+  font: inherit;
+  color: var(--text);
+  background: var(--bg2);
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  padding: 4px 12px;
+  cursor: pointer;
+  white-space: nowrap;
+  transition: border-color var(--fast), background var(--fast), transform var(--fast);
+}
+
+button:hover {
+  border-color: var(--line-strong);
+  background: var(--bg3);
+}
+
+button:active {
+  transform: translateY(1px);
+}
+
+button.primary {
+  background: var(--accent-dim);
+  border-color: rgba(77, 163, 255, 0.45);
+  color: var(--accent);
+}
+
+button.primary:hover {
+  background: rgba(77, 163, 255, 0.22);
+}
+
+button.danger {
+  color: var(--err);
+  border-color: rgba(255, 107, 107, 0.35);
+}
+
+button.ghost {
+  background: transparent;
+  border-color: transparent;
+  color: var(--muted);
+}
+
+button.ghost:hover {
+  color: var(--text);
+  border-color: var(--line);
+}
+
+button:disabled {
+  opacity: 0.45;
+  cursor: default;
+  transform: none;
+}
+
+input,
+textarea,
+select {
+  font: inherit;
+  color: var(--text);
+  background: var(--bg1);
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  padding: 6px 10px;
+  outline: none;
+  transition: border-color var(--fast);
+}
+
+input:focus,
+textarea:focus,
+select:focus {
+  border-color: rgba(77, 163, 255, 0.55);
+}
+
+textarea {
+  resize: none;
+}
+
+::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+
+::-webkit-scrollbar-thumb {
+  background: rgba(148, 174, 196, 0.16);
+  border-radius: 4px;
+}
+
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+.view {
+  animation: view-in var(--fast) ease-out;
+}
+
+@keyframes view-in {
+  from {
+    opacity: 0;
+  }
+  to {
+    opacity: 1;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  * {
+    animation: none !important;
+    transition: none !important;
+  }
+}

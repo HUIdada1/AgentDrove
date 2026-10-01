@@ -1,0 +1,50 @@
+# AgentDrove 打包配置(electron-builder 25)
+# 产物仅 NSIS 安装版;发布渠道 GitHub Releases(owner=HUIdada1/repo=AgentDrove),
+# electron-updater 依赖下方 publish 元数据生成/消费 latest.yml。
+appId: dev.muhui.agentdrove
+productName: AgentDrove
+copyright: Copyright © 2026 沐辉
+
+directories:
+  output: release
+
+# app.cjs + preload/index.cjs 在 dist 内;renderer 按主进程加载路径
+# (app.ts 打包期查找 <asar>/renderer/index.html)映射到 asar 根,避免重复计入 dist 副本。
+# from/to 映射模式下 package.json 不会自动入包,必须显式声明(electron 入口定位依赖它)
+files:
+  - package.json
+  - from: dist
+    to: dist
+    filter:
+      - "**/*"
+      - "!renderer/**"
+  - from: dist/renderer
+    to: renderer
+    filter:
+      - "**/*"
+  - build/icon.png
+
+# better-sqlite3 原生模块必须解包出 asar
+asarUnpack:
+  - "**/*.node"
+
+# 托盘图标兜底路径(shell/tray.ts -> resources/icon.png)
+extraResources:
+  - from: build/icon.png
+    to: icon.png
+
+win:
+  target: nsis
+  icon: build/icon.ico
+
+nsis:
+  oneClick: false
+  perMachine: false
+  allowToChangeInstallationDirectory: true
+  artifactName: AgentDrove-Setup-${version}.exe
+  # Publisher 显示取包 package.json 的 author(沐辉),25 版 schema 无 publisherName 字段
+
+publish:
+  provider: github
+  owner: HUIdada1
+  repo: AgentDrove

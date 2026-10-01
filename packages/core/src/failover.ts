@@ -24,11 +24,16 @@ export interface FailoverOutcome {
  * 换端不带 sessionId:各客户端会话命名空间不互通,续聊只在本端链内有效。
  */
 export class Failover {
+  /** 设置页可运行时改写(编排器持有同一实例) */
+  config: { enabled: boolean; maxRetries: number }
+
   constructor(
     private readonly registry: Registry,
     private readonly orchestrator: Orchestrator,
-    private readonly config: { enabled: boolean; maxRetries: number },
-  ) {}
+    config: { enabled: boolean; maxRetries: number },
+  ) {
+    this.config = config
+  }
 
   get enabled(): boolean {
     return this.config.enabled
