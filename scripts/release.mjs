@@ -51,7 +51,9 @@ function writeJSON(p, obj) {
 
 function run(cmd, args, opts = {}) {
   log(`\n==> ${cmd} ${args.join(' ')}`)
-  const r = spawnSync(cmd, args, { stdio: 'inherit', shell: true, cwd: repoRoot, ...opts })
+  // pnpm/npx 在 Windows 上是 .cmd  shim,需经 cmd.exe 执行;git/gh 是原生 exe,不走 shell
+  const needsShell = process.platform === 'win32' && /^(pnpm|npx|npm)$/.test(cmd)
+  const r = spawnSync(cmd, args, { stdio: 'inherit', shell: needsShell, cwd: repoRoot, ...opts })
   if (r.status !== 0) die(`命令失败(退出码 ${r.status}): ${cmd} ${args.join(' ')}`)
   return r
 }
@@ -217,7 +219,7 @@ function publishRelease(prevTag) {
     log(`[release] 已推送标签 ${tag}`)
   }
 
-  const ghCheck = spawnSync('gh', ['--version'], { encoding: 'utf8', shell: true })
+  const ghCheck = spawnSync('gh', ['--version'], { encoding: 'utf8', shell: false })
   if (ghCheck.error || ghCheck.status !== 0) {
     log('\n[release] 未检测到 GitHub CLI(gh)。请安装 GitHub CLI 并执行 gh auth login,')
     log('[release] 或手动上传以下资产到 GitHub Releases:')

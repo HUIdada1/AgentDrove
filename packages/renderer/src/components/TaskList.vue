@@ -34,6 +34,9 @@ async function batchCancel(): Promise<void> {
 }
 
 async function batchDelete(): Promise<void> {
+  const count = store.selection.value.size
+  if (count === 0) return
+  if (!window.confirm(`删除 ${count} 条任务及其事件记录?运行中的任务会跳过。`)) return
   await window.api.tasksBatchDelete([...store.selection.value])
   store.selection.value = new Set()
   await store.refreshTasks()

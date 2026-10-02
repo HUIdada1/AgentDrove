@@ -165,5 +165,4 @@ export function installDevMock(): void {
     filePath: (file) => file.name,
   }
   window.api = mock
-  void installDevMock
 }

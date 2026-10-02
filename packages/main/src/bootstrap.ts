@@ -1,5 +1,5 @@
 import { createHash } from 'node:crypto'
-import { existsSync, readFileSync } from 'node:fs'
+import { existsSync, readdirSync, readFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { satisfiesRange } from '@agent-drove/core'
 
@@ -96,7 +96,6 @@ export function resolveBundleDir(bundlesDir: string, shellVersion: string): {
 
 function listBundleDirs(bundlesDir: string): string[] {
   try {
-    const { readdirSync } = require('node:fs') as typeof import('node:fs')
     return readdirSync(bundlesDir)
       .filter((name) => name.startsWith('app-'))
       .sort()

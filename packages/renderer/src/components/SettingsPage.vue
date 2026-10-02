@@ -423,7 +423,7 @@ async function runExport(kind: 'data' | 'report'): Promise<void> {
 .prog {
   height: 4px;
   border-radius: 2px;
-  background: rgba(148, 174, 196, 0.12);
+  background: var(--chip-bg);
   overflow: hidden;
 }
 
@@ -434,8 +434,8 @@ async function runExport(kind: 'data' | 'report'): Promise<void> {
 }
 
 .conflict {
-  border: 1px solid rgba(255, 107, 107, 0.35);
-  background: rgba(255, 107, 107, 0.08);
+  border: 1px solid color-mix(in srgb, var(--err) 40%, transparent);
+  background: color-mix(in srgb, var(--err) 9%, transparent);
   color: var(--err);
   border-radius: var(--radius-md);
   padding: 8px 10px;

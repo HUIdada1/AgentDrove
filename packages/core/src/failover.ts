@@ -67,9 +67,8 @@ export class Failover {
           retryOf: failedTask.id,
         })
         return { derived }
-      } catch (error) {
+      } catch {
         // 候选检查与派生之间存在竞态(如 cap 满),换下一候选
-        void error
         continue
       }
     }
@@ -89,19 +88,28 @@ export function attachFailover(
 ): void {
   const listener: TerminalListener = (task) => {
     if (task.state !== 'failed') return
-    void failover.deriveFor(task, ctx).then((outcome) => {
-      if (outcome.derived) {
+    void failover
+      .deriveFor(task, ctx)
+      .then((outcome) => {
+        if (outcome.derived) {
+          orchestrator.emitTaskEvent(task.id, {
+            kind: 'warning',
+            text: `已降级派生新任务(客户端 ${outcome.derived.agentId},attempt=${outcome.derived.attempt})`,
+          })
+        } else if (outcome.reason) {
+          orchestrator.emitTaskEvent(task.id, {
+            kind: 'warning',
+            text: `自动降级未执行:${outcome.reason}`,
+          })
+        }
+      })
+      .catch((error: unknown) => {
+        // 降级决策自身失败(如上下文函数抛错)只留 warning,不允许未处理拒绝
         orchestrator.emitTaskEvent(task.id, {
           kind: 'warning',
-          text: `已降级派生新任务(客户端 ${outcome.derived.agentId},attempt=${outcome.derived.attempt})`,
+          text: `自动降级异常:${error instanceof Error ? error.message : String(error)}`,
         })
-      } else if (outcome.reason) {
-        orchestrator.emitTaskEvent(task.id, {
-          kind: 'warning',
-          text: `自动降级未执行:${outcome.reason}`,
-        })
-      }
-    })
+      })
   }
   orchestrator.onTaskTerminal(listener)
 }

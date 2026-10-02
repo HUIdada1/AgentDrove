@@ -149,6 +149,13 @@ async function main(): Promise<number> {
         resolve(2)
       }
     }, 200)
+    // 驱动失联(进程消失且无终态事件)时不能让冒烟脚本挂死,超时也按失败退出
+    const watchdogMs = (args.timeoutMs ?? 600_000) + 30_000
+    setTimeout(() => {
+      clearInterval(timer)
+      console.error(`等待终态超时(${Math.round(watchdogMs / 1000)}s),按失败退出`)
+      resolve(1)
+    }, watchdogMs).unref()
   })
 }
 

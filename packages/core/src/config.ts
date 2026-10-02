@@ -76,20 +76,10 @@ export const DEFAULT_CONFIG: AppConfig = {
 
 /** 用户覆盖与内置默认合并;非对象/缺失字段一律回落默认,用户手改 YAML 不至于炸启动 */
 export function mergeConfig(defaults: AppConfig, override: unknown): AppConfig {
-  const merged = deepMerge(defaults, override) as AppConfig
-  return {
-    ...merged,
-    task: { ...DEFAULT_CONFIG.task, ...merged.task },
-    ui: { ...DEFAULT_CONFIG.ui, ...merged.ui },
-    throttle: { ...DEFAULT_CONFIG.throttle, ...merged.throttle },
-    notify: { ...DEFAULT_CONFIG.notify, ...merged.notify },
-    mcp: { ...DEFAULT_CONFIG.mcp, ...merged.mcp },
-    danger: { ...DEFAULT_CONFIG.danger, ...merged.danger },
-    update: { ...DEFAULT_CONFIG.update, ...merged.update },
-  }
+  return deepMerge(defaults, override) as AppConfig
 }
 
-/** 始终重建对象,避免默认值嵌套引用被调用方意外改写;非对象覆盖整体忽略 */
+/** 始终重建对象/数组,避免默认值嵌套引用被调用方意外改写;非对象覆盖整体忽略 */
 function deepMerge(base: unknown, patch: unknown): unknown {
   if (isPlainObject(base)) {
     const patchObject = isPlainObject(patch) ? patch : {}
@@ -98,6 +88,10 @@ function deepMerge(base: unknown, patch: unknown): unknown {
       out[key] = deepMerge(base[key], patchObject[key])
     }
     return out
+  }
+  // 数组叶子(如 denyList)必须克隆,否则调用方改穿内置默认
+  if (Array.isArray(base)) {
+    return patch === undefined ? [...base] : patch
   }
   return patch === undefined ? base : patch
 }

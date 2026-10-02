@@ -31,15 +31,26 @@ watch(
   { immediate: true },
 )
 
+// 主进程推送仅携带事件批,详情元数据(会话 id/结束时间/错误)靠轻量轮询兜底;
+// 每实例独立定时器,卸载即清——模块级共享会让旧实例的回填盖掉新选中任务
 const poll = setInterval(async () => {
-  if (!store.selectedTaskId.value) return
-  const fresh = await window.api.tasksGet(store.selectedTaskId.value)
-  if (fresh && fresh.state !== task.value?.state) {
-    task.value = fresh
-    await store.refreshAgents()
-  }
-}, 800)
+  const id = store.selectedTaskId.value
+  if (!id) return
+  const fresh = await window.api.tasksGet(id)
+  if (!fresh || store.selectedTaskId.value !== id) return
+  if (fresh !== task.value) task.value = fresh
+}, 2000)
 onUnmounted(() => clearInterval(poll))
+
+// 选中任务到达终态后刷一次用量(完成/失败都影响今日计数)
+watch(
+  () => task.value?.state,
+  async (state, prev) => {
+    if (state !== prev && state && state !== 'queued' && state !== 'running') {
+      await store.refreshAgents()
+    }
+  },
+)
 
 async function cancel(): Promise<void> {
   if (!task.value) return

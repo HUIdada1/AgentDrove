@@ -136,7 +136,6 @@ export interface PushEvents {
 
 export interface AgentDroveApi extends PushEvents {
   // agents:*
-  // agents:*
   agentsList(): Promise<AgentView[]>
   agentsSetEnabled(agentId: string, enabled: boolean): Promise<void>
   // tasks:*

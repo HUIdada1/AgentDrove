@@ -41,14 +41,18 @@ export function initUpdater(deps: UpdaterDeps): UpdateController & { dispose(): 
     deps.onStatus({ phase: 'error', detail: error.message }),
   )
 
-  const timer = setInterval(() => void autoUpdater.checkForUpdates(), 4 * 3600_000)
+  const check = (): void => {
+    void autoUpdater.checkForUpdates().catch(() => {
+      // 事件通道已推 error 状态,此处不再抛出
+    })
+  }
+  // 启动即查一次,之后每 4h;定时器不阻止进程退出
+  check()
+  const timer = setInterval(check, 4 * 3600_000)
+  timer.unref()
 
   return {
-    checkForUpdates: () => {
-      void autoUpdater.checkForUpdates().catch(() => {
-        // 事件通道已推 error 状态,此处不再抛出
-      })
-    },
+    checkForUpdates: check,
     installUpdate: () => {
       void autoUpdater.quitAndInstall()
     },

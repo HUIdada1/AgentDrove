@@ -92,7 +92,8 @@ export async function confirmExitWithRunning(
     type: 'question',
     title: '存在运行中的任务',
     message: `还有 ${runningCount} 个任务正在运行,如何处理?`,
-    buttons: ['等待完成(隐藏到托盘)', '取消任务并退出', '强制退出(标记为 interrupted)'],
+    // 中断语义:进程退出后由下次启动恢复为 interrupted;取消语义才是立即 canceled
+    buttons: ['等待完成(隐藏到托盘)', '取消任务并退出', '退出(任务标记为 interrupted)'],
     defaultId: 0,
     cancelId: 0,
   })

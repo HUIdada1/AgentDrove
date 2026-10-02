@@ -35,6 +35,22 @@ node scripts/release.mjs --no-upload      # 只构建不出包上传
 node scripts/release.mjs --skip-bundle    # 跳过轨道 B 热更产物
 ```
 
+## 环境变量
+
+主进程启动时读取(均为可选):
+
+| 变量 | 默认 | 说明 |
+| --- | --- | --- |
+| `AGENTDROVE_ZCODE_CLI` | `E:\ZCode\resources\glm\zcode.cjs` | ZCode CLI 入口路径,探测与派发的唯一事实源 |
+| `AGENTDROVE_TRAE_ROOTS` | `E:\Trae_guoji;E:\Trae` | Trae 安装根目录候选,分号分隔,逐个探测取首个命中 |
+| `VITE_DEV_SERVER_URL` | — | 开发模式渲染层入口(如 `http://localhost:5183`),缺省按打包/开发 dist 查找 |
+
+无头冒烟(不走 GUI,按终态给退出码):
+
+```bash
+pnpm --filter @agent-drove/main headless --prompt "你好" [--cwd dir] [--mode build] [--deny Bash,Write] [--resume 会话id] [--timeout ms]
+```
+
 ## 目录结构
 
 ```

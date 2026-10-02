@@ -34,12 +34,18 @@ async function loadInitial(taskId: string): Promise<void> {
 }
 
 async function loadOlder(): Promise<void> {
-  if (!task.value || events.value.length === 0 || loadingOlder.value) return
+  const id = task.value?.id
+  if (!id || events.value.length === 0 || loadingOlder.value) return
   loadingOlder.value = true
   const firstSeq = events.value[0]!.seq
   const el = scrollEl.value
   const beforeHeight = el?.scrollHeight ?? 0
-  const page = await window.api.tasksEventsPage({ taskId: task.value.id, beforeSeq: firstSeq, limit: 200 })
+  const page = await window.api.tasksEventsPage({ taskId: id, beforeSeq: firstSeq, limit: 200 })
+  // 等待期间用户切换了任务:丢弃过期页,避免把别的任务事件拼进当前流
+  if (task.value?.id !== id || events.value[0]?.seq !== firstSeq) {
+    loadingOlder.value = false
+    return
+  }
   events.value = [...page, ...events.value]
   await nextTick()
   // prepend 后补偿滚动位置,避免视觉跳动
@@ -73,10 +79,14 @@ watch(
   },
 )
 
+// 任务到达终态(未运行即失败会触发返还/计费变化)刷一次用量;
+// queued→running 的 charging 已在派发响应路径刷新过,这里不重复拉
 watch(
   () => task.value?.state,
-  async () => {
-    if (store.selectedTaskId.value) await store.refreshAgents()
+  async (state) => {
+    if (store.selectedTaskId.value && state && state !== 'queued' && state !== 'running') {
+      await store.refreshAgents()
+    }
   },
 )
 
@@ -128,7 +138,8 @@ const STATE_TEXT: Record<string, string> = {
       </header>
 
       <div ref="scrollEl" class="stream" @scroll="onScroll">
-        <button v-if="events.length >= 200" class="older" @click="loadOlder">
+        <!-- 事件 seq 从 1 起连续分配,首条 seq=1 即已到顶 -->
+        <button v-if="events.length > 0 && events[0]!.seq > 1" class="older" @click="loadOlder">
           {{ loadingOlder ? '加载中…' : '加载更早' }}
         </button>
 
@@ -227,7 +238,7 @@ const STATE_TEXT: Record<string, string> = {
   font-size: 11px;
   padding: 1px 9px;
   border-radius: 999px;
-  background: rgba(148, 174, 196, 0.12);
+  background: var(--chip-bg);
   color: var(--muted);
 }
 

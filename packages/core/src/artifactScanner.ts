@@ -59,7 +59,9 @@ export class ArtifactScanner {
       if (line.length < 4) continue
       const x = line[0]
       const y = line[1]
-      const path = line.slice(3).trim()
+      // 重命名条目形如 "R  old -> new",产物清单只关心新路径
+      const rawPath = line.slice(3).trim()
+      const path = x === 'R' || y === 'R' ? (rawPath.split(' -> ').pop() ?? rawPath) : rawPath
       const change =
         x === '?' || x === 'A' || y === 'A'
           ? 'added'

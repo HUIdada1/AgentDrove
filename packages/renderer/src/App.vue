@@ -8,12 +8,14 @@ import SessionColumn from './components/SessionColumn.vue'
 import TaskDetail from './components/TaskDetail.vue'
 import SettingsPage from './components/SettingsPage.vue'
 import MiniBar from './components/MiniBar.vue'
+import FxLayers from './components/FxLayers.vue'
 
 const store = useAppStore()
 const isMini = computed(() => window.location.hash === '#mini')
 </script>
 
 <template>
+  <FxLayers />
   <MiniBar v-if="isMini" />
   <SettingsPage v-else-if="store.view.value === 'settings'" />
   <!-- 四栏:可收缩 Agent 侧栏 / 任务列表 / 会话流 / 详情 -->

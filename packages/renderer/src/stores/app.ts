@@ -27,6 +27,11 @@ const selection = ref<Set<string>>(new Set())
 const filter = ref({ search: '', agentId: '', state: '' })
 const liveEvents = shallowRef(new Map<string, StoredEvent[]>())
 
+/** 每任务在渲染层保留的实时事件条数(与主进程推送窗口配套,完整历史走分页拉取) */
+const LIVE_EVENTS_PER_TASK = 500
+/** 实时事件缓存的任务槽上限:长跑不清理会让已完成任务的缓冲无限堆积 */
+const LIVE_EVENTS_MAX_TASKS = 50
+
 export function useAppStore() {
   return {
     agents,
@@ -103,12 +108,24 @@ export function installAppBridge(): void {
     (theme) => applyTheme(theme),
     { immediate: true },
   )
+  // auto 模式下跟随系统主题实时切换(仅 auto 时 applyTheme 才会取系统值,其余档无害)
+  window.matchMedia('(prefers-color-scheme: light)').addEventListener('change', () => {
+    applyTheme(settings.value?.ui.theme)
+  })
   window.api.onTasksEventsBatch((events) => {
     const next = new Map(liveEvents.value)
     for (const event of events) {
       const list = next.get(event.taskId) ?? []
       list.push(event)
-      next.set(event.taskId, list.slice(-500))
+      next.set(event.taskId, list.slice(-LIVE_EVENTS_PER_TASK))
+    }
+    // 选中的任务永远保留;超槽时丢最久未动的任务缓冲(历史仍可从主进程分页拉回)
+    if (next.size > LIVE_EVENTS_MAX_TASKS) {
+      const keep = selectedTaskId.value
+      for (const key of next.keys()) {
+        if (next.size <= LIVE_EVENTS_MAX_TASKS) break
+        if (key !== keep) next.delete(key)
+      }
     }
     liveEvents.value = next
   })

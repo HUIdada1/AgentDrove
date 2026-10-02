@@ -22,6 +22,9 @@ export interface DriverUsage {
   outputTokens?: number
 }
 
+/** 驱动看门狗缺省时长;编排层注入的 defaultTimeoutMs 优先于此值 */
+export const DEFAULT_RUN_TIMEOUT_MS = 600_000
+
 export interface RunResult {
   code: number
   /** 从输出中提取到的会话 id,续聊链依赖它;提取不到为 undefined */

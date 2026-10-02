@@ -58,6 +58,11 @@ export class EventBuffer implements EventSink {
     try {
       this.repo.appendEvents(batch)
       this.push(batch)
+    } catch (error) {
+      // 落库/批推失败不丢事件:批次回灌队首等待下次 flush;
+      // 定时器回调里的未捕获异常会击穿主进程,必须在此收敛
+      this.queue = [...batch, ...this.queue]
+      console.error('[agent-drove] 事件落库失败,批次已回灌缓冲:', error)
     } finally {
       this.flushing = false
     }

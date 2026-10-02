@@ -1,6 +1,6 @@
 /** 极简版本范围判断,只支持 ">=0.16 <0.17" 这类空格分隔子句;为免为一个两子句需求引入 semver 依赖 */
 
-type Op = '>=' | '>' | '<=' | '<' | '=' 
+type Op = '>=' | '>' | '<=' | '<' | '='
 
 function compare(a: string, b: string): number {
   const [a1 = 0, a2 = 0, a3 = 0] = a.split('.').map(Number)

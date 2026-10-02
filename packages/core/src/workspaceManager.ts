@@ -56,6 +56,8 @@ export class WorkspaceManager {
   ): Promise<WorkspaceRow> {
     this.fsx.ensureDir(workspacesDir)
     const dest = join(workspacesDir, `${basename(source) || 'ws'}-${taskId.slice(0, 8)}`)
+    const now = this.clock.now()
+    const cleanupAfter = now + cleanupHours * 3_600_000
     if (await this.isGitRepo(source)) {
       const baseHead = (await this.git(source, ['rev-parse', 'HEAD'])).trim()
       const branch = `agentdrove/${taskId.slice(0, 8)}`
@@ -67,8 +69,8 @@ export class WorkspaceManager {
         kind: 'worktree',
         source: JSON.stringify({ repo: source, baseHead } satisfies WorktreeSource),
         status: 'active',
-        createdAt: this.clock.now(),
-        cleanupAfter: this.clock.now() + cleanupHours * 3_600_000,
+        createdAt: now,
+        cleanupAfter,
       }
       this.store.put(row)
       return row
@@ -81,8 +83,8 @@ export class WorkspaceManager {
       kind: 'tempcopy',
       source,
       status: 'active',
-      createdAt: this.clock.now(),
-      cleanupAfter: this.clock.now() + cleanupHours * 3_600_000,
+      createdAt: now,
+      cleanupAfter,
     }
     this.store.put(row)
     return row

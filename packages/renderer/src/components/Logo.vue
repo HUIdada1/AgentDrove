@@ -6,8 +6,8 @@ withDefaults(defineProps<{ size?: number; mono?: boolean }>(), {
   mono: false,
 })
 
-const FLOW = '#2e6ea8' // 深一档:待汇聚的任务流
-const NODE = '#4d9ede' // 主色:执行节点与输出
+const FLOW = '#0a8060' // 深一档:待汇聚的任务流
+const NODE = '#17d69e' // 主色:执行节点与输出
 </script>
 
 <template>

@@ -154,9 +154,14 @@ export class Orchestrator {
     if (!cwd) throw new Error('缺少工作目录:未指定 cwd 且未配置默认工作区')
     // cap 硬闸在产生任务记录之前,超限即拒绝
     this.throttle.checkCapAtSubmit(profile)
+    const id = request.id ?? randomUUID()
+    // 组合根预生成 id 的场景必须幂等:重复 id 会覆盖既有任务记录
+    if (this.live.has(id) || this.repo.getTask(id)) {
+      throw new Error(`任务 id 冲突:${id}`)
+    }
     const now = this.clock.now()
     const task: TaskRecord = {
-      id: request.id ?? randomUUID(),
+      id,
       agentId: profile.id,
       modelId,
       prompt: request.prompt,
@@ -347,6 +352,12 @@ export class Orchestrator {
           continue
         }
         queue.splice(index, 1)
+        const driver = this.drivers.get(profile.driver)
+        if (!driver) {
+          // 驱动缺失直接失败,不推进节拍/并发计数(未实际放行)
+          this.failTask(task, `no driver registered: ${profile.driver}`)
+          continue
+        }
         this.throttle.markReleased(agentId)
         agentRunning++
         globalRunning++
@@ -354,11 +365,6 @@ export class Orchestrator {
           agentId,
           taskId: task.id,
         })
-        const driver = this.drivers.get(profile.driver)
-        if (!driver) {
-          this.failTask(task, `no driver registered: ${profile.driver}`)
-          continue
-        }
         void this.execute(task, profile, driver)
       }
     }
@@ -407,16 +413,21 @@ export class Orchestrator {
     // 健康闸在进入 running 之前:不通过走 queued→failed,
     // 未运行即终态自动返还计数,并经终态钩子交给降级决策
     if (this.deps.healthAtRelease) {
-      const report = await this.deps.healthAtRelease(profile.id).catch(() => ({
+      const report = await this.deps.healthAtRelease(profile.id).catch((error) => ({
         ok: false,
-        reason: '健康检查失败',
+        reason: error instanceof Error ? error.message : String(error),
       }))
       if (!report.ok) {
-        this.failTask(task, `客户端不健康:${report.reason ?? '未知原因'}`)
+        // 放行后取消竞态:健康探活期间任务可能已被取消,此时不再落 failed
+        if (task.state === 'queued') {
+          this.failTask(task, `客户端不健康:${report.reason ?? '未知原因'}`)
+        }
         this.tryRelease()
         return
       }
     }
+    // 放行后到 execute 实际推进之间存在取消窗口;已离开 queued 说明已被取消,直接退出
+    if (task.state !== 'queued') return
     this.transition(task, 'running')
     const controller = new AbortController()
     this.controllers.set(task.id, controller)
@@ -466,7 +477,13 @@ export class Orchestrator {
       if (controller.signal.aborted) return
       this.failTask(task, error instanceof Error ? error.message : String(error))
     } finally {
-      void this.deps.onRunEnd?.(task, baseline)
+      // 收尾钩子(产物扫描)为异步,失败只留 warning,不允许未处理拒绝击穿主进程
+      void Promise.resolve(this.deps.onRunEnd?.(task, baseline)).catch((error: unknown) => {
+        this.recordEvent(task.id, {
+          kind: 'warning',
+          text: `收尾钩子执行失败:${error instanceof Error ? error.message : String(error)}`,
+        })
+      })
       this.controllers.delete(task.id)
       this.tryRelease()
     }

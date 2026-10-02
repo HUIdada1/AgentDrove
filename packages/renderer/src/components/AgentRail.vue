@@ -65,7 +65,7 @@ function healthClass(agent: AgentView): string {
       <button
         v-for="agent in store.agents.value"
         :key="agent.id"
-        class="agent"
+        class="agent spot"
         :class="{ picked: store.filter.value.agentId === agent.id }"
         :title="`${agent.label}${agent.version ? ' ' + agent.version : ''}`"
         @click="pick(agent)"

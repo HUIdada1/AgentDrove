@@ -1,5 +1,4 @@
 import type { AgentId, TaskRecord } from './types.js'
-import type { Clock } from './ports.js'
 
 /** 本地时区 YYYY-MM-DD;日界与重置均按本地零点 */
 export function localDayOf(timestamp: number): string {
@@ -37,13 +36,9 @@ export class MemoryUsageLedger implements UsageLedger {
   }
 }
 
-/** 任务charged 的日子 = 创建日;跨零点返还也不写新日 */
+/** 任务记账的日子 = 创建日;跨零点返还也不写新日 */
 export function chargeDayOf(task: TaskRecord): string {
   return localDayOf(task.createdAt)
-}
-
-export function createLedgerClock(clock: Clock): { today(): string } {
-  return { today: () => localDayOf(clock.now()) }
 }
 
 function key(agentId: AgentId, day: string): string {

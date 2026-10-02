@@ -1,7 +1,16 @@
 import { BrowserWindow, dialog, ipcMain, shell } from 'electron'
 import { join } from 'node:path'
 import { randomUUID } from 'node:crypto'
-import { copyFileSync, existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs'
+import {
+  copyFileSync,
+  existsSync,
+  mkdirSync,
+  openSync,
+  readSync,
+  closeSync,
+  statSync,
+  writeFileSync,
+} from 'node:fs'
 import type {
   AgentView,
   EventsPageDto,
@@ -19,13 +28,19 @@ import {
 } from '@agent-drove/core'
 import type { AppContext } from '../context.js'
 import { tailLogs } from '../logger.js'
+import { persistAgent } from '../app.js'
+
+/** 事件单页最大条数:防止渲染层传超大 limit 一次性压垮 IPC */
+const EVENTS_PAGE_MAX_LIMIT = 1000
 
 /** 按契约注册全部 IPC 通道;handler 只做参数适配,业务规则都在 core */
 export function registerIpcHandlers(ctx: AppContext): void {
-  const day = localDayOf(Date.now())
+  // 按调用取当天(本地时区):跨零点后注册时缓存的旧日期会让今日用量归零
+  const today = (): string => localDayOf(Date.now())
 
   // ---- agents ----
   ipcMain.handle('agents:list', async (): Promise<AgentView[]> => {
+    const day = today()
     const views: AgentView[] = []
     for (const profile of ctx.registry.list()) {
       const health = await ctx.health.check(profile.id).catch(() => undefined)
@@ -52,7 +67,7 @@ export function registerIpcHandlers(ctx: AppContext): void {
 
   ipcMain.handle('agents:set-enabled', (_e, agentId: string, enabled: boolean) => {
     ctx.registry.setEnabled(agentId, enabled)
-    persistAgent(ctx, agentId)
+    persistAgent(ctx.store, ctx.registry.get(agentId))
   })
 
   // ---- tasks ----
@@ -65,7 +80,7 @@ export function registerIpcHandlers(ctx: AppContext): void {
 
   ipcMain.handle('tasks:events-page', (_e, query: EventsPageDto) => {
     const all = ctx.orchestrator.eventsOf(query.taskId)
-    const limit = query.limit ?? 200
+    const limit = Math.min(Math.max(1, query.limit ?? 200), EVENTS_PAGE_MAX_LIMIT)
     const end = query.beforeSeq !== undefined
       ? all.findIndex((event) => event.seq === query.beforeSeq)
       : all.length
@@ -74,14 +89,14 @@ export function registerIpcHandlers(ctx: AppContext): void {
   })
 
   ipcMain.handle('tasks:submit', async (_e, dto: SubmitTaskDto): Promise<TaskRecord> => {
-    return submitOne(ctx, dto)
+    return submitDedup(ctx, dto)
   })
 
   ipcMain.handle('tasks:submit-batch', async (_e, dtos: SubmitTaskDto[]): Promise<TaskRecord[]> => {
     // 同策略批量入队:逐条走同一闸门,超限异常抛给渲染层提示
     const created: TaskRecord[] = []
     for (const dto of dtos) {
-      created.push(await submitOne(ctx, dto))
+      created.push(await submitDedup(ctx, dto))
     }
     return created
   })
@@ -134,6 +149,10 @@ export function registerIpcHandlers(ctx: AppContext): void {
       const task = ctx.orchestrator.get(id)
       if (!task) continue
       if (task.state === 'running') continue // 运行中不可删,先取消
+      // 派生工作区随任务一并清理,避免删了任务留下孤儿目录等保留期兜底
+      for (const row of ctx.workspaces.rowsForTask(id)) {
+        void ctx.workspaces.cleanup(row).catch(() => undefined)
+      }
       ctx.store.deleteTask(id)
       count++
     }
@@ -173,6 +192,7 @@ export function registerIpcHandlers(ctx: AppContext): void {
   })
 
   ipcMain.handle('usage:get', (): UsageView[] => {
+    const day = today()
     return ctx.registry.list().map((profile) => {
       const usage = ctx.store.usageOf(profile.id, day)
       return {
@@ -205,7 +225,9 @@ export function registerIpcHandlers(ctx: AppContext): void {
   })
 
   // ---- logs / export ----
-  ipcMain.handle('logs:tail', (_e, limit?: number) => tailLogs(ctx.paths.logs, limit ?? 200))
+  ipcMain.handle('logs:tail', (_e, limit?: number) =>
+    tailLogs(ctx.paths.logs, Math.min(Math.max(1, limit ?? 200), 2000)),
+  )
 
   ipcMain.handle('export:data', async () => {
     const { canceled, filePath } = await dialog.showSaveDialog({
@@ -275,6 +297,35 @@ export function registerIpcHandlers(ctx: AppContext): void {
   })
 }
 
+/** 同内容派发在窗口期内去重:双击/Enter 连击在渲染层 disable 生效前可能重入 */
+const SUBMIT_DEDUP_MS = 1500
+const recentSubmits = new Map<string, number>()
+
+function submitDedupKey(dto: SubmitTaskDto): string {
+  return [dto.agentId, dto.prompt, dto.cwd ?? '', dto.workspaceSource ?? '', dto.mode ?? '']
+    .join('')
+}
+
+function pruneRecentSubmits(now: number): void {
+  if (recentSubmits.size < 100) return
+  for (const [key, at] of recentSubmits) {
+    if (now - at > SUBMIT_DEDUP_MS) recentSubmits.delete(key)
+  }
+}
+
+async function submitDedup(ctx: AppContext, dto: SubmitTaskDto): Promise<TaskRecord> {
+  const now = Date.now()
+  pruneRecentSubmits(now)
+  const key = submitDedupKey(dto)
+  const last = recentSubmits.get(key)
+  if (last !== undefined && now - last < SUBMIT_DEDUP_MS) {
+    throw new Error('相同任务刚派发过,请勿重复提交')
+  }
+  const task = await submitOne(ctx, dto)
+  recentSubmits.set(key, now)
+  return task
+}
+
 /** 派发单条:带 workspaceSource 时先派生工作区(git→worktree / 其他→tempcopy),任务 cwd 指向派生目录 */
 async function submitOne(ctx: AppContext, dto: SubmitTaskDto): Promise<TaskRecord> {
   const { workspaceSource, ...rest } = dto
@@ -292,7 +343,8 @@ async function submitOne(ctx: AppContext, dto: SubmitTaskDto): Promise<TaskRecor
   })
 }
 
-function matchesFilter(task: TaskRecord, filter?: TaskFilterDto): boolean {  if (!filter) return true
+function matchesFilter(task: TaskRecord, filter?: TaskFilterDto): boolean {
+  if (!filter) return true
   if (filter.agentId && task.agentId !== filter.agentId) return false
   if (filter.state && task.state !== filter.state) return false
   if (filter.search && !task.prompt.includes(filter.search)) return false
@@ -307,26 +359,12 @@ function matchesFilter(task: TaskRecord, filter?: TaskFilterDto): boolean {  if 
   return true
 }
 
-function persistAgent(ctx: AppContext, agentId: string): void {
-  const profile = ctx.registry.get(agentId)
-  ctx.store.upsertAgent({
-    id: profile.id,
-    label: profile.label,
-    driver: profile.driver,
-    entry: profile.entry,
-    version: profile.version,
-    logoPath: profile.logoPath,
-    plan: profile.plan,
-    models: profile.models,
-    defaultModel: profile.defaultModel,
-    enabled: profile.enabled,
-    supportedVersions: profile.supportedVersions,
-  })
-}
-
 function persistConfigPaused(ctx: AppContext, paused: boolean): void {
   const next = { ...ctx.getConfig(), schedulerPaused: paused }
   ctx.saveConfig(next)
+  for (const win of BrowserWindow.getAllWindows()) {
+    win.webContents.send('scheduler:changed', paused)
+  }
 }
 
 /**
@@ -364,13 +402,9 @@ async function mergeWorkspaceArtifacts(ctx: AppContext, row: WorkspaceRow): Prom
     const to = join(baseDir, ...change.path.split('/'))
     if (!existsSync(from)) continue
     if (existsSync(to)) {
-      try {
-        if (readFileSync(to).equals(readFileSync(from))) {
-          merged.push(change.path) // 内容一致视为已合并
-          continue
-        }
-      } catch {
-        // 读取失败按冲突处理
+      if (sameFileContent(from, to)) {
+        merged.push(change.path) // 内容一致视为已合并
+        continue
       }
       conflicts.push(change.path)
       continue
@@ -380,6 +414,36 @@ async function mergeWorkspaceArtifacts(ctx: AppContext, row: WorkspaceRow): Prom
     merged.push(change.path)
   }
   return { merged, conflicts }
+}
+
+/**
+ * 逐块比对两文件内容;尺寸先决(size 不同直接判不同),
+ * 避免把可能上百 MB 的产物整读进内存。
+ */
+function sameFileContent(a: string, b: string): boolean {
+  try {
+    if (statSync(a).size !== statSync(b).size) return false
+    const fdA = openSync(a, 'r')
+    const fdB = openSync(b, 'r')
+    try {
+      const CHUNK = 1024 * 1024
+      const bufA = Buffer.allocUnsafe(CHUNK)
+      const bufB = Buffer.allocUnsafe(CHUNK)
+      for (;;) {
+        const readA = readSync(fdA, bufA, 0, CHUNK, null)
+        const readB = readSync(fdB, bufB, 0, CHUNK, null)
+        if (readA !== readB) return false
+        if (readA === 0) return true
+        if (!bufA.subarray(0, readA).equals(bufB.subarray(0, readB))) return false
+      }
+    } finally {
+      closeSync(fdA)
+      closeSync(fdB)
+    }
+  } catch {
+    // 读取失败按冲突处理
+    return false
+  }
 }
 
 /** 源目录快照 vs 工作区现状:added/modified/deleted */

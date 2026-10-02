@@ -43,7 +43,7 @@ const time = computed(() => {
 </script>
 
 <template>
-  <article class="card" :class="[`s-${task.state}`, { selected }]" @click="$emit('click')">
+  <article class="card spot" :class="[`s-${task.state}`, { selected }]" @click="$emit('click')">
     <div class="top">
       <span class="agent">{{ task.agentId }}</span>
       <span class="model">{{ task.modelId === 'client-follow' ? '跟随客户端' : task.modelId }}</span>
@@ -149,7 +149,7 @@ const time = computed(() => {
   font-size: 11px;
   padding: 1px 9px;
   border-radius: 999px;
-  background: rgba(148, 174, 196, 0.12);
+  background: var(--chip-bg);
   color: var(--muted);
 }
 

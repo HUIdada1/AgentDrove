@@ -5,6 +5,7 @@ import type {
   DriverRunOptions,
   RunResult,
 } from '../driver.js'
+import { DEFAULT_RUN_TIMEOUT_MS } from '../driver.js'
 import type { AgentProfile, ModelId, TaskInput } from '../types.js'
 import type { Clock, FileSystem, ProcessRunner } from '../ports.js'
 import { systemClock } from '../ports.js'
@@ -110,7 +111,7 @@ export class ZcodeDriver implements AgentDriver {
     onSpawn?.(handle.pid)
 
     const startedMono = this.clock.monotonic()
-    const limit = timeoutMs ?? 600_000
+    const limit = timeoutMs ?? DEFAULT_RUN_TIMEOUT_MS
     const watchdog = setTimeout(() => {
       timedOut = true
       void handle.killTree()

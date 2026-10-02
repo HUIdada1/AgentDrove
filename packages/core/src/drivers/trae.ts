@@ -4,6 +4,7 @@ import type {
   DriverRunOptions,
   RunResult,
 } from '../driver.js'
+import { DEFAULT_RUN_TIMEOUT_MS } from '../driver.js'
 import type { AgentProfile, ModelId } from '../types.js'
 import type { FileSystem, ProcessRunner } from '../ports.js'
 import { LineDecoder, decodeBuffer } from '../text.js'
@@ -102,7 +103,7 @@ export class TraeDriver implements AgentDriver {
     const watchdog = setTimeout(() => {
       timedOut = true
       void handle.killTree()
-    }, timeoutMs ?? 600_000)
+    }, timeoutMs ?? DEFAULT_RUN_TIMEOUT_MS)
     const onAbort = () => void handle.killTree()
     signal.addEventListener('abort', onAbort, { once: true })
 

@@ -1,8 +1,7 @@
 import type { ThrottleConfig } from './config.js'
 import type { Clock } from './ports.js'
 import type { AgentProfile, TaskRecord } from './types.js'
-import { chargeDayOf, type UsageLedger } from './usage.js'
-import { localDayOf } from './usage.js'
+import { chargeDayOf, localDayOf, type UsageLedger } from './usage.js'
 
 export interface ReleaseContext {
   agentRunning: number
