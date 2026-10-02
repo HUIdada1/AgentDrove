@@ -1,0 +1,16 @@
+# Changelog
+
+## v0.2.0 (2026-10-02)
+
+2997f8c feat(ui): 翡翠绿细磨砂玻璃改版 v0.2.0——设计令牌重铸(翡翠绿accent/底色提亮/26px模糊+双内缘折射光+斜向光泽)、渐变网格+双光斑底景+细噪点、卡片聚光(vSpotlight全局注册接任务卡与Agent卡)、auto主题实时跟随系统、chip底色令牌化与热键冲突框语义色;含全量审查修复(core任务id幂等/驱动缺失不推进节拍/main与shared配套)
+40382a1 feat(ui): 液态玻璃改版——四栏布局(可收缩Agent侧栏/任务列/会话流/详情)、明暗双主题冷调青蓝、玻璃组件库(ui/)、SVG logo与应用图标重绘、浏览器端node内建垫片修复白屏
+12cb21e feat(M4/M5): Electron 壳与三栏 UI——IPC 契约/主进程装配/托盘热键单实例/updater/bootstrap 校验/Vue3 面板(虚拟时间线/设置页/迷你条)/NSIS 打包链(release.mjs/图标)/批量与导出;实测产出 Setup exe
+92eddc2 fix(M3): resumeLatest 全链路落库——类型/提交/SQLite 迁移 v3/驱动入参,-c 降级语义真正到达驱动
+091c85f feat(M3): 唤起与续聊——deep link 表(实测协议键)+spawn 回退、续聊链(parent 链/--resume/-c 降级/running 拒绝)、health TTL 缓存(并发去重/强制绕过)
+adb0e1d feat(M2): 存储与核心增强——SQLite 适配器(WAL/迁移/损坏恢复)/节流器(cap硬闸·记账返还·暂停闸·公平放行·同cwd互斥)/失败降级(候选筛选·模型映射·哨兵)/产物扫描(基线·快照diff)/工作区管理(worktree·tempcopy降级·到期清理)/事件批量缓冲(10万条压测通过)/qoder·trae 驱动
+cf26469 feat(M1): core 端口化与 zcode 真实驱动——状态机收敛/启动恢复/哨兵模型/GBK 回退/进程树终止,headless 端到端打通
+be5deef chore: 方案文档移出版本库,仅本地保留
+6ceda14 docs: 整体方案 v6 定稿(合并 v4/v5)——GitHub 仓库与 Releases 发版、热更新双轨、作者沐辉、仅安装版
+3126a6a docs: 最终方案 v5 定稿(四路调研实测+独立评审 v5.1 修订)
+28aaa03 feat: AgentDrove 最终方案 v4 与核心骨架(状态机/注册表/mock 驱动,11 用例全绿)
+
