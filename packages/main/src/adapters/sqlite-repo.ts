@@ -6,6 +6,7 @@ import type {
   JournalStore,
   ModelPreset,
   PlanInfo,
+  Project,
   StoredEvent,
   TaskRecord,
   TaskRepository,
@@ -21,7 +22,7 @@ import type {
  * 不设只读安全模式——单机自用场景下空库比半死库更可预期。
  */
 
-export const SCHEMA_VERSION = 3
+export const SCHEMA_VERSION = 4
 
 type SqliteDb = InstanceType<typeof Database>
 
@@ -81,6 +82,17 @@ const MIGRATIONS: ((db: SqliteDb) => void)[] = [
     db.exec(`ALTER TABLE tasks ADD COLUMN mode TEXT NOT NULL DEFAULT 'build';`)
     db.exec(`ALTER TABLE tasks ADD COLUMN resume_latest INTEGER;`)
   },
+  // v4:项目工作区(侧栏可选中);任务记 project_id 供按工作区分组;"日常工作区"由组合根 upsert 内置行
+  (db) => {
+    db.exec(`
+      CREATE TABLE projects (
+        id TEXT PRIMARY KEY, name TEXT NOT NULL, path TEXT,
+        created_at INTEGER NOT NULL
+      );
+      ALTER TABLE tasks ADD COLUMN project_id TEXT;
+      CREATE INDEX idx_tasks_project ON tasks(project_id, created_at);
+    `)
+  },
 ]
 
 export class SqliteStore
@@ -130,10 +142,10 @@ export class SqliteStore
     this.db
       .prepare(
         `INSERT OR REPLACE INTO tasks
-         (id, agent_id, model_id, prompt, cwd, state, session_id, resume_latest, parent_id, error,
+         (id, agent_id, model_id, prompt, cwd, project_id, state, session_id, resume_latest, parent_id, error,
           attachments_json, tool_policy_json, mode, origin, created_at, started_at, finished_at,
           retry_of, attempt)
-         VALUES (@id, @agentId, @modelId, @prompt, @cwd, @state, @sessionId, @resumeLatest, @parentId, @error,
+         VALUES (@id, @agentId, @modelId, @prompt, @cwd, @projectId, @state, @sessionId, @resumeLatest, @parentId, @error,
           @attachmentsJson, @toolPolicyJson, @mode, @origin, @createdAt, @startedAt, @finishedAt,
           @retryOf, @attempt)`,
       )
@@ -313,6 +325,38 @@ export class SqliteStore
     this.db.prepare('DELETE FROM workspaces WHERE id = ?').run(id)
   }
 
+  // ---- projects(项目工作区)----
+
+  upsertProject(project: Project): void {
+    this.db
+      .prepare(
+        `INSERT OR REPLACE INTO projects (id, name, path, created_at)
+         VALUES (?, ?, ?, ?)`,
+      )
+      .run(project.id, project.name, project.path, project.createdAt)
+  }
+
+  allProjects(): Project[] {
+    const rows = this.db
+      .prepare('SELECT * FROM projects ORDER BY created_at')
+      .all() as ProjectSqlRow[]
+    return rows.map((row) => ({
+      id: row.id,
+      name: row.name,
+      path: row.path,
+      createdAt: row.created_at,
+    }))
+  }
+
+  renameProject(id: string, name: string): void {
+    this.db.prepare('UPDATE projects SET name = ? WHERE id = ?').run(name, id)
+  }
+
+  /** 仅解除登记,不触碰磁盘;任务上的 project_id 保留(历史任务仍可追溯) */
+  deleteProject(id: string): void {
+    this.db.prepare('DELETE FROM projects WHERE id = ?').run(id)
+  }
+
   // ---- agents 持久化(重启恢复启用状态与最近探测信息)----
 
   upsertAgent(profile: {
@@ -448,6 +492,7 @@ interface TaskRow {
   model_id: string
   prompt: string
   cwd: string
+  project_id: string | null
   state: TaskRecord['state']
   session_id: string | null
   resume_latest: number | null
@@ -507,6 +552,13 @@ interface WorkspaceSqlRow {
   cleanup_after: number | null
 }
 
+interface ProjectSqlRow {
+  id: string
+  name: string
+  path: string | null
+  created_at: number
+}
+
 function rowFromTask(task: TaskRecord) {
   return {
     id: task.id,
@@ -514,6 +566,7 @@ function rowFromTask(task: TaskRecord) {
     modelId: task.modelId,
     prompt: task.prompt,
     cwd: task.cwd,
+    projectId: task.projectId ?? null,
     state: task.state,
     sessionId: task.sessionId ?? null,
     resumeLatest: task.resumeLatest ? 1 : null,
@@ -538,6 +591,7 @@ function taskFromRow(row: TaskRow): TaskRecord {
     modelId: row.model_id,
     prompt: row.prompt,
     cwd: row.cwd,
+    projectId: row.project_id ?? undefined,
     state: row.state,
     sessionId: row.session_id ?? undefined,
     resumeLatest: row.resume_latest === 1 ? true : undefined,

@@ -33,9 +33,21 @@ function freshStore(): { store: SqliteStore; dir: string } {
 }
 
 describe('SqliteStore 迁移与任务存取', () => {
-  it('新库迁移到 user_version=3', () => {
+  it('新库迁移到 user_version=4(含 projects 表)', () => {
     const { store } = freshStore()
     expect(store).toBeInstanceOf(SqliteStore)
+    store.close()
+  })
+
+  it('任务 project_id 落库与读回', () => {
+    const { store } = freshStore()
+    const task = makeTask({ projectId: 'proj-1' })
+    store.putTask(task)
+    expect(store.getTask(task.id)?.projectId).toBe('proj-1')
+    // 未选工作区的任务 projectId 为 undefined,读回不产生脏值
+    const plain = makeTask()
+    store.putTask(plain)
+    expect(store.getTask(plain.id)?.projectId).toBeUndefined()
     store.close()
   })
 
@@ -129,6 +141,44 @@ describe('SqliteStore 台账/日志/工作区', () => {
     store.delete('w1')
     expect(store.get('w1')).toBeUndefined()
     store.close()
+  })
+})
+
+describe('SqliteStore 项目工作区', () => {
+  it('登记/重命名/解绑/移除全链路', () => {
+    const { store } = freshStore()
+    store.upsertProject({ id: 'daily', name: '日常工作区', path: null, createdAt: 1 })
+    store.upsertProject({ id: 'proj-1', name: 'AgentDrove', path: 'E:/idea work/AgentDrove', createdAt: 2 })
+    expect(store.allProjects().map((p) => p.id)).toEqual(['daily', 'proj-1'])
+
+    // 重命名与绑定目录更新(upsert 幂等)
+    store.renameProject('proj-1', 'AgentDrove 主仓')
+    store.upsertProject({ id: 'daily', name: '日常工作区', path: 'D:/daily', createdAt: 1 })
+    const daily = store.allProjects().find((p) => p.id === 'daily')
+    expect(daily?.path).toBe('D:/daily')
+    expect(store.allProjects().find((p) => p.id === 'proj-1')?.name).toBe('AgentDrove 主仓')
+
+    // 解绑 = path 置 null(分组态);移除只删项目行,任务记录不受影响
+    store.upsertProject({ id: 'daily', name: '日常工作区', path: null, createdAt: 1 })
+    expect(store.allProjects().find((p) => p.id === 'daily')?.path).toBeNull()
+    store.putTask(makeTask({ id: 't-in-proj', projectId: 'proj-1' }))
+    store.deleteProject('proj-1')
+    expect(store.allProjects().some((p) => p.id === 'proj-1')).toBe(false)
+    expect(store.getTask('t-in-proj')).toBeDefined()
+    store.close()
+  })
+
+  it('同一库重开:项目与任务的 project_id 完整保留', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'ad-db-'))
+    const dbPath = join(dir, 'console.db')
+    const first = openStore(dbPath).store
+    first.upsertProject({ id: 'proj-9', name: '重开验证', path: 'C:/p9', createdAt: 1 })
+    first.putTask(makeTask({ id: 't-9', projectId: 'proj-9' }))
+    first.close()
+    const second = openStore(dbPath).store
+    expect(second.allProjects().some((p) => p.id === 'proj-9')).toBe(true)
+    expect(second.getTask('t-9')?.projectId).toBe('proj-9')
+    second.close()
   })
 })
 

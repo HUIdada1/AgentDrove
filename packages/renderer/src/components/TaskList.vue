@@ -14,9 +14,13 @@ const visible = computed(() =>
     if (store.filter.value.agentId && t.agentId !== store.filter.value.agentId) return false
     if (store.filter.value.state && t.state !== store.filter.value.state) return false
     if (store.filter.value.search && !t.prompt.includes(store.filter.value.search)) return false
+    // 侧栏选中工作区 → 只看该项目下的任务(日常工作区未绑定目录时按 projectId 分组,不受 cwd 影响)
+    if (store.selectedProjectId.value && t.projectId !== store.selectedProjectId.value) return false
     return true
   }),
 )
+
+const activeProject = computed(() => store.selectedProject.value)
 
 const selecting = computed(() => store.selection.value.size > 0)
 
@@ -90,6 +94,14 @@ const stateOptions = [
       <GlassButton size="sm" variant="ghost" @click="store.selection.value = new Set()">收起</GlassButton>
     </div>
 
+    <div v-else-if="activeProject" class="scope">
+      <span class="mark">⌂</span>
+      <span class="scope-name">{{ activeProject.name }}</span>
+      <span class="scope-path">{{ activeProject.path ?? '未绑定目录 · 派发落默认工作区' }}</span>
+      <span class="spacer" />
+      <button class="mini" title="回到全部工作区" @click="store.selectedProjectId.value = null">查看全部×</button>
+    </div>
+
     <div class="list">
       <TaskCard
         v-for="task in visible"
@@ -101,7 +113,7 @@ const stateOptions = [
         @check="toggleSelect(task.id)"
       />
       <div v-if="visible.length === 0" class="empty">
-        <p class="big">还没有任务</p>
+        <p class="big">{{ activeProject ? '该工作区还没有任务' : '还没有任务' }}</p>
         <p class="sub">在上方发布框写下第一条,Enter 派发。</p>
       </div>
     </div>
@@ -141,6 +153,56 @@ const stateOptions = [
 
 .batch .spacer {
   flex: 1;
+}
+
+.scope {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 5px 10px;
+  margin-bottom: 8px;
+  background: var(--accent-dim);
+  border: 1px solid var(--accent-line);
+  border-radius: var(--radius-md);
+  font-size: 12px;
+  min-width: 0;
+}
+
+.scope .mark {
+  color: var(--accent-strong);
+}
+
+.scope-name {
+  font-weight: 600;
+  flex: none;
+}
+
+.scope-path {
+  color: var(--muted);
+  font-size: 11px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  min-width: 0;
+}
+
+.scope .spacer {
+  flex: 1;
+}
+
+.scope .mini {
+  font-size: 11px;
+  padding: 2px 8px;
+  border-radius: 7px;
+  border: 1px solid var(--line);
+  background: var(--glass-bg);
+  color: var(--muted);
+  cursor: pointer;
+}
+
+.scope .mini:hover {
+  color: var(--text);
+  border-color: var(--line-strong);
 }
 
 .list {

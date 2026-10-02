@@ -11,6 +11,7 @@ import type {
   LaunchChannel,
   ModelPreset,
   PlanInfo,
+  Project,
   StoredEvent,
   TaskRecord,
   WorkspaceRow,
@@ -24,6 +25,7 @@ export type {
   LaunchChannel,
   ModelPreset,
   PlanInfo,
+  Project,
   StoredEvent,
   TaskRecord,
   WorkspaceRow,
@@ -53,6 +55,8 @@ export interface SubmitTaskDto {
   agentId: string
   prompt: string
   cwd?: string
+  /** 侧栏选中的项目工作区:cwd 留空时回落项目目录(日常工作区未绑定则落默认目录) */
+  projectId?: string
   modelId?: string
   mode?: TaskRecord['mode']
   attachments?: TaskRecord['attachments']
@@ -70,6 +74,8 @@ export interface TaskFilterDto {
   search?: string
   agentId?: string
   state?: TaskRecord['state']
+  /** 按项目工作区分组过滤 */
+  projectId?: string
   /** 创建时间下限(本地时区日,YYYY-MM-DD) */
   sinceDay?: string
   untilDay?: string
@@ -138,6 +144,16 @@ export interface AgentDroveApi extends PushEvents {
   // agents:*
   agentsList(): Promise<AgentView[]>
   agentsSetEnabled(agentId: string, enabled: boolean): Promise<void>
+  // projects:* 项目工作区(侧栏可选中)
+  projectsList(): Promise<Project[]>
+  /** 登记项目:原生目录选择弹窗选文件夹,取消返回 null */
+  projectsPickAndAdd(): Promise<Project | null>
+  /** 日常工作区绑定/解绑目录;path=null 回到未绑定分组态 */
+  projectsBindDaily(path: string | null): Promise<Project>
+  projectsRename(projectId: string, name: string): Promise<void>
+  projectsRemove(projectId: string): Promise<void>
+  /** 原生目录选择弹窗(日常工作区绑定等),取消返回 null */
+  pickDirectory(): Promise<string | null>
   // tasks:*
   tasksList(filter?: TaskFilterDto): Promise<TaskRecord[]>
   tasksGet(taskId: string): Promise<TaskRecord | null>

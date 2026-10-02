@@ -1,7 +1,8 @@
-import { ref, shallowRef, watch } from 'vue'
+import { computed, ref, shallowRef, watch } from 'vue'
 import type {
   AgentView,
   AppConfig,
+  Project,
   StoredEvent,
   TaskRecord,
   UpdateStatus,
@@ -15,6 +16,7 @@ import type {
  * (早期版本每次调用新建 ref,组件间状态互不相通——点击卡片详情不刷新就是这个坑)
  */
 const agents = ref<AgentView[]>([])
+const projects = ref<Project[]>([])
 const tasks = ref<TaskRecord[]>([])
 const usage = ref<UsageView[]>([])
 const settings = ref<AppConfig | null>(null)
@@ -26,6 +28,20 @@ const selectedTaskId = ref<string | null>(null)
 const selection = ref<Set<string>>(new Set())
 const filter = ref({ search: '', agentId: '', state: '' })
 const liveEvents = shallowRef(new Map<string, StoredEvent[]>())
+/** 侧栏选中的工作区:选中后发布框绑定该目录,任务列表只看该项目;null=全部 */
+const selectedProjectId = ref<string | null>(
+  typeof localStorage !== 'undefined' ? localStorage.getItem('agentdrove.workspace') : null,
+)
+
+/** 当前选中的项目行;id 失效(项目被删)自动回落 null */
+const selectedProject = computed(
+  () => projects.value.find((p) => p.id === selectedProjectId.value) ?? null,
+)
+
+watch(selectedProjectId, (id) => {
+  if (id) localStorage.setItem('agentdrove.workspace', id)
+  else localStorage.removeItem('agentdrove.workspace')
+})
 
 /** 每任务在渲染层保留的实时事件条数(与主进程推送窗口配套,完整历史走分页拉取) */
 const LIVE_EVENTS_PER_TASK = 500
@@ -35,6 +51,7 @@ const LIVE_EVENTS_MAX_TASKS = 50
 export function useAppStore() {
   return {
     agents,
+    projects,
     tasks,
     usage,
     settings,
@@ -46,10 +63,13 @@ export function useAppStore() {
     selection,
     filter,
     liveEvents,
+    selectedProjectId,
+    selectedProject,
     refreshAgents,
     refreshTasks,
     refreshSettings,
     refreshWorkspaces,
+    refreshProjects,
     setTheme,
   }
 }
@@ -77,6 +97,10 @@ export async function refreshAgents(): Promise<void> {
   usage.value = await window.api.usageGet()
 }
 
+export async function refreshProjects(): Promise<void> {
+  projects.value = await window.api.projectsList()
+}
+
 export async function refreshTasks(): Promise<void> {
   const filterDto: Parameters<typeof window.api.tasksList>[0] = {}
   if (filter.value.search) filterDto.search = filter.value.search
@@ -100,6 +124,7 @@ export function installAppBridge(): void {
   if (bridgeInstalled) return
   bridgeInstalled = true
   void refreshAgents()
+  void refreshProjects()
   void refreshTasks()
   void refreshSettings()
   void refreshWorkspaces()

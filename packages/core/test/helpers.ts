@@ -45,6 +45,18 @@ export const qoderProfile: AgentProfile = {
   enabled: true,
 }
 
+export const codexProfile: AgentProfile = {
+  id: 'codex',
+  label: 'Codex',
+  driver: 'codex',
+  entry: 'codex',
+  models: [{ id: 'gpt-5.1-codex', label: 'GPT-5.1 Codex' }],
+  defaultModel: 'gpt-5.1-codex',
+  capabilities: { headless: true, sessionResume: true, modelSwitch: 'cli-arg', attachments: false },
+  plan: { name: 'ChatGPT 套餐', quotaKind: 'subscription', modelIds: ['gpt-5.1-codex'], dailyTaskCap: 20, maxConcurrency: 1 },
+  enabled: true,
+}
+
 export interface Harness {
   orchestrator: Orchestrator
   registry: Registry

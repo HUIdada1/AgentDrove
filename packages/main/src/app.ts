@@ -6,6 +6,7 @@ import { dirname, join } from 'node:path'
 import {
   ArtifactScanner,
   ArtifactTracking,
+  CodexDriver,
   EventBuffer,
   Failover,
   attachFailover,
@@ -73,6 +74,16 @@ async function bootstrap(): Promise<void> {
     })
   }
 
+  // 内置"日常工作区"(id 固定):未绑定目录=分组态,派发落默认工作区;绑定后可整组过滤
+  if (!store.allProjects().some((p) => p.id === DAILY_PROJECT_ID)) {
+    store.upsertProject({
+      id: DAILY_PROJECT_ID,
+      name: '日常工作区',
+      path: null,
+      createdAt: Date.now(),
+    })
+  }
+
   const { source: configSource, warning: configWarning } = loadYamlConfig(paths.config)
   const config = configSource.load()
   if (configWarning) logger.warn('配置文件损坏,按内置默认运行', { file: configWarning })
@@ -89,9 +100,11 @@ async function bootstrap(): Promise<void> {
   const zcodeDriver = new ZcodeDriver(runner, fs, { nodeBin: process.execPath, cliPath: zcodeCli })
   const qoderDriver = new QoderDriver(runner, fs)
   const traeDriver = new TraeDriver(runner, fs)
+  const codexDriver = new CodexDriver(runner, fs)
   drivers.set(zcodeDriver.id, zcodeDriver)
   drivers.set(qoderDriver.id, qoderDriver)
   drivers.set(traeDriver.id, traeDriver)
+  drivers.set(codexDriver.id, codexDriver)
 
   const savedAgents = new Map(store.allAgents().map((row) => [row.id, row]))
   const registerDetected = (detected: DetectedAgent, plan: AgentPlanOptions): void => {
@@ -132,6 +145,21 @@ async function bootstrap(): Promise<void> {
         quota: 'credits',
         // V5 复测回填前给占位模型目录;注册表校验要求 defaultModel ∈ models
         models: [{ id: 'qoder-default', label: '默认模型' }],
+        followClient: false,
+        attachments: false,
+      })
+    }
+  }
+  if (await commandExists('codex')) {
+    const codexDetected = await codexDriver.detect(
+      [process.env.AGENTDROVE_CODEX_CLI ?? 'codex'].filter(Boolean),
+    )
+    if (codexDetected) {
+      registerDetected(codexDetected, {
+        planName: 'ChatGPT 套餐',
+        quota: 'subscription',
+        // 模型档位由 resolveModelArg 透传 --model;client-follow 时恒空
+        models: CODEX_MODELS,
         followClient: false,
         attachments: false,
       })
@@ -314,6 +342,16 @@ const HERE = import.meta.dirname ?? dirname(pathToFileURL(import.meta.url).pathn
 const DEFAULT_DAILY_TASK_CAP = 20
 /** 单机调度按串行起步,避免同一客户端并发挤兑套餐 */
 const DEFAULT_AGENT_CONCURRENCY = 1
+
+/** 内置日常工作区的固定 id:重启幂等恢复,UI 禁止删除 */
+export const DAILY_PROJECT_ID = 'daily'
+
+/** Codex CLI 模型档位目录(0.2x 口径);模型跟随登录套餐,失败档位运行期由 CLI 报错兜底 */
+const CODEX_MODELS = [
+  { id: 'gpt-5.1-codex', label: 'GPT-5.1 Codex' },
+  { id: 'gpt-5.1-codex-max', label: 'GPT-5.1 Codex Max' },
+  { id: 'gpt-5.1-codex-mini', label: 'GPT-5.1 Codex Mini' },
+]
 
 interface AgentPlanOptions {
   planName: string

@@ -39,6 +39,8 @@ export interface SubmitRequest {
   agentId: AgentId
   prompt: string
   cwd?: string
+  /** 派发时所属的项目工作区(侧栏选中态),随任务落库供分组 */
+  projectId?: string
   modelId?: string
   attachments?: TaskAttachment[]
   toolPolicy?: ToolPolicy
@@ -166,6 +168,7 @@ export class Orchestrator {
       modelId,
       prompt: request.prompt,
       cwd,
+      projectId: request.projectId,
       state: 'queued',
       attachments: request.attachments ?? [],
       toolPolicy: request.toolPolicy,
@@ -240,6 +243,7 @@ export class Orchestrator {
       agentId: parent.agentId,
       prompt,
       cwd: parent.cwd,
+      projectId: parent.projectId,
       sessionId: parent.sessionId,
       resumeLatest: !parent.sessionId,
       modelId: parent.modelId,

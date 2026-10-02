@@ -122,12 +122,26 @@ export interface StoredEvent {
   event: TaskEvent
 }
 
+/**
+ * 项目工作区(侧栏可选中):持久化实体,path 为 null 表示未绑定目录,
+ * 派发时回落编排层默认工作目录;内置"日常工作区"即 path 可空的分组。
+ */
+export interface Project {
+  id: string
+  name: string
+  /** null = 未绑定目录(纯分组) */
+  path: string | null
+  createdAt: number
+}
+
 export interface TaskRecord {
   id: string
   agentId: AgentId
   modelId: ModelId
   prompt: string
   cwd: string
+  /** 派发时所属的项目工作区;历史任务/未选工作区为 undefined */
+  projectId?: string
   state: TaskState
   /** 运行后提取到的会话 id,续聊链的锚点 */
   sessionId?: string

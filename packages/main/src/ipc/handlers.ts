@@ -1,5 +1,5 @@
 import { BrowserWindow, dialog, ipcMain, shell } from 'electron'
-import { join } from 'node:path'
+import { basename, join } from 'node:path'
 import { randomUUID } from 'node:crypto'
 import {
   copyFileSync,
@@ -15,6 +15,7 @@ import type {
   AgentView,
   EventsPageDto,
   MergeResult,
+  Project,
   SubmitTaskDto,
   TaskFilterDto,
   UsageView,
@@ -28,7 +29,7 @@ import {
 } from '@agent-drove/core'
 import type { AppContext } from '../context.js'
 import { tailLogs } from '../logger.js'
-import { persistAgent } from '../app.js'
+import { DAILY_PROJECT_ID, persistAgent } from '../app.js'
 
 /** 事件单页最大条数:防止渲染层传超大 limit 一次性压垮 IPC */
 const EVENTS_PAGE_MAX_LIMIT = 1000
@@ -70,6 +71,46 @@ export function registerIpcHandlers(ctx: AppContext): void {
     persistAgent(ctx.store, ctx.registry.get(agentId))
   })
 
+  // ---- projects(项目工作区)----
+  ipcMain.handle('projects:list', (): Project[] => ctx.store.allProjects())
+
+  ipcMain.handle('projects:pick-and-add', async (): Promise<Project | null> => {
+    const dir = await pickDirectory(ctx)
+    if (!dir) return null
+    // 同目录重复登记返回既有项目,不产生重复行
+    const existing = ctx.store.allProjects().find((p) => p.path === dir)
+    if (existing) return existing
+    const project: Project = {
+      id: randomUUID(),
+      name: basename(dir) || dir,
+      path: dir,
+      createdAt: Date.now(),
+    }
+    ctx.store.upsertProject(project)
+    return project
+  })
+
+  ipcMain.handle('projects:bind-daily', (_e, path: string | null): Project => {
+    const daily = ctx.store.allProjects().find((p) => p.id === DAILY_PROJECT_ID)
+    if (!daily) throw new Error('内置日常工作区缺失')
+    const next: Project = { ...daily, path: path ?? null }
+    ctx.store.upsertProject(next)
+    return next
+  })
+
+  ipcMain.handle('projects:rename', (_e, projectId: string, name: string) => {
+    const trimmed = name.trim()
+    if (!trimmed) throw new Error('项目名不能为空')
+    ctx.store.renameProject(projectId, trimmed)
+  })
+
+  ipcMain.handle('projects:remove', (_e, projectId: string) => {
+    if (projectId === DAILY_PROJECT_ID) throw new Error('内置日常工作区不可删除')
+    ctx.store.deleteProject(projectId)
+  })
+
+  ipcMain.handle('dialog:pick-directory', async (): Promise<string | null> => pickDirectory(ctx))
+
   // ---- tasks ----
   ipcMain.handle('tasks:list', (_e, filter?: TaskFilterDto): TaskRecord[] => {
     const tasks = ctx.orchestrator.list().filter((task) => matchesFilter(task, filter))
@@ -109,6 +150,7 @@ export function registerIpcHandlers(ctx: AppContext): void {
       agentId: parent.agentId,
       prompt: parent.prompt,
       cwd: parent.cwd,
+      projectId: parent.projectId,
       modelId: parent.modelId,
       mode: parent.mode,
       attachments: parent.attachments,
@@ -170,6 +212,7 @@ export function registerIpcHandlers(ctx: AppContext): void {
       agentId: targetAgentId,
       prompt: parent.prompt,
       cwd: parent.cwd,
+      projectId: parent.projectId,
       modelId: target.defaultModel,
       mode: parent.mode,
       attachments,
@@ -302,8 +345,8 @@ const SUBMIT_DEDUP_MS = 1500
 const recentSubmits = new Map<string, number>()
 
 function submitDedupKey(dto: SubmitTaskDto): string {
-  return [dto.agentId, dto.prompt, dto.cwd ?? '', dto.workspaceSource ?? '', dto.mode ?? '']
-    .join('')
+  return [dto.agentId, dto.prompt, dto.cwd ?? '', dto.projectId ?? '', dto.workspaceSource ?? '', dto.mode ?? '']
+    .join('')
 }
 
 function pruneRecentSubmits(now: number): void {
@@ -326,27 +369,42 @@ async function submitDedup(ctx: AppContext, dto: SubmitTaskDto): Promise<TaskRec
   return task
 }
 
-/** 派发单条:带 workspaceSource 时先派生工作区(git→worktree / 其他→tempcopy),任务 cwd 指向派生目录 */
+/** 派发单条:选中工作区注入 projectId;显式 cwd 优先,否则项目目录,再否则编排层默认目录 */
 async function submitOne(ctx: AppContext, dto: SubmitTaskDto): Promise<TaskRecord> {
-  const { workspaceSource, ...rest } = dto
+  const { workspaceSource, projectId, ...rest } = dto
+  let { cwd } = rest
+  if (!cwd && projectId) {
+    cwd = ctx.store.allProjects().find((p) => p.id === projectId)?.path ?? undefined
+  }
   if (!workspaceSource) {
-    return ctx.orchestrator.submit({ ...rest, origin: rest.origin ?? 'panel' })
+    return ctx.orchestrator.submit({ ...rest, cwd, projectId, origin: rest.origin ?? 'panel' })
   }
   const taskId = randomUUID()
   const cleanupHours = ctx.getConfig().task.workspaceCleanupHours
   const row = await ctx.workspaces.derive(workspaceSource, taskId, ctx.paths.workspaces, cleanupHours)
   return ctx.orchestrator.submit({
     ...rest,
-    id: taskId,
     cwd: row.path,
+    projectId,
+    id: taskId,
     origin: rest.origin ?? 'panel',
   })
+}
+
+async function pickDirectory(ctx: AppContext): Promise<string | null> {
+  const win = ctx.getMainWindow() ?? undefined
+  const { canceled, filePaths } = win
+    ? await dialog.showOpenDialog(win, { title: '选择项目工作区', properties: ['openDirectory'] })
+    : await dialog.showOpenDialog({ title: '选择项目工作区', properties: ['openDirectory'] })
+  if (canceled || filePaths.length === 0) return null
+  return filePaths[0] ?? null
 }
 
 function matchesFilter(task: TaskRecord, filter?: TaskFilterDto): boolean {
   if (!filter) return true
   if (filter.agentId && task.agentId !== filter.agentId) return false
   if (filter.state && task.state !== filter.state) return false
+  if (filter.projectId && task.projectId !== filter.projectId) return false
   if (filter.search && !task.prompt.includes(filter.search)) return false
   if (filter.sinceDay) {
     const day = localDayOf(task.createdAt)

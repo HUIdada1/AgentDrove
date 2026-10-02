@@ -66,6 +66,7 @@ export function installDevMock(): void {
     modelId: MODEL_CLIENT_FOLLOW,
     prompt: prompt as string,
     cwd: 'E:/idea work/AgentDrove',
+    projectId: i % 2 === 0 ? 'demo-proj-1' : 'daily',
     state: state as TaskRecord['state'],
     sessionId: i === 0 ? 'sess-demo-0001' : undefined,
     attachments: [],
@@ -78,9 +79,29 @@ export function installDevMock(): void {
   }))
 
   let seq = 100
+  const projects: import('@agent-drove/core').Project[] = [
+    { id: 'daily', name: '日常工作区', path: null, createdAt: now },
+    { id: 'demo-proj-1', name: 'AgentDrove', path: 'E:/idea work/AgentDrove', createdAt: now - 1 },
+  ]
   const mock: AgentDroveApi = {
     agentsList: async () => agents,
     agentsSetEnabled: async () => {},
+    projectsList: async () => projects,
+    projectsPickAndAdd: async () => null, // 浏览器环境无原生目录弹窗
+    projectsBindDaily: async (path) => {
+      const daily = projects.find((p) => p.id === 'daily')!
+      daily.path = path
+      return daily
+    },
+    projectsRename: async (projectId, name) => {
+      const project = projects.find((p) => p.id === projectId)
+      if (project) project.name = name
+    },
+    projectsRemove: async (projectId) => {
+      const index = projects.findIndex((p) => p.id === projectId)
+      if (index >= 0) projects.splice(index, 1)
+    },
+    pickDirectory: async () => null, // 浏览器环境无原生目录弹窗
     tasksList: async () => tasks,
     tasksGet: async (id) => tasks.find((t) => t.id === id) ?? null,
     tasksEventsPage: async ({ taskId, limit = 200 }) => {
@@ -105,6 +126,7 @@ export function installDevMock(): void {
         modelId: MODEL_CLIENT_FOLLOW,
         prompt: dto.prompt,
         cwd: dto.cwd ?? 'E:/idea work/AgentDrove',
+        projectId: dto.projectId,
         state: 'queued',
         attachments: [],
         mode: dto.mode ?? 'build',

@@ -21,6 +21,13 @@ const api: AgentDroveApi = {
   agentsSetEnabled: (agentId, enabled) =>
     ipcRenderer.invoke('agents:set-enabled', agentId, enabled),
 
+  projectsList: () => ipcRenderer.invoke('projects:list'),
+  projectsPickAndAdd: () => ipcRenderer.invoke('projects:pick-and-add'),
+  projectsBindDaily: (path) => ipcRenderer.invoke('projects:bind-daily', path),
+  projectsRename: (projectId, name) => ipcRenderer.invoke('projects:rename', projectId, name),
+  projectsRemove: (projectId) => ipcRenderer.invoke('projects:remove', projectId),
+  pickDirectory: () => ipcRenderer.invoke('dialog:pick-directory'),
+
   tasksList: (filter) => ipcRenderer.invoke('tasks:list', filter),
   tasksGet: (taskId) => ipcRenderer.invoke('tasks:get', taskId),
   tasksEventsPage: (query) => ipcRenderer.invoke('tasks:events-page', query),

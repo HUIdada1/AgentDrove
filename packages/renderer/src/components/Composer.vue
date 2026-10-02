@@ -22,6 +22,12 @@ const agentId = ref('')
 
 const activeAgents = computed(() => store.agents.value.filter((a) => a.enabled && a.capabilities.headless))
 const selectedAgent = computed(() => store.agents.value.find((a) => a.id === agentId.value))
+const selectedProject = computed(() => store.selectedProject.value)
+
+// 侧栏选中工作区 → 发布框目录跟随(显式改写仍可临时覆盖,项目归属不变)
+watch(selectedProject, (project) => {
+  workspace.value = project?.path ?? ''
+})
 
 onMounted(() => {
   window.addEventListener('focus-composer', focusPrompt)
@@ -69,10 +75,12 @@ async function submit(): Promise<void> {
   notice.value = ''
   try {
     const lines = batchMode.value ? text.split('\n').map((l) => l.trim()).filter(Boolean) : [text]
+    const projectId = store.selectedProjectId.value ?? undefined
     const dtos: SubmitTaskDto[] = lines.map((line) => ({
       agentId: agentId.value,
       prompt: line,
       cwd: workspace.value || undefined,
+      projectId,
       mode: mode.value,
       attachments: attachments.value.length > 0 ? attachments.value : undefined,
       toolPolicy:
@@ -136,7 +144,15 @@ function onKeydown(event: KeyboardEvent): void {
           { value: 'plan', label: 'plan' },
         ]"
       />
-      <GlassInput v-model="workspace" class="ws" mono placeholder="工作目录(留空=默认目录)" />
+      <GlassInput v-model="workspace" class="ws" mono :placeholder="selectedProject ? `${selectedProject.name} · 可临时改写目录` : '工作目录(留空=默认目录)'" />
+      <span
+        v-if="selectedProject"
+        class="ws-chip"
+        :title="selectedProject.path ?? '未绑定目录,派发落默认工作区'"
+      >
+        ⌂ {{ selectedProject.name }}
+        <button class="x" title="取消选中工作区" @click="store.selectedProjectId.value = null">×</button>
+      </span>
       <GlassButton variant="ghost" size="sm" @click="pickAttachment">
         附件{{ attachments.length ? ` ${attachments.length}` : '' }}
       </GlassButton>
@@ -202,6 +218,31 @@ function onKeydown(event: KeyboardEvent): void {
 .ws {
   flex: 1;
   min-width: 100px;
+}
+
+.ws-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  flex: none;
+  max-width: 140px;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+  font-size: 11px;
+  color: var(--accent-strong);
+  background: var(--accent-dim);
+  border: 1px solid var(--accent-line);
+  border-radius: 999px;
+  padding: 3px 8px;
+}
+
+.ws-chip .x {
+  border: none;
+  background: none;
+  padding: 0 2px;
+  color: var(--muted);
+  cursor: pointer;
 }
 
 .toolbar :deep(.on),
