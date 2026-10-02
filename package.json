@@ -1,6 +1,6 @@
 {
   "name": "agent-drove",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "author": "沐辉",
   "private": true,
   "packageManager": "pnpm@8.15.9",

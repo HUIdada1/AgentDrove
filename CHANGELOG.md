@@ -14,3 +14,8 @@ be5deef chore: 方案文档移出版本库,仅本地保留
 3126a6a docs: 最终方案 v5 定稿(四路调研实测+独立评审 v5.1 修订)
 28aaa03 feat: AgentDrove 最终方案 v4 与核心骨架(状态机/注册表/mock 驱动,11 用例全绿)
 
+## v0.3.0 (2026-10-02)
+
+e3e745d feat(codex+workspace): 接入 Codex 驱动与侧栏选中工作区——CodexDriver(codex exec --json 无头/-C 工作目录/档位→沙箱映射 build·plan只读 edit可写 yolo全权/exec resume·--last 续聊/thread_id 会话锚点/login status 探活,装后自动注册)、SQLite迁移v4(projects表+tasks.project_id)、内置日常工作区(id=daily,可绑定/解绑目录,未绑定=分组态落默认工作区,禁删)、侧栏工作区区(原生目录弹窗登记项目/同目录去重/改名/移除仅解除分组)、选中后发布框目录跟随+任务列表按项目过滤(localStorage持久化选中态)、续聊/重试/换端/failover全链路透传projectId、shared契约加projects:*与dialog:pick-directory、mock与dev配套;单测141全绿(core118+main23)
+cc45a5d chore(release): v0.2.0 版本同步与 CHANGELOG
+
