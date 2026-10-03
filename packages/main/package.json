@@ -1,6 +1,6 @@
 {
   "name": "@agent-drove/main",
-  "version": "0.4.2",
+  "version": "0.4.3",
   "author": "沐辉",
   "description": "AgentDrove 桌面端:统一调度本机 AI agent 客户端,池化套餐额度",
   "private": true,

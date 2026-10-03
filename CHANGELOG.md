@@ -1,5 +1,10 @@
 # Changelog
 
+## v0.4.3 (2026-10-03)
+
+08eb27c fix(main+renderer): 打包态 zcode 改用系统 node + 设置保存/切主题的 IPC 克隆修复
+3b39616 chore(release): v0.4.2 版本同步与 CHANGELOG
+
 ## v0.4.2 (2026-10-03)
 
 0b6e597 chore: ignore packages/main/AgentDrove(历史 electron 运行时残留副本,app.asar 被系统句柄锁定暂无法删除)
