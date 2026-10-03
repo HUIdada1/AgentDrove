@@ -67,10 +67,16 @@ onMounted(async () => {
   offConflict = window.api.onHotkeyConflict((accelerator) => {
     hotkeyConflict.value = accelerator
   })
-  await store.refreshSettings()
+  try {
+    await store.refreshSettings()
+  } catch {
+    // 单次刷新失败不判死:启动首拉多数已拿到配置,直接用缓存渲染
+  }
   const config = store.settings.value
-  // 结构化克隆成草稿:编辑/取消都不回写全局 settings,保存时才提交
-  if (config && !draft.value) draft.value = structuredClone(config)
+  // 结构化克隆成草稿:编辑/取消都不回写全局 settings,保存时才提交。
+  // 不能用 structuredClone:settings.value 是 Vue 响应式代理(Proxy),克隆必抛 DataCloneError,
+  // draft 恒为 null,设置页会永久停在"加载设置中…"——配置深拷贝统一走 JSON。
+  if (config && !draft.value) draft.value = JSON.parse(JSON.stringify(config))
 })
 
 onUnmounted(() => {
