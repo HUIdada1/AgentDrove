@@ -1,5 +1,10 @@
 # Changelog
 
+## v0.4.0 (2026-10-03)
+
+69e0d82 fix(core+main+renderer): 五板块深度审查修复——4高危·40中危清零,补168测试与发布链
+a83de0c chore(release): v0.3.0 版本同步与 CHANGELOG
+
 ## v0.2.0 (2026-10-02)
 
 2997f8c feat(ui): 翡翠绿细磨砂玻璃改版 v0.2.0——设计令牌重铸(翡翠绿accent/底色提亮/26px模糊+双内缘折射光+斜向光泽)、渐变网格+双光斑底景+细噪点、卡片聚光(vSpotlight全局注册接任务卡与Agent卡)、auto主题实时跟随系统、chip底色令牌化与热键冲突框语义色;含全量审查修复(core任务id幂等/驱动缺失不推进节拍/main与shared配套)

@@ -205,19 +205,24 @@ async function buildHotUpdateBundle() {
 
 // ---------------- ⑥ tag + GitHub Release ----------------
 function collectAssets() {
-  const assets = []
-  const push = (p) => fs.existsSync(p) && assets.push(p)
   if (!fs.existsSync(releaseDir)) die(`未找到 electron-builder 输出目录:${releaseDir}`)
-  const setup = fs.readdirSync(releaseDir).find((f) => /^AgentDrove-Setup-.*\.exe$/.test(f))
-  if (setup) push(path.join(releaseDir, setup))
-  else die(`未找到 NSIS 产物(AgentDrove-Setup-*.exe),请检查 electron-builder 输出: ${releaseDir}`)
-  push(path.join(releaseDir, 'latest.yml'))
-  push(path.join(releaseDir, 'latest.yml.blockmap'))
-  if (!skipBundle) {
-    push(path.join(releaseDir, `bundle-${newVersion}-app.asar`))
-    push(path.join(releaseDir, 'bundle-manifest.json'))
+  const entries = fs.readdirSync(releaseDir)
+  // 必须按当前版本号精确匹配:release/ 会累积历史安装包,
+  // 取首个匹配项会把旧版本 exe 当作新版本上传到 Release。
+  const setupName = `AgentDrove-Setup-${newVersion}.exe`
+  if (!entries.includes(setupName)) {
+    die(`未找到本次 NSIS 产物(${setupName}),请检查 electron-builder 输出: ${releaseDir}`)
   }
-  return assets
+  const assets = [path.join(releaseDir, setupName)]
+  // 差分更新依赖 exe 对应 blockmap(electron-builder 命名为 <exe>.blockmap,不存在 latest.yml.blockmap)
+  const blockmapName = `${setupName}.blockmap`
+  if (entries.includes(blockmapName)) assets.push(path.join(releaseDir, blockmapName))
+  assets.push(path.join(releaseDir, 'latest.yml'))
+  if (!skipBundle) {
+    assets.push(path.join(releaseDir, `bundle-${newVersion}-app.asar`))
+    assets.push(path.join(releaseDir, 'bundle-manifest.json'))
+  }
+  return assets.filter((p) => fs.existsSync(p))
 }
 
 function gitLogSummary(range) {
