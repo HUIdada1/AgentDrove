@@ -9,6 +9,7 @@ import type { AgentProfile, ModelId, ModelPreset, TaskInput } from '../types.js'
 import { MODEL_CLIENT_FOLLOW } from '../types.js'
 import type { FileSystem, ProcessRunner } from '../ports.js'
 import { LineDecoder, decodeBuffer, extractSessionId } from '../text.js'
+import { spawnForExit } from './spawnExit.js'
 
 const PROBE_TIMEOUT_MS = 15_000
 
@@ -116,7 +117,7 @@ export class QoderDriver implements AgentDriver {
         if (line) emit({ kind: 'message', channel: 'stderr', text: line })
       }
       if (timedOut && !signal.aborted) {
-        throw new Error(`看门狗超时,已终止进程树`)
+        throw new Error('看门狗超时,已终止进程树')
       }
       return { code, sessionId }
     } finally {
@@ -218,29 +219,17 @@ export class QoderDriver implements AgentDriver {
     onStdout: (chunk: Buffer) => void = () => {},
     timeoutMs: number = PROBE_TIMEOUT_MS,
   ): Promise<number> {
-    return new Promise<number>((resolve, reject) => {
-      const handle = this.runner.spawn({
+    return spawnForExit(
+      this.runner,
+      {
         command: entry,
         args,
         cwd: process.cwd(),
         shell: this.needsShell(entry),
         onStdout,
         onStderr: () => {},
-      })
-      const timer = setTimeout(() => {
-        void handle.killTree()
-        reject(new Error(`探测超时(${timeoutMs}ms)`))
-      }, timeoutMs)
-      void handle.exited.then(
-        (code) => {
-          clearTimeout(timer)
-          resolve(code)
-        },
-        (error) => {
-          clearTimeout(timer)
-          reject(error instanceof Error ? error : new Error(String(error)))
-        },
-      )
-    })
+      },
+      timeoutMs,
+    )
   }
 }

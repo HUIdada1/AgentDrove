@@ -10,6 +10,7 @@ import type { AgentProfile, ModelId, TaskInput } from '../types.js'
 import type { Clock, FileSystem, ProcessRunner } from '../ports.js'
 import { systemClock } from '../ports.js'
 import { LineDecoder, decodeBuffer, extractSessionId } from '../text.js'
+import { spawnForExit } from './spawnExit.js'
 
 export interface ZcodeLocator {
   nodeBin: string
@@ -67,7 +68,7 @@ export class ZcodeDriver implements AgentDriver {
     }
     let code: number
     try {
-      code = await this.spawnForExit(
+      code = await this.probeForExit(
         [this.locator.cliPath, 'doctor'],
         DOCTOR_TIMEOUT_MS,
         () => {},
@@ -184,10 +185,17 @@ export class ZcodeDriver implements AgentDriver {
   private async probeVersion(cliEntry: string): Promise<string | undefined> {
     const chunks: Buffer[] = []
     try {
-      const code = await this.spawnForExit(
-        [cliEntry, '--version'],
+      const code = await spawnForExit(
+        this.runner,
+        {
+          command: this.locator.nodeBin,
+          args: [cliEntry, '--version'],
+          cwd: process.cwd(),
+          env: this.locator.nodeEnv,
+          onStdout: (chunk) => chunks.push(chunk),
+          onStderr: () => {},
+        },
         PROBE_TIMEOUT_MS,
-        (chunk) => chunks.push(chunk),
       )
       if (code !== 0) return undefined
       return decodeBuffer(Buffer.concat(chunks)).trim() || undefined
@@ -196,34 +204,18 @@ export class ZcodeDriver implements AgentDriver {
     }
   }
 
-  private spawnForExit(
-    args: string[],
-    timeoutMs: number,
-    onStdout: (chunk: Buffer) => void,
-  ): Promise<number> {
-    return new Promise<number>((resolve, reject) => {
-      const handle = this.runner.spawn({
+  private probeForExit(args: string[], timeoutMs: number, onStdout: (chunk: Buffer) => void): Promise<number> {
+    return spawnForExit(
+      this.runner,
+      {
         command: this.locator.nodeBin,
         args,
         cwd: process.cwd(),
         env: this.locator.nodeEnv,
         onStdout,
         onStderr: () => {},
-      })
-      const timer = setTimeout(() => {
-        void handle.killTree()
-        reject(new Error(`探测超时(${timeoutMs}ms)`))
-      }, timeoutMs)
-      void handle.exited.then(
-        (code) => {
-          clearTimeout(timer)
-          resolve(code)
-        },
-        (error) => {
-          clearTimeout(timer)
-          reject(error instanceof Error ? error : new Error(String(error)))
-        },
-      )
-    })
+      },
+      timeoutMs,
+    )
   }
 }

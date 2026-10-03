@@ -163,7 +163,12 @@ async function submit(): Promise<void> {
       projectId,
       ...(resolvedModelId.value ? { modelId: resolvedModelId.value } : {}),
       mode: mode.value,
-      attachments: attachments.value.length > 0 ? attachments.value : undefined,
+      // 必须拷成纯对象数组:attachments.value 是响应式代理(Proxy),直接过 IPC
+      // 结构化克隆必抛 "An object could not be cloned"(与设置页保存同源问题)
+      attachments:
+        attachments.value.length > 0
+          ? attachments.value.map((a) => ({ ...a }))
+          : undefined,
       ...(toolPolicy ? { toolPolicy } : {}),
     }))
     // 派生工作区:git 源建 worktree,非 git 整拷降级(主进程完成)

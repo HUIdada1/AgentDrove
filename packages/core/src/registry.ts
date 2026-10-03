@@ -7,9 +7,10 @@ import type {
 } from './types.js'
 import { MODEL_CLIENT_FOLLOW } from './types.js'
 
-const DEFAULT_DAILY_TASK_CAP = 20
-const DEFAULT_MAX_CONCURRENCY = 1
-/** modelSwitch=none 时 UI 展示的伪模型档位 */
+/** 套餐默认值的唯一出处:注册表兜底与组合根 buildProfile 共用,避免两处魔法值漂移 */
+export const DEFAULT_DAILY_TASK_CAP = 20
+export const DEFAULT_MAX_CONCURRENCY = 1
+
 const CLIENT_FOLLOW_LABEL = '跟随客户端'
 
 function normalizePlan(plan: Partial<PlanInfo> | undefined, label: string): PlanInfo {

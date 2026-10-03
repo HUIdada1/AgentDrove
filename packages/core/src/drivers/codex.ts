@@ -9,6 +9,7 @@ import type { AgentProfile, ModelId, ModelPreset, TaskInput } from '../types.js'
 import { MODEL_CLIENT_FOLLOW } from '../types.js'
 import type { FileSystem, ProcessRunner } from '../ports.js'
 import { LineDecoder, decodeBuffer, extractSessionId } from '../text.js'
+import { spawnForExit } from './spawnExit.js'
 
 const PROBE_TIMEOUT_MS = 15_000
 const LOGIN_CHECK_TIMEOUT_MS = 20_000
@@ -121,7 +122,7 @@ export class CodexDriver implements AgentDriver {
         if (line) emit({ kind: 'message', channel: 'stderr', text: line })
       }
       if (timedOut && !signal.aborted) {
-        throw new Error(`看门狗超时,已终止进程树`)
+        throw new Error('看门狗超时,已终止进程树')
       }
       if (usage) emit({ kind: 'usage', ...usage })
       // thread_id 是续聊链锚点;兜底走通用提取(未来版本字段名变化时不断链)
@@ -266,16 +267,17 @@ export class CodexDriver implements AgentDriver {
   }
 
   private probeExit(entry: string, args: string[]): Promise<number> {
-    return this.spawnForExit([entry, ...args], LOGIN_CHECK_TIMEOUT_MS, () => {})
+    return this.spawnForExit([entry, ...args], LOGIN_CHECK_TIMEOUT_MS)
   }
 
   private spawnForExit(
     args: string[],
     timeoutMs: number,
-    onStdout: (chunk: Buffer) => void,
+    onStdout: (chunk: Buffer) => void = () => {},
   ): Promise<number> {
-    return new Promise<number>((resolve, reject) => {
-      const handle = this.runner.spawn({
+    return spawnForExit(
+      this.runner,
+      {
         // 探测统一经 shell,PATH 命令名与 .cmd shim 都能解析
         command: args[0]!,
         args: args.slice(1),
@@ -283,22 +285,9 @@ export class CodexDriver implements AgentDriver {
         shell: true,
         onStdout,
         onStderr: () => {},
-      })
-      const timer = setTimeout(() => {
-        void handle.killTree()
-        reject(new Error(`探测超时(${timeoutMs}ms)`))
-      }, timeoutMs)
-      void handle.exited.then(
-        (code) => {
-          clearTimeout(timer)
-          resolve(code)
-        },
-        (error) => {
-          clearTimeout(timer)
-          reject(error instanceof Error ? error : new Error(String(error)))
-        },
-      )
-    })
+      },
+      timeoutMs,
+    )
   }
 }
 

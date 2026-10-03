@@ -31,6 +31,9 @@ export interface WorktreeSource {
   baseHead: string
 }
 
+/** 派生 worktree 的专用分支前缀;清理时按同一前缀删分支,两处必须一致 */
+const WORKTREE_BRANCH_PREFIX = 'agentdrove/'
+
 /**
  * 派生工作区管理:
  * - git 源 → worktree(agentdrove/<taskId> 分支),非 git 源 → 整拷 tempcopy 降级;
@@ -61,7 +64,7 @@ export class WorkspaceManager {
     const cleanupAfter = now + cleanupHours * 3_600_000
     if (await this.isGitRepo(source)) {
       const baseHead = (await this.git(source, ['rev-parse', 'HEAD'])).trim()
-      const branch = `agentdrove/${taskId.slice(0, 8)}`
+      const branch = `${WORKTREE_BRANCH_PREFIX}${taskId.slice(0, 8)}`
       await this.git(source, ['worktree', 'add', '-b', branch, dest])
       const row: WorkspaceRow = {
         id: randomUUID(),
@@ -134,7 +137,7 @@ export class WorkspaceManager {
       try {
         const { repo } = JSON.parse(row.source) as WorktreeSource
         await this.git(repo, ['worktree', 'remove', '--force', row.path])
-        await this.git(repo, ['branch', '-D', `agentdrove/${row.taskId.slice(0, 8)}`])
+        await this.git(repo, ['branch', '-D', `${WORKTREE_BRANCH_PREFIX}${row.taskId.slice(0, 8)}`])
       } catch {
         // git 清理失败仍要解除登记;worktree remove 通常已删目录,
         // 仅当 remove 未落地(目录仍在)时才直接删,避免二次清理时对已删路径no-op报错

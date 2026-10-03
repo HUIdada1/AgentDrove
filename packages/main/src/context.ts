@@ -65,4 +65,9 @@ export interface AppContext {
   getMainWindow(): BrowserWindow | null
   /** 向渲染层推更新状态 */
   pushUpdateStatus(status: UpdateStatus): void
+  /**
+   * 主→渲染单向推送统一出口(app.ts 装配 notifyRenderer):
+   * 广播所有窗口并收敛退出/关闭竞态下窗口已销毁的 send 异常。
+   */
+  notify(channel: string, ...args: unknown[]): void
 }

@@ -22,6 +22,8 @@ import {
   WorkspaceManager,
   ZcodeDriver,
   MODEL_CLIENT_FOLLOW,
+  DEFAULT_DAILY_TASK_CAP,
+  DEFAULT_MAX_CONCURRENCY,
   type AgentDriver,
   type AgentProfile,
   type Clock,
@@ -213,8 +215,8 @@ async function bootstrap(): Promise<void> {
   const purge = (): void => {
     const now = Date.now()
     try {
-      const removedTasks = store.purgeTasksBefore(now - 90 * 24 * 3600_000)
-      const removedJournal = store.purgeJournalBefore(now - 180 * 24 * 3600_000)
+      const removedTasks = store.purgeTasksBefore(now - TASK_RETENTION_MS)
+      const removedJournal = store.purgeJournalBefore(now - JOURNAL_RETENTION_MS)
       if (removedTasks > 0 || removedJournal > 0) {
         logger.info('保留期清理完成', { removedTasks, removedJournal })
       }
@@ -321,6 +323,7 @@ async function bootstrap(): Promise<void> {
     logger,
     getMainWindow: () => mainWindow,
     pushUpdateStatus,
+    notify: notifyRenderer,
   }
   registerIpcHandlers(ctx)
 
@@ -372,10 +375,9 @@ function notifyRenderer(channel: string, ...args: unknown[]): void {
 // 打包成 CJS 后 import.meta.dirname 由打包器 define 成 __dirname;tsx 直跑时用 fileURLToPath 兜底
 const HERE = import.meta.dirname ?? dirname(fileURLToPath(import.meta.url))
 
-/** 套餐日上限占位值:三类客户端均无公开日任务数口径,先给保守默认,设置页后续可调 */
-const DEFAULT_DAILY_TASK_CAP = 20
-/** 单机调度按串行起步,避免同一客户端并发挤兑套餐 */
-const DEFAULT_AGENT_CONCURRENCY = 1
+/** 保留期(5.4):任务完成 90 天后清理,审计日志 180 天 */
+const TASK_RETENTION_MS = 90 * 24 * 3600_000
+const JOURNAL_RETENTION_MS = 180 * 24 * 3600_000
 
 /** Codex CLI 模型档位目录(0.2x 口径);模型跟随登录套餐,失败档位运行期由 CLI 报错兜底 */
 const CODEX_MODELS = [
@@ -523,8 +525,9 @@ function buildProfile(
       name: options.planName,
       quotaKind: options.quota,
       modelIds: options.models.map((m) => m.id),
+      // 默认值以 core 注册表为唯一出处;register 时的 normalizePlan 还会再兜底一次
       dailyTaskCap: DEFAULT_DAILY_TASK_CAP,
-      maxConcurrency: DEFAULT_AGENT_CONCURRENCY,
+      maxConcurrency: DEFAULT_MAX_CONCURRENCY,
     },
     enabled: savedEnabled ?? true,
   }

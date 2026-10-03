@@ -22,8 +22,6 @@ import type {
  * 不设只读安全模式——单机自用场景下空库比半死库更可预期。
  */
 
-export const SCHEMA_VERSION = 4
-
 type SqliteDb = InstanceType<typeof Database>
 
 const MIGRATIONS: ((db: SqliteDb) => void)[] = [

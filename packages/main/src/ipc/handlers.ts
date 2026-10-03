@@ -1,5 +1,5 @@
 import { BrowserWindow, dialog, ipcMain, shell } from 'electron'
-import { basename, join } from 'node:path'
+import { basename, dirname, join } from 'node:path'
 import { randomUUID } from 'node:crypto'
 import {
   closeSync,
@@ -22,6 +22,7 @@ import type {
 } from '@agent-drove/shared'
 import {
   ArtifactScanner,
+  type ArtifactChange,
   localDayOf,
   mergeConfig,
   type AppConfig,
@@ -43,28 +44,27 @@ export function registerIpcHandlers(ctx: AppContext): void {
   // 列表组装口径只维护一份:agents:list 与 agents:rescan 共用
   const buildAgentViews = async (): Promise<AgentView[]> => {
     const day = today()
-    const views: AgentView[] = []
-    for (const profile of ctx.registry.list()) {
-      const health = await ctx.health.check(profile.id).catch(() => undefined)
-      const models = ctx.registry.modelPresets(profile.id)
-      views.push({
-        id: profile.id,
-        label: profile.label,
-        driver: profile.driver,
-        entry: profile.entry,
-        cliEntry: profile.cliEntry,
-        version: profile.version,
-        logoPath: profile.logoPath,
-        models,
-        defaultModel: profile.defaultModel,
-        capabilities: profile.capabilities,
-        plan: profile.plan,
-        enabled: profile.enabled,
-        health,
-        usedToday: ctx.store.countOf(profile.id, day),
-      })
-    }
-    return views
+    const profiles = ctx.registry.list()
+    // 探活并行:串行时每个无缓存客户端都要等 doctor 跑完,四个客户端启动首拉要拖 5~15s
+    const healths = await Promise.all(
+      profiles.map((profile) => ctx.health.check(profile.id).catch(() => undefined)),
+    )
+    return profiles.map((profile, index) => ({
+      id: profile.id,
+      label: profile.label,
+      driver: profile.driver,
+      entry: profile.entry,
+      cliEntry: profile.cliEntry,
+      version: profile.version,
+      logoPath: profile.logoPath,
+      models: ctx.registry.modelPresets(profile.id),
+      defaultModel: profile.defaultModel,
+      capabilities: profile.capabilities,
+      plan: profile.plan,
+      enabled: profile.enabled,
+      health: healths[index],
+      usedToday: ctx.store.countOf(profile.id, day),
+    }))
   }
 
   ipcMain.handle('agents:list', (): Promise<AgentView[]> => buildAgentViews())
@@ -72,14 +72,14 @@ export function registerIpcHandlers(ctx: AppContext): void {
   ipcMain.handle('agents:rescan', async (): Promise<AgentView[]> => {
     // 重扫幂等且保留启停状态(以 agents 表落库为准),完成后按最新注册表组装列表
     await ctx.rescanAgents()
-    broadcastAgentsChanged()
+    ctx.notify('agents:changed')
     return buildAgentViews()
   })
 
   ipcMain.handle('agents:set-enabled', (_e, agentId: string, enabled: boolean) => {
     ctx.registry.setEnabled(agentId, enabled)
     persistAgent(ctx.store, ctx.registry.get(agentId))
-    broadcastAgentsChanged()
+    ctx.notify('agents:changed')
   })
 
   // ---- projects(项目工作区)----
@@ -281,7 +281,9 @@ export function registerIpcHandlers(ctx: AppContext): void {
 
   ipcMain.handle('scheduler:pause', (_e, paused: boolean) => {
     ctx.orchestrator.setPaused(paused)
-    persistConfigPaused(ctx, paused)
+    // 落盘持久化 + 广播渲染层(托盘入口的暂停走 app.ts 同款逻辑,两端口径一致)
+    ctx.saveConfig({ ...ctx.getConfig(), schedulerPaused: paused })
+    ctx.notify('scheduler:changed', paused)
   })
 
   // ---- logs / export ----
@@ -313,11 +315,13 @@ export function registerIpcHandlers(ctx: AppContext): void {
       .filter((row) => row.day >= weekAgo)
       .sort((a, b) => (a.day < b.day ? -1 : 1))
     const labels = new Map(ctx.registry.list().map((p) => [p.id, p.label]))
+    // CSV 引号字段内部的双引号必须翻倍转义,否则客户端名带引号会撕开列边界
+    const csvCell = (text: string): string => `"${text.replace(/"/g, '""')}"`
     const csv = [
       'day,agent,task_count,estimated',
       ...rows.map(
         (row) =>
-          `${row.day},"${labels.get(row.agentId) ?? row.agentId}",${row.taskCount},${row.estimated}`,
+          `${row.day},${csvCell(labels.get(row.agentId) ?? row.agentId)},${row.taskCount},${row.estimated}`,
       ),
     ].join('\n')
     writeFileSync(filePath, '\ufeff' + csv, 'utf8')
@@ -348,7 +352,10 @@ export function registerIpcHandlers(ctx: AppContext): void {
 
   // ---- 通用 ----
   ipcMain.handle('open-path', (_e, targetPath: string) => {
-    void shell.openPath(targetPath)
+    // openPath 失败以返回值字符串传达(不 reject),不记日志的话"打不开"将无迹可循
+    void shell.openPath(targetPath).then((error) => {
+      if (error) ctx.logger.warn('打开路径失败', { targetPath, error })
+    })
   })
 
   // 单向通知无需回执,用 on;sender 定位窗口,避免主/迷你条互相误隐藏
@@ -471,21 +478,6 @@ function matchesFilter(task: TaskRecord, filter?: TaskFilterDto): boolean {
   return true
 }
 
-/** 客户端登记/启停变化广播:所有窗口(主窗与迷你条)重拉客户端列表 */
-function broadcastAgentsChanged(): void {
-  for (const win of BrowserWindow.getAllWindows()) {
-    win.webContents.send('agents:changed')
-  }
-}
-
-function persistConfigPaused(ctx: AppContext, paused: boolean): void {
-  const next = { ...ctx.getConfig(), schedulerPaused: paused }
-  ctx.saveConfig(next)
-  for (const win of BrowserWindow.getAllWindows()) {
-    win.webContents.send('scheduler:changed', paused)
-  }
-}
-
 /**
  * 产物合并(7.2):把工作区里相对基线的变更文件复制回源目录。
  * 冲突口径:目标已存在且内容不同 → 跳过并列出,绝不静默覆盖用户文件。
@@ -495,7 +487,7 @@ async function mergeWorkspaceArtifacts(ctx: AppContext, row: WorkspaceRow): Prom
     return { merged: [], conflicts: [] }
   }
   const scanner = new ArtifactScanner(ctx.processRunner, ctx.fs)
-  let changes: Array<{ path: string; change: string }>
+  let changes: ArtifactChange[]
   let baseDir: string
   if (row.kind === 'worktree' && row.source) {
     const source = JSON.parse(row.source) as { repo: string; baseHead: string }
@@ -528,7 +520,7 @@ async function mergeWorkspaceArtifacts(ctx: AppContext, row: WorkspaceRow): Prom
       conflicts.push(change.path)
       continue
     }
-    mkdirSync(join(to, '..'), { recursive: true })
+    mkdirSync(dirname(to), { recursive: true })
     copyFileSync(from, to)
     merged.push(change.path)
   }

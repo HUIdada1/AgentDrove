@@ -59,8 +59,9 @@ export function createTray(deps: TrayDeps): { tray: Tray; rebuild(): void } {
   // 暂停状态可能由渲染层改写,仅在变化时重建菜单
   let lastPaused = deps.isPaused()
   const refreshTimer = setInterval(() => {
-    if (deps.isPaused() !== lastPaused) {
-      lastPaused = deps.isPaused()
+    const paused = deps.isPaused()
+    if (paused !== lastPaused) {
+      lastPaused = paused
       tray.setContextMenu(buildMenu())
     }
   }, 1000)

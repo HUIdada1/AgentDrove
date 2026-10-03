@@ -11,6 +11,7 @@ function segment(value: string | undefined): number {
 function compare(a: string, b: string): number {
   const left = a.split('.')
   const right = b.split('.')
+  // 只比主.次.修订三段,客户端版本不会出现更多层级
   for (let i = 0; i < 3; i++) {
     const diff = segment(left[i]) - segment(right[i])
     if (diff !== 0) return diff

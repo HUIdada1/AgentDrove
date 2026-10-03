@@ -89,10 +89,11 @@ function deepMerge(base: unknown, patch: unknown): unknown {
     }
     return out
   }
-  // 数组叶子(如 denyList)必须克隆;patch 数组同样克隆,否则用户配置的数组引用被改穿
+  // 数组叶子(如 denyList)必须克隆;patch 数组同样克隆,否则用户配置的数组引用被改穿;
+  // patch 非数组(手改 yaml 写错类型)按"非对象覆盖忽略"处理,保留默认数组避免标量穿透炸派发
   if (Array.isArray(base)) {
     if (patch === undefined) return [...base]
-    return Array.isArray(patch) ? [...patch] : patch
+    return Array.isArray(patch) ? [...patch] : [...base]
   }
   return patch === undefined ? base : patch
 }

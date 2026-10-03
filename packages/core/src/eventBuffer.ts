@@ -63,6 +63,10 @@ export class EventBuffer implements EventSink {
       this.queue = [...batch, ...this.queue]
       console.error('[agent-drove] 事件落库失败,批次已回灌缓冲:', error)
       this.flushing = false
+      // 回灌后重设窗口定时器:事件流停止时滞留的尾批也能到期重试
+      if (this.timer === undefined) {
+        this.timer = setTimeout(() => this.flush(), this.flushMs)
+      }
       return
     }
     try {

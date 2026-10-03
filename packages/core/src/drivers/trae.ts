@@ -9,6 +9,7 @@ import { DEFAULT_RUN_TIMEOUT_MS } from '../driver.js'
 import type { AgentProfile, ModelId, TaskMode } from '../types.js'
 import type { FileSystem, ProcessRunner } from '../ports.js'
 import { LineDecoder, decodeBuffer } from '../text.js'
+import { spawnForExit } from './spawnExit.js'
 
 const PROBE_TIMEOUT_MS = 15_000
 
@@ -82,7 +83,7 @@ export class TraeDriver implements AgentDriver {
     }
     // 派发前再确认未被取消:取消语义下不应再拉起 GUI 窗口
     if (signal.aborted) throw new Error('任务已取消,未启动进程')
-    const decoder = new LineDecoder()
+    const stdoutDecoder = new LineDecoder()
     const stderrDecoder = new LineDecoder()
     let timedOut = false
 
@@ -92,7 +93,7 @@ export class TraeDriver implements AgentDriver {
       cwd: input.cwd,
       shell: this.needsShell(options.agent.entry),
       onStdout: (chunk) => {
-        for (const line of decoder.push(chunk)) {
+        for (const line of stdoutDecoder.push(chunk)) {
           if (line) emit({ kind: 'message', channel: 'stdout', text: line })
         }
       },
@@ -113,8 +114,11 @@ export class TraeDriver implements AgentDriver {
 
     try {
       const code = await handle.exited
-      for (const line of decoder.flush()) {
+      for (const line of stdoutDecoder.flush()) {
         if (line) emit({ kind: 'message', channel: 'stdout', text: line })
+      }
+      for (const line of stderrDecoder.flush()) {
+        if (line) emit({ kind: 'message', channel: 'stderr', text: line })
       }
       if (timedOut && !signal.aborted) {
         throw new Error('看门狗超时,已终止进程树')
@@ -154,29 +158,17 @@ export class TraeDriver implements AgentDriver {
     args: string[],
     onStdout: (chunk: Buffer) => void = () => {},
   ): Promise<number> {
-    return new Promise<number>((resolve, reject) => {
-      const handle = this.runner.spawn({
+    return spawnForExit(
+      this.runner,
+      {
         command: entry,
         args,
         cwd: process.cwd(),
         shell: this.needsShell(entry),
         onStdout,
         onStderr: () => {},
-      })
-      const timer = setTimeout(() => {
-        void handle.killTree()
-        reject(new Error(`探测超时(${PROBE_TIMEOUT_MS}ms)`))
-      }, PROBE_TIMEOUT_MS)
-      void handle.exited.then(
-        (code) => {
-          clearTimeout(timer)
-          resolve(code)
-        },
-        (error) => {
-          clearTimeout(timer)
-          reject(error instanceof Error ? error : new Error(String(error)))
-        },
-      )
-    })
+      },
+      PROBE_TIMEOUT_MS,
+    )
   }
 }
