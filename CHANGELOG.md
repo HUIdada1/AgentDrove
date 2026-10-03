@@ -1,5 +1,12 @@
 # Changelog
 
+## v0.4.2 (2026-10-03)
+
+0b6e597 chore: ignore packages/main/AgentDrove(历史 electron 运行时残留副本,app.asar 被系统句柄锁定暂无法删除)
+cb4fa65 fix(renderer): 设置页永停"加载设置中"+ 四栏可拖拽分隔条
+369e964 fix(core+main+shared+renderer): 启动竞态致界面永久空态——装配/IPC/窗口同步段就绪,探测后台化补 agents:changed 推送
+6e97b38 chore(release): v0.4.1 版本同步与 CHANGELOG
+
 ## v0.4.1 (2026-10-03)
 
 0419deb fix(core+main+renderer): 深度自查八项修复——派发TDZ必崩清零/IME组词守卫/重扫注销失效客户端/托盘防御/最大化初始态
