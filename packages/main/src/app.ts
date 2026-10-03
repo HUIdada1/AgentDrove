@@ -136,10 +136,10 @@ async function bootstrap(): Promise<void> {
   const drivers = new Map<string, AgentDriver>()
   const zcodeCli = process.env.AGENTDROVE_ZCODE_CLI ?? 'E:\\ZCode\\resources\\glm\\zcode.cjs'
   const zcodeDriver = new ZcodeDriver(runner, fs, {
-    nodeBin: process.execPath,
+    nodeBin: resolveNodeBin(),
     cliPath: zcodeCli,
-    // 打包态 process.execPath 是 Electron exe,必须 ELECTRON_RUN_AS_NODE 才按 node 执行,
-    // 否则探测与派发都会拉起第二个 GUI 实例(dev 态 execPath 是系统 node,该变量无副作用)
+    // 打包态若回落到 Electron 运行时,必须 ELECTRON_RUN_AS_NODE 才按 node 执行,
+    // 否则探测与派发都会拉起第二个 GUI 实例;系统 node 下该变量无副作用
     nodeEnv: { ELECTRON_RUN_AS_NODE: '1' },
   })
   const qoderDriver = new QoderDriver(runner, fs)
@@ -590,4 +590,21 @@ function commandExists(name: string): Promise<boolean> {
     const result = spawnSync('where', [name], { timeout: 5000, windowsHide: true })
     resolve(result.status === 0)
   })
+}
+
+/**
+ * zcode CLI 的 node 二进制:dev 态 execPath 就是系统 node;
+ * 打包态 execPath 是 Electron 运行时——即便 ELECTRON_RUN_AS_NODE 也缺 node:sqlite
+ * 等 zcode 依赖的内置模块(doctor 直接退出码 1),必须落到系统 node。
+ * 优先级:环境变量覆盖 > PATH 里的 node > 回落 Electron-as-node(仅保证不再拉起 GUI 实例)。
+ */
+function resolveNodeBin(): string {
+  if (!app.isPackaged) return process.execPath
+  if (process.env.AGENTDROVE_NODE_BIN) return process.env.AGENTDROVE_NODE_BIN
+  const found = spawnSync('where', ['node'], { timeout: 5000, windowsHide: true })
+  const first =
+    found.status === 0
+      ? (found.stdout.toString().split(/\r?\n/).find((line) => line.trim()) ?? '').trim()
+      : ''
+  return first || process.execPath
 }

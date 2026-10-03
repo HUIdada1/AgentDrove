@@ -117,10 +117,12 @@ function pull(run: () => Promise<void>, label: string): void {
 export async function setTheme(theme: AppConfig['ui']['theme']): Promise<void> {
   const previous = settings.value
   if (!previous) return
-  const next = { ...previous, ui: { ...previous.ui, theme } }
-  settings.value = next
+  // 只提交 ui 组且必须深拷贝:previous 是响应式代理,浅展开的顶层组字段仍是 Proxy,
+  // 过 IPC 结构化克隆必抛 "An object could not be cloned"(ui 字段全为原始值,展开即纯)
+  const next = { ui: { ...previous.ui, theme } }
+  settings.value = { ...previous, ui: next.ui }
   try {
-    settings.value = await window.api.settingsUpdate({ ui: next.ui })
+    settings.value = await window.api.settingsUpdate(next)
     applyTheme(theme)
   } catch (error) {
     // 落盘失败回滚乐观更新,否则界面主题与持久化配置不一致

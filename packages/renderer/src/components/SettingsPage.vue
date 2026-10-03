@@ -87,13 +87,13 @@ onUnmounted(() => {
 async function save(): Promise<void> {
   const d = draft.value
   if (!d) return
-  // settings:update 按顶层浅合并,嵌套组必须整对象提交,否则会丢组内未编辑字段
+  // settings:update 按顶层浅合并,嵌套组必须整对象提交,否则会丢组内未编辑字段。
+  // 必须深拷贝成纯对象再过 IPC:draft 是 Vue 响应式代理,浅展开后嵌套组(failover 等)
+  // 仍是 Proxy,结构化克隆必抛 "An object could not be cloned"
   const ok = await run(async () => {
-    await window.api.settingsUpdate({
-      throttle: { ...d.throttle },
-      task: { ...d.task },
-      danger: { ...d.danger },
-    })
+    await window.api.settingsUpdate(
+      JSON.parse(JSON.stringify({ throttle: d.throttle, task: d.task, danger: d.danger })),
+    )
     await store.refreshSettings()
   }, '保存失败')
   if (!ok) return
