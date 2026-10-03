@@ -131,23 +131,17 @@ async function bootstrap(): Promise<void> {
     })
   })
 
-  // 主窗在主进程启动早期创建:更新状态/热键冲突等推送若先于此,渲染层桥尚未装好会丢
-  const entryUrl = await loadEntryUrl()
-  const mainWindow = createMainWindow(entryUrl)
-  const miniBar = createMiniBarWindow(entryUrl)
-
-  // 窗口已就绪:补执行启动期间挂起的"唤起面板"请求(second-instance 竞态)
-  panelReady = true
-  if (pendingShowPanel) {
-    pendingShowPanel = false
-    showPanel()
-  }
-
-  // ---- 客户端探测与注册(探测结果 + agents 表恢复启用状态)----
+  // ---- 客户端驱动与注册表:探测延后到窗口就绪后后台跑,注册表先以空态参与装配 ----
   const registry = new Registry()
   const drivers = new Map<string, AgentDriver>()
   const zcodeCli = process.env.AGENTDROVE_ZCODE_CLI ?? 'E:\\ZCode\\resources\\glm\\zcode.cjs'
-  const zcodeDriver = new ZcodeDriver(runner, fs, { nodeBin: process.execPath, cliPath: zcodeCli })
+  const zcodeDriver = new ZcodeDriver(runner, fs, {
+    nodeBin: process.execPath,
+    cliPath: zcodeCli,
+    // 打包态 process.execPath 是 Electron exe,必须 ELECTRON_RUN_AS_NODE 才按 node 执行,
+    // 否则探测与派发都会拉起第二个 GUI 实例(dev 态 execPath 是系统 node,该变量无副作用)
+    nodeEnv: { ELECTRON_RUN_AS_NODE: '1' },
+  })
   const qoderDriver = new QoderDriver(runner, fs)
   const traeDriver = new TraeDriver(runner, fs)
   const codexDriver = new CodexDriver(runner, fs)
@@ -155,7 +149,6 @@ async function bootstrap(): Promise<void> {
   drivers.set(qoderDriver.id, qoderDriver)
   drivers.set(traeDriver.id, traeDriver)
   drivers.set(codexDriver.id, codexDriver)
-  await detectAndRegisterAgents({ store, registry, logger, zcodeCli, zcodeDriver, traeDriver, qoderDriver, codexDriver })
 
   // ---- 核心装配 ----
   const scanner = new ArtifactScanner(runner, fs)
@@ -252,8 +245,8 @@ async function bootstrap(): Promise<void> {
     onStatus: pushUpdateStatus,
   })
 
-  // ---- 托盘 / 热键 ----
-  createTray({
+  // ---- 托盘(窗口前就位:关闭=隐藏到托盘依赖托盘存在;客户端菜单探测完成后 rebuild)----
+  const { rebuild: rebuildTrayMenu } = createTray({
     orchestrator,
     registry,
     iconPath: resolveIconPath(),
@@ -285,6 +278,12 @@ async function bootstrap(): Promise<void> {
       return choice
     },
   })
+
+  // ---- 主窗 + 迷你条:与下方 IPC 注册同属一个同步段,渲染层首拉时 handler 必已就绪 ----
+  // (客户端探测已移出启动链路,窗口不再被 10~30s 探测卡在"加载中"空数据态)
+  const entryUrl = await loadEntryUrl()
+  const mainWindow = createMainWindow(entryUrl)
+  const miniBar = createMiniBarWindow(entryUrl)
 
   // 热键可在设置页改键:保存后先注销旧键再注册新键,失败回执复用同一回调
   const hotkeyHandlers = {
@@ -324,6 +323,24 @@ async function bootstrap(): Promise<void> {
     pushUpdateStatus,
   }
   registerIpcHandlers(ctx)
+
+  // 窗口已就绪:补执行启动期间挂起的"唤起面板"请求(second-instance 竞态)
+  panelReady = true
+  if (pendingShowPanel) {
+    pendingShowPanel = false
+    showPanel()
+  }
+
+  // ---- 客户端探测后台化(探测结果 + agents 表恢复启用状态)----
+  // 完成后广播渲染层重拉客户端,并重建托盘"打开客户端"菜单(创建托盘时注册表还是空的)
+  void detectAndRegisterAgents({ store, registry, logger, zcodeCli, zcodeDriver, traeDriver, qoderDriver, codexDriver })
+    .then(() => {
+      notifyRenderer('agents:changed')
+      rebuildTrayMenu()
+    })
+    .catch((error) => {
+      logger.error('客户端探测失败', { error: error instanceof Error ? error.message : String(error) })
+    })
 
   // 生命周期:关闭=隐藏到托盘(7.1);托盘"退出"经 app.quit 触发本分支做落盘/关库清理
   let shuttingDown = false

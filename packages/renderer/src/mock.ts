@@ -261,6 +261,7 @@ export function installDevMock(): void {
     openPath: async () => {},
     onTasksEventsBatch: () => () => {},
     onTasksUpdated: () => () => {},
+    onAgentsChanged: () => () => {},
     onSchedulerChanged: () => () => {},
     onUpdateStatus: () => () => {},
     onPanelFocus: () => () => {},

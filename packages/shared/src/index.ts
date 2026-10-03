@@ -128,6 +128,8 @@ export interface PushEvents {
   onTasksEventsBatch(listener: (events: StoredEvent[]) => void): () => void
   /** 任务列表发生变化(新增/派生/状态迁移),渲染层重拉列表 */
   onTasksUpdated(listener: () => void): () => void
+  /** 客户端登记变化(启动后台探测完成/重扫),渲染层重拉客户端与用量 */
+  onAgentsChanged(listener: () => void): () => void
   /** 调度暂停状态变化(托盘/渲染层双向) */
   onSchedulerChanged(listener: (paused: boolean) => void): () => void
   /** 更新阶段变化 */

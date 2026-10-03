@@ -15,8 +15,9 @@ export interface TrayDeps {
 
 /**
  * 托盘(7.1):打开面板/快速派发/打开客户端(动态)/暂停调度(持久化)/检查更新/退出三选。
+ * 返回 rebuild 供客户端探测完成后重建菜单(启动时探测后台跑,菜单先以空客户端列表就位)。
  */
-export function createTray(deps: TrayDeps): Tray {
+export function createTray(deps: TrayDeps): { tray: Tray; rebuild(): void } {
   // 空 icon 会让托盘不可见,必须落在实体图标上
   let icon = nativeImage.createFromPath(deps.iconPath)
   if (icon.isEmpty() && process.resourcesPath) {
@@ -64,7 +65,7 @@ export function createTray(deps: TrayDeps): Tray {
     }
   }, 1000)
   app.on('quit', () => clearInterval(refreshTimer))
-  return tray
+  return { tray, rebuild: () => tray.setContextMenu(buildMenu()) }
 }
 
 export function showPanel(options: { quick?: boolean } = {}): void {

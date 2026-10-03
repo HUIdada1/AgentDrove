@@ -72,12 +72,14 @@ export function registerIpcHandlers(ctx: AppContext): void {
   ipcMain.handle('agents:rescan', async (): Promise<AgentView[]> => {
     // 重扫幂等且保留启停状态(以 agents 表落库为准),完成后按最新注册表组装列表
     await ctx.rescanAgents()
+    broadcastAgentsChanged()
     return buildAgentViews()
   })
 
   ipcMain.handle('agents:set-enabled', (_e, agentId: string, enabled: boolean) => {
     ctx.registry.setEnabled(agentId, enabled)
     persistAgent(ctx.store, ctx.registry.get(agentId))
+    broadcastAgentsChanged()
   })
 
   // ---- projects(项目工作区)----
@@ -467,6 +469,13 @@ function matchesFilter(task: TaskRecord, filter?: TaskFilterDto): boolean {
     if (day > filter.untilDay) return false
   }
   return true
+}
+
+/** 客户端登记/启停变化广播:所有窗口(主窗与迷你条)重拉客户端列表 */
+function broadcastAgentsChanged(): void {
+  for (const win of BrowserWindow.getAllWindows()) {
+    win.webContents.send('agents:changed')
+  }
 }
 
 function persistConfigPaused(ctx: AppContext, paused: boolean): void {

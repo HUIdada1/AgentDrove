@@ -14,6 +14,11 @@ import { LineDecoder, decodeBuffer, extractSessionId } from '../text.js'
 export interface ZcodeLocator {
   nodeBin: string
   cliPath: string
+  /**
+   * spawn 时的附加环境变量。打包态 nodeBin 是 Electron exe,
+   * 必须带 ELECTRON_RUN_AS_NODE=1 才按 node 执行,否则会拉起第二个 GUI 实例。
+   */
+  nodeEnv?: Record<string, string>
 }
 
 const PROBE_TIMEOUT_MS = 10_000
@@ -109,6 +114,7 @@ export class ZcodeDriver implements AgentDriver {
       command: this.locator.nodeBin,
       args,
       cwd: input.cwd,
+      env: this.locator.nodeEnv,
       onStdout: (chunk) => {
         for (const line of stdoutDecoder.push(chunk)) handleLine(line)
       },
@@ -200,6 +206,7 @@ export class ZcodeDriver implements AgentDriver {
         command: this.locator.nodeBin,
         args,
         cwd: process.cwd(),
+        env: this.locator.nodeEnv,
         onStdout,
         onStderr: () => {},
       })

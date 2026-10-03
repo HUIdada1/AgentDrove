@@ -221,6 +221,10 @@ export function installAppBridge(): void {
     pull(refreshTasks, 'tasks')
     pull(refreshWorkspaces, 'workspaces')
   })
+  // 启动期客户端探测后台完成/重扫/启停切换:主进程广播后重拉,侧栏从空态自愈
+  window.api.onAgentsChanged(() => {
+    pull(refreshAgents, 'agents')
+  })
   window.api.onSchedulerChanged((paused) => {
     if (settings.value) settings.value = { ...settings.value, schedulerPaused: paused }
   })

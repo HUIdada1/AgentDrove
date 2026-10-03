@@ -67,6 +67,7 @@ const api: AgentDroveApi = {
   onTasksEventsBatch: (listener) =>
     subscribe<[StoredEvent[]]>('tasks:events-batch', listener),
   onTasksUpdated: (listener) => subscribe<[]>('tasks:updated', listener),
+  onAgentsChanged: (listener) => subscribe<[]>('agents:changed', listener),
   onSchedulerChanged: (listener) => subscribe<[boolean]>('scheduler:changed', listener),
   onUpdateStatus: (listener) => subscribe<[UpdateStatus]>('update:status', listener),
   onPanelFocus: (listener) => subscribe<[]>('panel:focus-composer', listener),
