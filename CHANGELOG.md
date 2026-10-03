@@ -1,5 +1,10 @@
 # Changelog
 
+## v0.4.4 (2026-10-03)
+
+21f87d9 fix(core+main+renderer): 双板块深度审查修复——带附件派发必炸/探活并行/CSV转义等16项
+d7ee770 chore(release): v0.4.3 版本同步与 CHANGELOG
+
 ## v0.4.3 (2026-10-03)
 
 08eb27c fix(main+renderer): 打包态 zcode 改用系统 node + 设置保存/切主题的 IPC 克隆修复
