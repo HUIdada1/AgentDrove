@@ -113,7 +113,10 @@ async function markFailed(): Promise<void> {
 }
 
 async function openClient(): Promise<void> {
-  if (task.value) await run(() => window.api.launchApp(task.value!.agentId), '唤起客户端失败')
+  if (task.value)
+    await run(async () => {
+      await window.api.launchApp(task.value!.agentId)
+    }, '唤起客户端失败')
 }
 
 async function openWorkspace(): Promise<void> {

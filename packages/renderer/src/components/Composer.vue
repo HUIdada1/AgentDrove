@@ -135,14 +135,15 @@ async function pickWorkspace(): Promise<void> {
 
 /** 高级选项转 toolPolicy:非法/非正的 max-turns 忽略,绝不把 NaN 透传给主进程 */
 function resolveToolPolicy(): SubmitTaskDto['toolPolicy'] {
-  const denyList = denyList.value
+  // 局部名不得与外层 ref 同名:同名 const 在自身初始化器里处于 TDZ,运行时必抛
+  const denied = denyList.value
     .split(',')
     .map((t) => t.trim())
     .filter(Boolean)
   const turns = Number(maxTurns.value)
-  const maxTurns = maxTurns.value && Number.isFinite(turns) && turns > 0 ? turns : null
-  if (denyList.length === 0 && maxTurns === null) return undefined
-  return { denyList, maxTurns }
+  const cap = maxTurns.value && Number.isFinite(turns) && turns > 0 ? turns : null
+  if (denied.length === 0 && cap === null) return undefined
+  return { denyList: denied, maxTurns: cap }
 }
 
 async function submit(): Promise<void> {
@@ -186,6 +187,8 @@ async function submit(): Promise<void> {
 }
 
 function onKeydown(event: KeyboardEvent): void {
+  // 中文输入法组词态的 Enter(isComposing/229)是选词确认,不是提交意图
+  if (event.isComposing || event.keyCode === 229) return
   if (event.key === 'Enter' && !event.shiftKey) {
     event.preventDefault()
     void submit()

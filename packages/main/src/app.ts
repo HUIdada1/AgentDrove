@@ -270,7 +270,9 @@ async function bootstrap(): Promise<void> {
     },
     checkUpdates: () => update.checkForUpdates(),
     launchClient: (agentId) => {
-      void launcher.launchClient(registry.get(agentId))
+      // 重扫注销后托盘菜单可能仍持旧项(菜单按暂停态轮询重建):查不到就跳过,别让 get 抛错打穿托盘回调
+      const agent = registry.list().find((p) => p.id === agentId)
+      if (agent) void launcher.launchClient(agent)
     },
     onQuitRequested: async () => {
       const active = orchestrator.list().filter((t) => t.state === 'running' || t.state === 'queued')
@@ -387,12 +389,15 @@ async function detectAndRegisterAgents(deps: {
 }): Promise<void> {
   const { store, registry, logger, zcodeCli, zcodeDriver, traeDriver, qoderDriver, codexDriver } = deps
   const savedAgents = new Map(store.allAgents().map((row) => [row.id, row]))
+  // 本轮探测命中的 id;收尾据此注销"装过但现在没了"的客户端
+  const detectedIds = new Set<string>()
   const registerDetected = (detected: DetectedAgent, plan: AgentPlanOptions): void => {
     const profile = buildProfile(detected, plan, savedAgents.get(detected.id)?.enabled)
     // 重扫会再次命中已登记的 id,Registry.register 禁止重复注册,先移除旧档案按最新探测结果重建
     registry.unregister(detected.id)
     registry.register(profile)
     persistAgent(store, profile)
+    detectedIds.add(detected.id)
   }
   // 单个客户端探测异常(CLI 损坏/权限)不应拖垮整个启动或重扫:记日志后跳过
   const detectSafely = async (
@@ -460,6 +465,15 @@ async function detectAndRegisterAgents(deps: {
         followClient: false,
         attachments: false,
       })
+    }
+  }
+
+  // 旧登记但本轮未探到的客户端(卸载/目录迁移)注销出注册表,UI 即不再展示;
+  // agents 表行保留,重装后重扫可原样恢复启停状态
+  for (const profile of registry.list()) {
+    if (!detectedIds.has(profile.id)) {
+      registry.unregister(profile.id)
+      logger.info('客户端本轮未探到,已注销', { agent: profile.id })
     }
   }
 }
@@ -531,7 +545,11 @@ function createMainWindow(entryUrl: string): BrowserWindow {
     })
   }
 
-  win.once('ready-to-show', () => win.show())
+  win.once('ready-to-show', () => {
+    win.show()
+    // 渲染层就绪前若已处于最大化(会话恢复/启动即最大化),补推初始状态对齐标题栏图标
+    pushMaximized(win.isMaximized())
+  })
   void win.loadURL(entryUrl)
   return win
 }

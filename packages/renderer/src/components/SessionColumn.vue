@@ -118,6 +118,15 @@ function scrollBottom(force: boolean): void {
   }
 }
 
+/** 续聊框 Enter 提交;组词态 Enter 是输入法选词确认,拦截会破坏组词且误发送 */
+function onContinueKeydown(event: KeyboardEvent): void {
+  if (event.isComposing || event.keyCode === 229) return
+  if (event.key === 'Enter' && !event.shiftKey) {
+    event.preventDefault()
+    void sendContinue()
+  }
+}
+
 async function sendContinue(): Promise<void> {
   const text = continueText.value.trim()
   if (!text || !task.value || sending.value) return
@@ -210,7 +219,7 @@ function timeOf(at: number): string {
           send-label="发送"
           :send-disabled="sending || !continueText.trim()"
           :placeholder="task.sessionId ? '继续对话:追加提示词(Enter 发送)' : '续聊未拿到会话 id,发送后按 -c 续接最近会话'"
-          @keydown.enter.exact.prevent="sendContinue"
+          @keydown="onContinueKeydown"
           @send="sendContinue"
         />
         <p v-if="sendError" class="send-err">{{ sendError }}</p>

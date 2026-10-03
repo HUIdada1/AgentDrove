@@ -60,6 +60,8 @@ function onKeydown(event: KeyboardEvent): void {
     close()
     return
   }
+  // 组词态 Enter 是输入法选词确认,不派发
+  if (event.isComposing || event.keyCode === 229) return
   if (event.key === 'Enter' && !event.shiftKey) {
     event.preventDefault()
     void submit()
