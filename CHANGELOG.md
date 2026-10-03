@@ -1,5 +1,10 @@
 # Changelog
 
+## v0.4.1 (2026-10-03)
+
+0419deb fix(core+main+renderer): 深度自查八项修复——派发TDZ必崩清零/IME组词守卫/重扫注销失效客户端/托盘防御/最大化初始态
+e136775 chore(release): v0.4.0 版本同步与 CHANGELOG
+
 ## v0.4.0 (2026-10-03)
 
 69e0d82 fix(core+main+renderer): 五板块深度审查修复——4高危·40中危清零,补168测试与发布链
