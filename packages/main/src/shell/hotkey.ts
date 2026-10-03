@@ -50,5 +50,10 @@ export function toggleMiniBar(mini: BrowserWindow): void {
   }
   mini.show()
   mini.focus()
-  mini.webContents.send('mini:prefill', clipboard.readText().trim().slice(0, 4000))
+  const prefill = (): void => {
+    mini.webContents.send('mini:prefill', clipboard.readText().trim().slice(0, 4000))
+  }
+  // 页面尚未加载完成时 send 会丢;等 did-finish-load 再预填剪贴板
+  if (mini.webContents.isLoading()) mini.webContents.once('did-finish-load', prefill)
+  else prefill()
 }

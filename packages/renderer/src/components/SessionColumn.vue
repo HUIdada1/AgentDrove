@@ -3,6 +3,7 @@ import { computed, nextTick, onMounted, ref, watch } from 'vue'
 import { useAppStore } from '../stores/app'
 import GlassButton from '../ui/GlassButton.vue'
 import GlassInput from '../ui/GlassInput.vue'
+import { STATE_TEXT } from '../labels'
 import type { StoredEvent } from '@agent-drove/shared'
 
 /**
@@ -14,6 +15,8 @@ const events = ref<StoredEvent[]>([])
 const continueText = ref('')
 const scrollEl = ref<HTMLElement | null>(null)
 const loadingOlder = ref(false)
+const sending = ref(false)
+const sendError = ref('')
 let loadId = 0
 
 const task = computed(() => store.tasks.value.find((t) => t.id === store.selectedTaskId.value) ?? null)
@@ -26,11 +29,16 @@ const atBottom = ref(true)
 
 async function loadInitial(taskId: string): Promise<void> {
   const id = ++loadId
-  const page = await window.api.tasksEventsPage({ taskId, limit: 200 })
-  if (id !== loadId) return
-  events.value = page
-  await nextTick()
-  scrollBottom(true)
+  try {
+    const page = await window.api.tasksEventsPage({ taskId, limit: 200 })
+    if (id !== loadId) return
+    events.value = page
+    await nextTick()
+    scrollBottom(true)
+  } catch {
+    // 拉取失败保持空流(批推到达后仍会增量补进),避免旧任务的残留事件串场
+    if (id === loadId) events.value = []
+  }
 }
 
 async function loadOlder(): Promise<void> {
@@ -40,17 +48,20 @@ async function loadOlder(): Promise<void> {
   const firstSeq = events.value[0]!.seq
   const el = scrollEl.value
   const beforeHeight = el?.scrollHeight ?? 0
-  const page = await window.api.tasksEventsPage({ taskId: id, beforeSeq: firstSeq, limit: 200 })
-  // 等待期间用户切换了任务:丢弃过期页,避免把别的任务事件拼进当前流
-  if (task.value?.id !== id || events.value[0]?.seq !== firstSeq) {
+  try {
+    const page = await window.api.tasksEventsPage({ taskId: id, beforeSeq: firstSeq, limit: 200 })
+    // 等待期间用户切换了任务:丢弃过期页,避免把别的任务事件拼进当前流
+    if (task.value?.id !== id || events.value[0]?.seq !== firstSeq) return
+    events.value = [...page, ...events.value]
+    await nextTick()
+    // prepend 后补偿滚动位置,避免视觉跳动
+    if (el) el.scrollTop += el.scrollHeight - beforeHeight
+  } catch (error) {
+    sendError.value = `加载更早事件失败:${error instanceof Error ? error.message : String(error)}`
+  } finally {
+    // 无论成功/失败/中途切换都要复位,否则按钮会永久停在"加载中…"
     loadingOlder.value = false
-    return
   }
-  events.value = [...page, ...events.value]
-  await nextTick()
-  // prepend 后补偿滚动位置,避免视觉跳动
-  if (el) el.scrollTop += el.scrollHeight - beforeHeight
-  loadingOlder.value = false
 }
 
 watch(
@@ -58,6 +69,7 @@ watch(
   (id) => {
     events.value = []
     continueText.value = ''
+    sendError.value = ''
     if (id) void loadInitial(id)
   },
   { immediate: true },
@@ -99,30 +111,34 @@ function onScroll(): void {
 function scrollBottom(force: boolean): void {
   const el = scrollEl.value
   if (!el) return
-  if (force || atBottom.value) el.scrollTop = el.scrollHeight
+  if (force || atBottom.value) {
+    el.scrollTop = el.scrollHeight
+    // 程序化滚动不会立刻触发 onScroll,先同步跟随标志,避免下一次批推因中间态不跟随
+    atBottom.value = true
+  }
 }
 
 async function sendContinue(): Promise<void> {
   const text = continueText.value.trim()
-  if (!text || !task.value) return
-  const next = await window.api.tasksContinue(task.value.id, text)
-  continueText.value = ''
-  await store.refreshTasks()
-  store.selectedTaskId.value = next.id
+  if (!text || !task.value || sending.value) return
+  sending.value = true
+  sendError.value = ''
+  try {
+    const next = await window.api.tasksContinue(task.value.id, text)
+    continueText.value = ''
+    await store.refreshTasks()
+    store.selectedTaskId.value = next.id
+  } catch (error) {
+    // 续聊失败提示就地展示,保留输入内容,避免静默丢词
+    sendError.value = error instanceof Error ? error.message : String(error)
+  } finally {
+    sending.value = false
+  }
 }
 
 function timeOf(at: number): string {
   const d = new Date(at)
   return `${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}:${String(d.getSeconds()).padStart(2, '0')}`
-}
-
-const STATE_TEXT: Record<string, string> = {
-  queued: '排队',
-  running: '运行中',
-  completed: '已完成',
-  failed: '失败',
-  canceled: '已取消',
-  interrupted: '已中断',
 }
 </script>
 
@@ -139,15 +155,15 @@ const STATE_TEXT: Record<string, string> = {
 
       <div ref="scrollEl" class="stream" @scroll="onScroll">
         <!-- 事件 seq 从 1 起连续分配,首条 seq=1 即已到顶 -->
-        <button v-if="events.length > 0 && events[0]!.seq > 1" class="older" @click="loadOlder">
+        <GlassButton v-if="events.length > 0 && events[0]!.seq > 1" variant="ghost" size="sm" class="older" @click="loadOlder">
           {{ loadingOlder ? '加载中…' : '加载更早' }}
-        </button>
+        </GlassButton>
 
         <template v-for="event in events" :key="event.seq">
           <!-- 状态迁移:系统节点居中,不参与对话气泡 -->
           <div v-if="event.event.kind === 'state-changed'" class="node">
             <span class="node-chip">
-              {{ STATE_TEXT[event.event.from] ?? event.event.from }} → {{ STATE_TEXT[event.event.to] ?? event.event.to }}
+              {{ STATE_TEXT[event.event.from] }} → {{ STATE_TEXT[event.event.to] }}
               <span class="num t">{{ timeOf(event.at) }}</span>
             </span>
           </div>
@@ -191,10 +207,13 @@ const STATE_TEXT: Record<string, string> = {
           v-model="continueText"
           multiline
           :rows="2"
+          send-label="发送"
+          :send-disabled="sending || !continueText.trim()"
           :placeholder="task.sessionId ? '继续对话:追加提示词(Enter 发送)' : '续聊未拿到会话 id,发送后按 -c 续接最近会话'"
           @keydown.enter.exact.prevent="sendContinue"
+          @send="sendContinue"
         />
-        <GlassButton variant="primary" :disabled="!continueText.trim()" @click="sendContinue">发送</GlassButton>
+        <p v-if="sendError" class="send-err">{{ sendError }}</p>
       </footer>
     </template>
 
@@ -284,13 +303,6 @@ const STATE_TEXT: Record<string, string> = {
 
 .older {
   align-self: center;
-  font-size: 11px;
-  color: var(--muted);
-  background: var(--glass-bg);
-  border: 1px solid var(--line);
-  border-radius: 999px;
-  padding: 2px 12px;
-  cursor: pointer;
 }
 
 .node {
@@ -391,15 +403,19 @@ const STATE_TEXT: Record<string, string> = {
 }
 
 .composer {
-  display: grid;
-  grid-template-columns: 1fr auto;
-  gap: 8px;
   padding-top: 10px;
   border-top: 1px solid var(--line);
 }
 
 .composer :deep(.g-field) {
   background: var(--glass-bg);
+}
+
+.send-err {
+  margin: 6px 0 0;
+  font-size: 11px;
+  color: var(--err);
+  word-break: break-word;
 }
 
 .empty {

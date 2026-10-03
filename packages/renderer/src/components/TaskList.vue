@@ -1,13 +1,26 @@
 <script setup lang="ts">
-import { computed } from 'vue'
+import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
 import { useAppStore } from '../stores/app'
 import TaskCard from './TaskCard.vue'
 import GlassButton from '../ui/GlassButton.vue'
 import GlassInput from '../ui/GlassInput.vue'
 import GlassSelect from '../ui/GlassSelect.vue'
+import { STATE_FILTER_OPTIONS } from '../labels'
 import type { TaskRecord } from '@agent-drove/shared'
 
 const store = useAppStore()
+const searchRef = ref<{ focus: () => void } | null>(null)
+
+// 搜索框占位承诺了 Ctrl+K,这里兑现;Cmd+K 一并支持(Mac)
+function onHotkey(event: KeyboardEvent): void {
+  if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === 'k') {
+    event.preventDefault()
+    searchRef.value?.focus()
+  }
+}
+
+onMounted(() => window.addEventListener('keydown', onHotkey))
+onBeforeUnmount(() => window.removeEventListener('keydown', onHotkey))
 
 const visible = computed(() =>
   store.tasks.value.filter((t) => {
@@ -24,6 +37,13 @@ const activeProject = computed(() => store.selectedProject.value)
 
 const selecting = computed(() => store.selection.value.size > 0)
 
+/** 客户端下拉与卡片展示名共用一份 id→label 映射,避免每次渲染重建数组 */
+const agentLabels = computed(() => new Map(store.agents.value.map((a) => [a.id, a.label])))
+
+const agentOptions = computed(() =>
+  store.agents.value.map((a) => ({ value: a.id, label: a.label })),
+)
+
 function toggleSelect(id: string): void {
   const next = new Set(store.selection.value)
   if (next.has(id)) next.delete(id)
@@ -32,17 +52,19 @@ function toggleSelect(id: string): void {
 }
 
 async function batchCancel(): Promise<void> {
-  await window.api.tasksBatchCancel([...store.selection.value])
+  if (store.selection.value.size === 0) return
+  const ids = [...store.selection.value]
   store.selection.value = new Set()
+  await window.api.tasksBatchCancel(ids)
   await store.refreshTasks()
 }
 
 async function batchDelete(): Promise<void> {
-  const count = store.selection.value.size
-  if (count === 0) return
-  if (!window.confirm(`删除 ${count} 条任务及其事件记录?运行中的任务会跳过。`)) return
-  await window.api.tasksBatchDelete([...store.selection.value])
+  const ids = [...store.selection.value]
+  if (ids.length === 0) return
+  if (!window.confirm(`删除 ${ids.length} 条任务及其事件记录?运行中的任务会跳过。`)) return
   store.selection.value = new Set()
+  await window.api.tasksBatchDelete(ids)
   await store.refreshTasks()
 }
 
@@ -55,33 +77,31 @@ function onSearch(value: string): void {
   store.filter.value.search = value
 }
 
-const stateOptions = [
-  { value: '', label: '全部状态' },
-  { value: 'queued', label: '排队' },
-  { value: 'running', label: '运行中' },
-  { value: 'completed', label: '已完成' },
-  { value: 'failed', label: '失败' },
-  { value: 'canceled', label: '已取消' },
-  { value: 'interrupted', label: '已中断' },
-]
+/** 全选当前筛选结果,再点一次取消全选 */
+function toggleSelectAll(): void {
+  const list = visible.value
+  const allSelected = list.length > 0 && list.every((t) => store.selection.value.has(t.id))
+  store.selection.value = allSelected ? new Set() : new Set(list.map((t) => t.id))
+}
 </script>
 
 <template>
   <section class="tasks glass">
     <div class="filters">
       <GlassInput
+        ref="searchRef"
         :model-value="store.filter.value.search"
         placeholder="搜索任务(Ctrl+K)"
         @update:model-value="onSearch"
       />
       <GlassSelect
         :model-value="store.filter.value.agentId"
-        :options="store.agents.value.map((a) => ({ value: a.id, label: a.label }))"
+        :options="agentOptions"
         @update:model-value="store.filter.value.agentId = $event"
       />
       <GlassSelect
         :model-value="store.filter.value.state"
-        :options="stateOptions"
+        :options="STATE_FILTER_OPTIONS"
         @update:model-value="store.filter.value.state = $event"
       />
     </div>
@@ -89,6 +109,7 @@ const stateOptions = [
     <div v-if="selecting" class="batch">
       <span>已选 {{ store.selection.value.size }}</span>
       <span class="spacer" />
+      <GlassButton size="sm" variant="ghost" @click="toggleSelectAll">全选</GlassButton>
       <GlassButton size="sm" @click="batchCancel">批量取消</GlassButton>
       <GlassButton size="sm" variant="danger" @click="batchDelete">批量删除</GlassButton>
       <GlassButton size="sm" variant="ghost" @click="store.selection.value = new Set()">收起</GlassButton>
@@ -99,7 +120,9 @@ const stateOptions = [
       <span class="scope-name">{{ activeProject.name }}</span>
       <span class="scope-path">{{ activeProject.path ?? '未绑定目录 · 派发落默认工作区' }}</span>
       <span class="spacer" />
-      <button class="mini" title="回到全部工作区" @click="store.selectedProjectId.value = null">查看全部×</button>
+      <GlassButton variant="ghost" size="sm" title="回到全部工作区" @click="store.selectedProjectId.value = null">
+        查看全部×
+      </GlassButton>
     </div>
 
     <div class="list">
@@ -107,6 +130,7 @@ const stateOptions = [
         v-for="task in visible"
         :key="task.id"
         :task="task"
+        :agent-label="agentLabels.get(task.agentId)"
         :selected="store.selectedTaskId.value === task.id"
         :checked="store.selection.value.has(task.id)"
         @click="onCardClick(task)"
@@ -188,21 +212,6 @@ const stateOptions = [
 
 .scope .spacer {
   flex: 1;
-}
-
-.scope .mini {
-  font-size: 11px;
-  padding: 2px 8px;
-  border-radius: 7px;
-  border: 1px solid var(--line);
-  background: var(--glass-bg);
-  color: var(--muted);
-  cursor: pointer;
-}
-
-.scope .mini:hover {
-  color: var(--text);
-  border-color: var(--line-strong);
 }
 
 .list {

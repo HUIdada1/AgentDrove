@@ -11,6 +11,7 @@ const emit = defineEmits<{ click: [event: MouseEvent] }>()
 
 <template>
   <button
+    type="button"
     class="g-btn"
     :class="[variant ?? 'plain', size ?? 'md']"
     :disabled="disabled"

@@ -24,6 +24,8 @@ export class MemoryTaskRepository implements TaskRepository {
 
   deleteTask(id: string): void {
     this.tasks.delete(id)
+    // 事件随任务一并清理,否则删除后事件表残留(长跑内存泄漏)
+    this.events.delete(id)
   }
 
   appendEvents(events: StoredEvent[]): void {

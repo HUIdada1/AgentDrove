@@ -1,4 +1,4 @@
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { DEFAULT_CONFIG, mergeConfig, type AppConfig, type ConfigSource } from '@agent-drove/core'
 import { parse, stringify } from 'yaml'
@@ -55,5 +55,9 @@ export function saveYamlConfig(
   fileName = 'settings.yaml',
 ): void {
   mkdirSync(configDir, { recursive: true })
-  writeFileSync(join(configDir, fileName), stringify(config, { lineWidth: 100 }), 'utf8')
+  const file = join(configDir, fileName)
+  // 先写临时文件再原子替换:写入中途崩溃不会留下半截 YAML 导致下次启动丢配置
+  const tmp = `${file}.tmp-${process.pid}`
+  writeFileSync(tmp, stringify(config, { lineWidth: 100 }), 'utf8')
+  renameSync(tmp, file)
 }

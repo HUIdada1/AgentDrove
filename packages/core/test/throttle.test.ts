@@ -115,14 +115,13 @@ describe('Throttle 放行条件', () => {
   })
 
   it('客户端级别账不影响其他客户端(qoder 有独立台账)', () => {
-    const { throttle, ledger, clock } = makeThrottle()
+    const { throttle, clock } = makeThrottle()
     const zcodeCapped = { ...zcodeProfile, plan: { ...zcodeProfile.plan, dailyTaskCap: 1 } }
     throttle.chargeAtSubmit(taskOf({ createdAt: clock.now() }))
     expect(
       throttle.canRelease(taskOf({}), zcodeCapped, free).reason,
     ).toBe('daily-cap')
     expect(throttle.canRelease(taskOf({ agentId: 'qoder' }), qoderProfile, free).ok).toBe(true)
-    void ledger
   })
 })
 

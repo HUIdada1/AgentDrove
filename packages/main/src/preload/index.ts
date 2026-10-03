@@ -20,6 +20,7 @@ const api: AgentDroveApi = {
   agentsList: () => ipcRenderer.invoke('agents:list'),
   agentsSetEnabled: (agentId, enabled) =>
     ipcRenderer.invoke('agents:set-enabled', agentId, enabled),
+  agentsRescan: () => ipcRenderer.invoke('agents:rescan'),
 
   projectsList: () => ipcRenderer.invoke('projects:list'),
   projectsPickAndAdd: () => ipcRenderer.invoke('projects:pick-and-add'),
@@ -71,6 +72,12 @@ const api: AgentDroveApi = {
   onPanelFocus: (listener) => subscribe<[]>('panel:focus-composer', listener),
   onHotkeyConflict: (listener) => subscribe<[string]>('hotkey:conflict', listener),
   onMiniPrefill: (listener) => subscribe<[string]>('mini:prefill', listener),
+  onWindowMaximized: (listener) => subscribe<[boolean]>('window:maximized', listener),
+
+  // 窗口控制(自定义标题栏右上角按钮);真实窗口由 sender 定位,主窗关闭即隐藏到托盘
+  windowMinimize: () => ipcRenderer.invoke('window:minimize'),
+  windowToggleMaximize: () => ipcRenderer.invoke('window:toggle-maximize'),
+  windowClose: () => ipcRenderer.invoke('window:close'),
 
   // 隐藏窗口是单向通知,走 send 而非 invoke;真实路径只有主进程能解析
   hideMini: async () => ipcRenderer.send('window:hide-mini'),

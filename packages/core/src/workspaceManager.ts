@@ -1,6 +1,7 @@
 import { randomUUID } from 'node:crypto'
 import { basename, join } from 'node:path'
 import type { Clock, FileSystem, ProcessRunner } from './ports.js'
+import { decodeBuffer } from './text.js'
 
 export type WorkspaceKind = 'worktree' | 'tempcopy' | 'userdir'
 export type WorkspaceStatus = 'active' | 'done' | 'cleaned'
@@ -135,13 +136,23 @@ export class WorkspaceManager {
         await this.git(repo, ['worktree', 'remove', '--force', row.path])
         await this.git(repo, ['branch', '-D', `agentdrove/${row.taskId.slice(0, 8)}`])
       } catch {
-        // git 清理失败仍要解除登记,避免行永久滞留;残留目录由用户手动处理
-        this.fsx.remove(row.path)
+        // git 清理失败仍要解除登记;worktree remove 通常已删目录,
+        // 仅当 remove 未落地(目录仍在)时才直接删,避免二次清理时对已删路径no-op报错
+        if (this.fsx.exists(row.path)) this.safeRemove(row.path)
       }
     } else if (row.kind === 'tempcopy') {
-      this.fsx.remove(row.path)
+      this.safeRemove(row.path)
     }
     this.store.put({ ...row, status: 'cleaned' })
+  }
+
+  /** 物理清理失败不阻断登记解除:行永久滞留会让到期清理反复重试 */
+  private safeRemove(path: string): void {
+    try {
+      this.fsx.remove(path)
+    } catch {
+      // 目录被占用/权限不足时留给用户手动处理
+    }
   }
 
   private async isGitRepo(path: string): Promise<boolean> {
@@ -154,38 +165,51 @@ export class WorkspaceManager {
   }
 
   private git(cwd: string, args: string[]): Promise<string> {
-    return new Promise<string>((resolve, reject) => {
-      const chunks: Buffer[] = []
-      const errors: Buffer[] = []
-      const handle = this.runner.spawn({
-        command: 'git',
-        args,
-        cwd,
-        onStdout: (chunk) => chunks.push(chunk),
-        onStderr: (chunk) => errors.push(chunk),
-      })
-      const timer = setTimeout(() => {
-        void handle.killTree()
-        reject(new Error('git 调用超时(30s)'))
-      }, 30_000)
-      void handle.exited.then(
-        (code) => {
-          clearTimeout(timer)
-          if (code !== 0) {
-            reject(
-              new Error(
-                `git ${args[0]} 退出码 ${code}${errors.length > 0 ? `:${new TextDecoder().decode(Buffer.concat(errors)).trim()}` : ''}`,
-              ),
-            )
-          } else {
-            resolve(chunks.length > 0 ? new TextDecoder().decode(Buffer.concat(chunks)) : '')
-          }
-        },
-        (error) => {
-          clearTimeout(timer)
-          reject(error instanceof Error ? error : new Error(String(error)))
-        },
-      )
-    })
+    return runGitProcess(this.runner, cwd, args)
   }
+}
+
+/** git 调用超时(产物扫描与工作区派生共用) */
+export const GIT_TIMEOUT_MS = 30_000
+
+/**
+ * 统一 git 调用:捕获 stdout/stderr、超时强杀、退出码校验。
+ * 产物扫描与工作区管理共用同一实现,避免两处各写一份超时/解码逻辑。
+ */
+export function runGitProcess(
+  runner: ProcessRunner,
+  cwd: string,
+  args: string[],
+  timeoutMs: number = GIT_TIMEOUT_MS,
+): Promise<string> {
+  return new Promise<string>((resolve, reject) => {
+    const chunks: Buffer[] = []
+    const errors: Buffer[] = []
+    const handle = runner.spawn({
+      command: 'git',
+      args,
+      cwd,
+      onStdout: (chunk) => chunks.push(chunk),
+      onStderr: (chunk) => errors.push(chunk),
+    })
+    const timer = setTimeout(() => {
+      void handle.killTree()
+      reject(new Error(`git 调用超时(${timeoutMs}ms):git ${args.join(' ')}`))
+    }, timeoutMs)
+    void handle.exited.then(
+      (code) => {
+        clearTimeout(timer)
+        if (code !== 0) {
+          const reason = decodeBuffer(Buffer.concat(errors)).trim()
+          reject(new Error(`git ${args.join(' ')} 退出码 ${code}${reason ? `:${reason}` : ''}`))
+        } else {
+          resolve(decodeBuffer(Buffer.concat(chunks)))
+        }
+      },
+      (error) => {
+        clearTimeout(timer)
+        reject(error instanceof Error ? error : new Error(String(error)))
+      },
+    )
+  })
 }

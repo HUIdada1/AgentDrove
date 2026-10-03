@@ -47,7 +47,8 @@ export function createTray(deps: TrayDeps): Tray {
         label: '退出',
         click: () => {
           void deps.onQuitRequested().then((choice) => {
-            if (choice !== 'wait') app.exit(0)
+            // 走 app.quit 而非 app.exit:后者不触发 before-quit,会跳过事件落盘与关库清理
+            if (choice !== 'wait') app.quit()
           })
         },
       },
@@ -68,9 +69,12 @@ export function createTray(deps: TrayDeps): Tray {
 
 export function showPanel(options: { quick?: boolean } = {}): void {
   // 迷你条与主窗共用窗口列表,按 hash 区分,避免托盘"打开面板"聚焦到迷你条
+  // 先剔除已销毁窗口:向销毁的 webContents 读 URL/send 会抛错
+  const windows = BrowserWindow.getAllWindows().filter(
+    (w) => !w.isDestroyed() && !w.webContents.isDestroyed(),
+  )
   const win =
-    BrowserWindow.getAllWindows().find((w) => !w.webContents.getURL().includes('#mini')) ??
-    BrowserWindow.getAllWindows()[0]
+    windows.find((w) => !w.webContents.getURL().includes('#mini')) ?? windows[0]
   if (!win) {
     // 窗口被销毁的极端场景:重启应用
     app.relaunch()
@@ -86,12 +90,12 @@ export function showPanel(options: { quick?: boolean } = {}): void {
 }
 
 export async function confirmExitWithRunning(
-  runningCount: number,
+  activeCount: number,
 ): Promise<'wait' | 'cancel-and-exit' | 'force'> {
   const { response } = await dialog.showMessageBox({
     type: 'question',
-    title: '存在运行中的任务',
-    message: `还有 ${runningCount} 个任务正在运行,如何处理?`,
+    title: '存在未完成任务',
+    message: `还有 ${activeCount} 个任务未完成(运行中或排队),如何处理?`,
     // 中断语义:进程退出后由下次启动恢复为 interrupted;取消语义才是立即 canceled
     buttons: ['等待完成(隐藏到托盘)', '取消任务并退出', '退出(任务标记为 interrupted)'],
     defaultId: 0,

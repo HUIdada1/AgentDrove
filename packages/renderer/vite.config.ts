@@ -1,10 +1,10 @@
 import { readFileSync } from 'node:fs'
-import { resolve } from 'node:path'
+import { fileURLToPath } from 'node:url'
 import { defineConfig } from 'vite'
 import vue from '@vitejs/plugin-vue'
 
 // core 产物按 Node 编译,浏览器端内建模块走垫片(函数体在渲染层从不执行)
-const nodeShim = resolve(__dirname, 'src/shims/node.ts')
+const nodeShim = fileURLToPath(new URL('./src/shims/node.ts', import.meta.url))
 
 export default defineConfig({
   plugins: [
@@ -23,7 +23,6 @@ export default defineConfig({
     alias: [
       { find: /^node:crypto$/, replacement: nodeShim },
       { find: /^node:path$/, replacement: nodeShim },
-      { find: /^node:fs$/, replacement: nodeShim },
     ],
   },
   // 版本号进运行时常量,关于卡直接读,免一次 IPC 往返

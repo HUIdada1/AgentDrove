@@ -1,6 +1,5 @@
 <script setup lang="ts">
 import { onMounted, onUnmounted, ref } from 'vue'
-import GlassButton from '../ui/GlassButton.vue'
 import GlassInput from '../ui/GlassInput.vue'
 import GlassSelect from '../ui/GlassSelect.vue'
 import Logo from './Logo.vue'
@@ -14,19 +13,28 @@ const submitting = ref(false)
 const area = ref<HTMLTextAreaElement | null>(null)
 
 let offPrefill: (() => void) | null = null
+let disposed = false
 
 onMounted(async () => {
-  agents.value = await window.api.agentsList()
-  if (!agentId.value) agentId.value = agents.value.find((a) => a.enabled)?.id ?? ''
-  // 预填跟随主进程推送(唤起时剪贴板);空推送视为无选中文本,不覆盖未发送的草稿
+  // 先挂预填监听:不依赖 agents 拉取,也避免注册前到达的推送被丢掉
   offPrefill = window.api.onMiniPrefill((text) => {
     if (text) prompt.value = text
     area.value?.focus()
   })
   area.value?.focus()
+  try {
+    agents.value = await window.api.agentsList()
+    if (disposed) return
+    if (!agentId.value) agentId.value = agents.value.find((a) => a.enabled)?.id ?? ''
+  } catch {
+    // 拉取失败保留空态:窗口不关,用户可 Esc 关闭或用推送预填直接派发
+  }
 })
 
-onUnmounted(() => offPrefill?.())
+onUnmounted(() => {
+  disposed = true
+  offPrefill?.()
+})
 
 function close(): void {
   void window.api.hideMini()
@@ -73,15 +81,16 @@ function onKeydown(event: KeyboardEvent): void {
         <GlassInput
           ref="area"
           v-model="prompt"
+          class="fill"
           multiline
           :rows="2"
+          send-label="派发"
+          :send-disabled="submitting || !prompt.trim() || !agentId"
           placeholder="把任务派发给客户端…(Enter 派发 / Esc 关闭)"
           @keydown="onKeydown"
+          @send="submit"
         />
       </div>
-      <GlassButton variant="primary" :disabled="submitting || !prompt.trim() || !agentId" @click="submit">
-        派发
-      </GlassButton>
     </div>
   </div>
 </template>
@@ -115,6 +124,12 @@ function onKeydown(event: KeyboardEvent): void {
   flex: 1;
   min-width: 0;
   display: flex;
+}
+
+/* GlassInput 根是定位 wrapper,行方向 flex 里需显式撑满 */
+.field .fill {
+  flex: 1;
+  min-width: 0;
 }
 
 .field :deep(.g-field) {

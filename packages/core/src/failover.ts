@@ -47,7 +47,8 @@ export class Failover {
     if (ctx.runningCwds().has(failedTask.cwd)) {
       return { derived: null, reason: '工作区正被运行中任务占用' }
     }
-    for (const candidate of this.orderedCandidates(failedTask.agentId)) {
+    for (const candidate of this.registry.list()) {
+      if (candidate.id === failedTask.agentId) continue
       if (!candidate.enabled) continue
       if (ctx.chargedToday(candidate) >= candidate.plan.dailyTaskCap) continue
       if (failedTask.attachments.length > 0 && !candidate.capabilities.attachments) continue
@@ -58,6 +59,7 @@ export class Failover {
           agentId: candidate.id,
           prompt: failedTask.prompt,
           cwd: failedTask.cwd,
+          projectId: failedTask.projectId,
           attachments: failedTask.attachments,
           toolPolicy: failedTask.toolPolicy,
           modelId: candidate.defaultModel,
@@ -73,10 +75,6 @@ export class Failover {
       }
     }
     return { derived: null, reason: '无可用降级目标' }
-  }
-
-  private orderedCandidates(excludeAgentId: string): AgentProfile[] {
-    return this.registry.list().filter((profile) => profile.id !== excludeAgentId)
   }
 }
 

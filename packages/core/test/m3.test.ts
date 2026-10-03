@@ -4,6 +4,7 @@ import { HealthCheckService } from '../src/healthCheck.js'
 import { MockDriver } from '../src/drivers/mock.js'
 import { Orchestrator } from '../src/orchestrator.js'
 import { Registry } from '../src/registry.js'
+import { satisfiesRange } from '../src/version.js'
 import type { AgentProfile } from '../src/index.js'
 import {
   FixedClock,
@@ -217,5 +218,52 @@ describe('续聊链', () => {
     await waitFor(() => followUp.state === 'completed')
     expect(seenInput.sessionId).toBeUndefined()
     expect(seenInput.resumeLatest).toBe(true)
+  })
+
+  it('续聊继承父任务 toolPolicy,工具策略不静默丢失', async () => {
+    const registry = new Registry()
+    registry.register(zcodeProfile)
+    const repo = new MemoryTaskRepository()
+    const orchestrator = new Orchestrator(registry, {
+      repo,
+      sink: new PassthroughSink(repo),
+      defaultCwd: 'C:/tmp/ws',
+    })
+    orchestrator.registerDriver(new MockDriver('zcode', { sessionId: 'sess-tools1234' }))
+    const first = orchestrator.submit({
+      agentId: 'zcode',
+      prompt: '首轮',
+      toolPolicy: { denyList: ['rm'], maxTurns: 3 },
+    })
+    await waitFor(() => first.state === 'completed')
+    const followUp = orchestrator.continueConversation(first.id, '继续')
+    expect(followUp.toolPolicy).toEqual({ denyList: ['rm'], maxTurns: 3 })
+  })
+})
+
+describe('版本范围解析', () => {
+  it('容忍客户端版本后缀(0.16.9-beta)', () => {
+    expect(satisfiesRange('0.16.9-beta', '>=0.16 <0.17')).toBe(true)
+  })
+
+  it('空范围视为全部放行', () => {
+    expect(satisfiesRange('1.0.0', '')).toBe(true)
+  })
+
+  it('越界与非法子句返回 false', () => {
+    expect(satisfiesRange('0.15.0', '>=0.16')).toBe(false)
+    expect(satisfiesRange('0.16.0', '^0.16')).toBe(false)
+  })
+})
+
+describe('Registry 重扫重建', () => {
+  it('unregister 移除旧档案后可重新登记,id 不存在时静默(重扫幂等前提)', () => {
+    const registry = new Registry()
+    registry.register(zcodeProfile)
+    registry.unregister(zcodeProfile.id)
+    expect(() => registry.get(zcodeProfile.id)).toThrow('unknown agent')
+    expect(() => registry.unregister('no-such-agent')).not.toThrow()
+    registry.register({ ...zcodeProfile, version: '0.16.10' })
+    expect(registry.get(zcodeProfile.id).version).toBe('0.16.10')
   })
 })

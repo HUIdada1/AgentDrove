@@ -25,6 +25,12 @@ export class Journal {
     origin: string,
     refs: { agentId?: string; taskId?: string; detail?: string } = {},
   ): void {
-    this.store?.append({ at: this.clock.now(), action, origin, ...refs })
+    if (!this.store) return
+    try {
+      this.store.append({ at: this.clock.now(), action, origin, ...refs })
+    } catch (error) {
+      // 审计写入失败不能拖垮调度状态机:journal 只是旁路记录
+      console.error('[agent-drove] 审计日志写入失败:', error)
+    }
   }
 }

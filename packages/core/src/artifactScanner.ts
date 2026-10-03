@@ -1,9 +1,8 @@
 import { join } from 'node:path'
 import type { FileSystem, ProcessRunner } from './ports.js'
-import { decodeBuffer } from './text.js'
 import type { TaskRecord } from './types.js'
 import type { Orchestrator } from './orchestrator.js'
-import type { WorkspaceStore, WorktreeSource } from './workspaceManager.js'
+import { runGitProcess, type WorkspaceStore, type WorktreeSource } from './workspaceManager.js'
 
 export interface ArtifactChange {
   path: string
@@ -33,9 +32,19 @@ export class ArtifactScanner {
     private readonly fsx: FileSystem,
   ) {}
 
-  async snapshotWorktree(repo: string, worktree: string): Promise<ArtifactBaseline> {
-    const baseHead = (await this.git(repo, ['rev-parse', 'HEAD'])).trim()
-    return { kind: 'worktree', repo, worktree, baseHead }
+  /**
+ * worktree 基线。baseHead 可显式传入:重启补扫时必须用登记行里记录的分支创建点,
+ * 若重新 rev-parse HEAD 会把创建点之后已提交的产物漏掉。
+ */
+  async snapshotWorktree(
+    repo: string,
+    worktree: string,
+    baseHead?: string,
+  ): Promise<ArtifactBaseline> {
+    const head = baseHead && baseHead.length > 0
+      ? baseHead
+      : (await this.git(repo, ['rev-parse', 'HEAD'])).trim()
+    return { kind: 'worktree', repo, worktree, baseHead: head }
   }
 
   snapshotDir(dir: string): Extract<ArtifactBaseline, { kind: 'snapshot' }> {
@@ -105,7 +114,10 @@ export class ArtifactScanner {
   /** 相对路径快照;排除目录在任意层级生效 */
   private walk(root: string): Map<string, SnapshotEntry> {
     const files = new Map<string, SnapshotEntry>()
-    const visit = (dir: string, prefix: string): void => {
+    // 显式栈而非递归:深目录树不会撑爆调用栈
+    const stack: Array<{ dir: string; prefix: string }> = [{ dir: root, prefix: '' }]
+    while (stack.length > 0) {
+      const { dir, prefix } = stack.pop()!
       for (const name of this.fsx.readDir(dir)) {
         if (EXCLUDED_DIRS.has(name)) continue
         const full = join(dir, name)
@@ -113,47 +125,17 @@ export class ArtifactScanner {
         const stat = this.fsx.stat(full)
         if (!stat) continue
         if (stat.isDirectory) {
-          visit(full, rel)
+          stack.push({ dir: full, prefix: rel })
         } else {
           files.set(rel, { mtimeMs: stat.mtimeMs, size: stat.size })
         }
       }
     }
-    visit(root, '')
     return files
   }
 
-  private async git(cwd: string, args: string[]): Promise<string> {
-    const chunks: Buffer[] = []
-    const errors: Buffer[] = []
-    const handle = this.runner.spawn({
-      command: 'git',
-      args,
-      cwd,
-      onStdout: (chunk) => chunks.push(chunk),
-      onStderr: (chunk) => errors.push(chunk),
-    })
-    const code = await new Promise<number>((resolve, reject) => {
-      const timer = setTimeout(() => {
-        void handle.killTree()
-        reject(new Error('git 调用超时(30s)'))
-      }, 30_000)
-      void handle.exited.then(
-        (exitCode) => {
-          clearTimeout(timer)
-          resolve(exitCode)
-        },
-        (error) => {
-          clearTimeout(timer)
-          reject(error instanceof Error ? error : new Error(String(error)))
-        },
-      )
-    })
-    if (code !== 0) {
-      const reason = decodeBuffer(Buffer.concat(errors)).trim()
-      throw new Error(`git ${args.join(' ')} 退出码 ${code}${reason ? `:${reason}` : ''}`)
-    }
-    return decodeBuffer(Buffer.concat(chunks))
+  private git(cwd: string, args: string[]): Promise<string> {
+    return runGitProcess(this.runner, cwd, args)
   }
 }
 
@@ -186,7 +168,7 @@ export class ArtifactTracking {
 
   /** markFailed 的补扫:仅 worktree 可重建基线,其余跳过 */
   async rescanAfterMarkFailed(task: TaskRecord, orchestrator: Orchestrator): Promise<void> {
-    const baseline = await this.buildBaseline(task)
+    const baseline = await this.buildBaseline(task, { reuseStoredHead: true })
     if (baseline === 'unavailable' || baseline.kind === 'snapshot') {
       orchestrator.emitTaskEvent(task.id, {
         kind: 'warning',
@@ -197,14 +179,19 @@ export class ArtifactTracking {
     await this.scanAndEmit(task, baseline, orchestrator)
   }
 
-  private async buildBaseline(task: TaskRecord): Promise<ArtifactBaseline | 'unavailable'> {
+  private async buildBaseline(
+    task: TaskRecord,
+    opts: { reuseStoredHead?: boolean } = {},
+  ): Promise<ArtifactBaseline | 'unavailable'> {
     const row = this.workspaces
       ?.all()
       .find((r) => r.path === task.cwd && r.kind === 'worktree' && r.source)
     if (row?.source) {
       try {
         const source = JSON.parse(row.source) as WorktreeSource
-        return await this.scanner.snapshotWorktree(source.repo, task.cwd)
+        // 补扫复用登记行的分支创建点;run 前则现场取 HEAD(等价于创建点)
+        const baseHead = opts.reuseStoredHead ? source.baseHead : undefined
+        return await this.scanner.snapshotWorktree(source.repo, task.cwd, baseHead)
       } catch {
         // 登记行损坏或 git 失败时按快照兜底
       }

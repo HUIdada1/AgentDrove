@@ -54,7 +54,19 @@ function run(cmd, args, opts = {}) {
   // pnpm/npx 在 Windows 上是 .cmd  shim,需经 cmd.exe 执行;git/gh 是原生 exe,不走 shell
   const needsShell = process.platform === 'win32' && /^(pnpm|npx|npm)$/.test(cmd)
   const r = spawnSync(cmd, args, { stdio: 'inherit', shell: needsShell, cwd: repoRoot, ...opts })
+  // spawnSync 找不到可执行文件时 status 为 null,需按 error 给出可读原因
+  if (r.error) die(`命令无法执行(${r.error.message}): ${cmd} ${args.join(' ')}`)
   if (r.status !== 0) die(`命令失败(退出码 ${r.status}): ${cmd} ${args.join(' ')}`)
+  return r
+}
+
+/** 与 run 相同的执行方式,但失败只告警不中断(用于非阻断的收尾步骤) */
+function runSoft(cmd, args, opts = {}) {
+  log(`\n==> ${cmd} ${args.join(' ')}`)
+  const needsShell = process.platform === 'win32' && /^(pnpm|npx|npm)$/.test(cmd)
+  const r = spawnSync(cmd, args, { stdio: 'inherit', shell: needsShell, cwd: repoRoot, ...opts })
+  if (r.error) warn(`[release] 警告: 命令无法执行(${r.error.message}): ${cmd} ${args.join(' ')}`)
+  else if (r.status !== 0) warn(`[release] 警告: 命令失败(退出码 ${r.status}): ${cmd} ${args.join(' ')}`)
   return r
 }
 
@@ -84,6 +96,7 @@ if (!noUpload) {
 // ---------------- ② 版本同步 ----------------
 const rootPkgPath = path.join(repoRoot, 'package.json')
 const rootPkg = readJSON(rootPkgPath)
+if (!rootPkg.version) die('根 package.json 缺少 version 字段,无法确定上一版本')
 
 function bumpVersion(v, type) {
   const [maj, min, pat] = String(v).split('.').map((n) => Number.parseInt(n, 10) || 0)
@@ -92,7 +105,7 @@ function bumpVersion(v, type) {
   return `${maj}.${min}.${pat + 1}`
 }
 
-const newVersion = bumpVersion(rootPkg.version ?? '0.1.0', bumpType)
+const newVersion = bumpVersion(rootPkg.version, bumpType)
 const syncTargets = [
   rootPkgPath,
   path.join(repoRoot, 'packages', 'core', 'package.json'),
@@ -124,9 +137,14 @@ run('npx', ['electron-builder', '--win', 'nsis', '--publish', 'never'], { cwd: m
 // 打包过程会把 better-sqlite3 重编到 Electron ABI,发版后立即恢复 Node ABI,
 // 否则本地 vitest(跑在 node 上)加载原生模块直接报 NODE_MODULE_VERSION 不匹配
 log('\n[release] 恢复 better-sqlite3 的 Node ABI(打包把它重编成了 Electron ABI)')
-const nodeRequire = createRequire(path.join(mainDir, 'package.json'))
-const sqliteDir = path.dirname(nodeRequire.resolve('better-sqlite3/package.json'))
-run('npx', ['node-gyp', 'rebuild', '--release'], { cwd: sqliteDir })
+try {
+  const nodeRequire = createRequire(path.join(mainDir, 'package.json'))
+  const sqliteDir = path.dirname(nodeRequire.resolve('better-sqlite3/package.json'))
+  runSoft('npx', ['node-gyp', 'rebuild', '--release'], { cwd: sqliteDir })
+} catch (error) {
+  // ABI 未恢复只影响本地测试,不应让已产出的安装包发版流程整体失败
+  warn(`[release] 警告: 无法定位 better-sqlite3,请在打包后手动 npx node-gyp rebuild: ${error.message}`)
+}
 
 // ---------------- ⑤ 轨道 B 热更产物 ----------------
 async function loadAsarLib() {
@@ -189,6 +207,7 @@ async function buildHotUpdateBundle() {
 function collectAssets() {
   const assets = []
   const push = (p) => fs.existsSync(p) && assets.push(p)
+  if (!fs.existsSync(releaseDir)) die(`未找到 electron-builder 输出目录:${releaseDir}`)
   const setup = fs.readdirSync(releaseDir).find((f) => /^AgentDrove-Setup-.*\.exe$/.test(f))
   if (setup) push(path.join(releaseDir, setup))
   else die(`未找到 NSIS 产物(AgentDrove-Setup-*.exe),请检查 electron-builder 输出: ${releaseDir}`)
@@ -235,13 +254,21 @@ function publishRelease(prevTag) {
 }
 
 // ---------------- ⑦ CHANGELOG ----------------
-function appendChangelog(prevTag) {
+function updateChangelog(prevTag) {
   const summary = gitLogSummary(prevTag ? `${prevTag}..HEAD` : 'HEAD') || '首次发布'
   const cl = path.join(repoRoot, 'CHANGELOG.md')
-  if (!fs.existsSync(cl)) fs.writeFileSync(cl, '# Changelog\n\n')
   const entry = `## v${newVersion} (${new Date().toISOString().slice(0, 10)})\n\n${summary}\n\n`
-  fs.appendFileSync(cl, entry)
-  log(`[release] CHANGELOG.md 已追加 v${newVersion} 条目`)
+  const header = '# Changelog\n\n'
+  if (!fs.existsSync(cl)) {
+    fs.writeFileSync(cl, header + entry)
+  } else {
+    // 新版本插到第一个版本小节之前,保持"最新在上"的阅读顺序
+    const text = fs.readFileSync(cl, 'utf8')
+    const at = text.indexOf('\n## ')
+    if (at < 0) fs.writeFileSync(cl, `${text.endsWith('\n') ? text : `${text}\n`}${entry}`)
+    else fs.writeFileSync(cl, text.slice(0, at + 1) + entry + text.slice(at + 1))
+  }
+  log(`[release] CHANGELOG.md 已插入 v${newVersion} 条目`)
 }
 
 // ---------------- main ----------------
@@ -252,7 +279,7 @@ async function main() {
   else warn('[release] --skip-bundle: 跳过轨道 B 热更产物')
   if (!noUpload) publishRelease(prevTag)
   else warn('[release] --no-upload: 跳过 tag/推送/上传(仅本地构建)')
-  appendChangelog(prevTag)
+  updateChangelog(prevTag)
   log(`\n[release] 完成: v${newVersion}`)
 }
 

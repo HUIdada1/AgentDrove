@@ -97,6 +97,26 @@ describe('SqliteStore 迁移与任务存取', () => {
     expect(store.eventsOf(task.id)).toHaveLength(0)
     store.close()
   })
+
+  it('事件分页只取 beforeSeq 之前的尾部并按 seq 升序', () => {
+    const { store } = freshStore()
+    const task = makeTask()
+    store.putTask(task)
+    const events: StoredEvent[] = Array.from({ length: 10 }, (_, i) => ({
+      taskId: task.id,
+      seq: i + 1,
+      at: i + 1,
+      event: { kind: 'message', channel: 'stdout', text: `m${i + 1}` },
+    }))
+    store.appendEvents(events)
+    // 不传 beforeSeq = 最新一页
+    expect(store.eventsPageOf(task.id, undefined, 3).map((e) => e.seq)).toEqual([8, 9, 10])
+    // beforeSeq=9 → 取 (5,6,7,8)
+    expect(store.eventsPageOf(task.id, 9, 4).map((e) => e.seq)).toEqual([5, 6, 7, 8])
+    // 最小值之前无内容
+    expect(store.eventsPageOf(task.id, 1, 4)).toEqual([])
+    store.close()
+  })
 })
 
 describe('SqliteStore 台账/日志/工作区', () => {

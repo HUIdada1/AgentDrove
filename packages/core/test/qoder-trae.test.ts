@@ -1,13 +1,23 @@
 import { describe, expect, it } from 'vitest'
 import { QoderDriver } from '../src/drivers/qoder.js'
 import { TraeDriver } from '../src/drivers/trae.js'
+import type { TaskInput } from '../src/index.js'
 import { qoderProfile, FakeFileSystem, ScriptedRunner, zcodeProfile } from './helpers.js'
 
-function qoderEntry(id: string): typeof zcodeProfile {
-  return { ...qoderProfile, id, entry: id, driver: id } as never
-}
-
 describe('QoderDriver', () => {
+  it('buildArgs 纯函数:模型档位与续聊形态可单测锁定', () => {
+    const driver = new QoderDriver(new ScriptedRunner(), new FakeFileSystem())
+    const input: TaskInput = { prompt: 'hi', cwd: 'C:/ws', resumeLatest: true }
+    expect(driver.buildArgs(input, 'client-follow', qoderProfile)).toEqual([
+      '-p',
+      'hi',
+      '--output-format',
+      'stream-json',
+      '-c',
+    ])
+    expect(driver.buildArgs(input, 'qwen3.7-max', qoderProfile)).toContain('--model')
+  })
+
   it('参数装配:-p/stream-json/模型/续聊/-r', async () => {
     const fsx = new FakeFileSystem()
     fsx.addWritable('C:/tmp/ws')
@@ -74,6 +84,40 @@ describe('QoderDriver', () => {
     expect(await driver.health(qoderProfile)).toEqual({ ok: true })
   })
 
+  it('abort 已置位时拒绝派发,不 spawn', async () => {
+    const fsx = new FakeFileSystem()
+    fsx.addWritable('C:/tmp/ws')
+    const runner = new ScriptedRunner()
+    const driver = new QoderDriver(runner, fsx)
+    const controller = new AbortController()
+    controller.abort()
+    await expect(driver.run({
+      agent: qoderProfile,
+      modelId: 'qwen3.7-max',
+      input: { prompt: 'hi', cwd: 'C:/tmp/ws' },
+      emit: () => {},
+      signal: controller.signal,
+    })).rejects.toThrow(/已取消/)
+    expect(runner.requests).toHaveLength(0)
+  })
+
+  it('PATH 命令名入口经 shell 解析(Windows .cmd shim 否则 ENOENT)', async () => {
+    const fsx = new FakeFileSystem()
+    fsx.addWritable('C:/tmp/ws')
+    const runner = new ScriptedRunner()
+    runner.enqueue((_req, io) => io.exit(0))
+    const driver = new QoderDriver(runner, fsx)
+    await driver.run({
+      agent: qoderProfile,
+      modelId: 'qwen3.7-max',
+      input: { prompt: 'hi', cwd: 'C:/tmp/ws' },
+      emit: () => {},
+      signal: new AbortController().signal,
+    })
+    expect(runner.requests[0].command).toBe('qoderclicn')
+    expect(runner.requests[0].shell).toBe(true)
+  })
+
   it('detect:命令名入口可直接命中(未安装场景由 health 拦截)', async () => {
     const runner = new ScriptedRunner()
     runner.enqueue((_req, io) => {
@@ -138,6 +182,27 @@ describe('TraeDriver', () => {
       signal: new AbortController().signal,
     })
     expect(runner.requests[0].args).toContain('ask')
+  })
+
+  it('denyList 无等价参数时告警,且 abort 已置位不 spawn', async () => {
+    const fsx = new FakeFileSystem()
+    fsx.addWritable('C:/tmp/ws')
+    const runner = new ScriptedRunner()
+    const driver = new TraeDriver(runner, fsx)
+    const controller = new AbortController()
+    controller.abort()
+    const warnings: string[] = []
+    await expect(driver.run({
+      agent: traeProfile as never,
+      modelId: 'client-follow',
+      input: { prompt: '改代码', cwd: 'C:/tmp/ws', toolPolicy: { denyList: ['Bash'] } },
+      emit: (e) => {
+        if (e.kind === 'warning') warnings.push(e.text)
+      },
+      signal: controller.signal,
+    })).rejects.toThrow(/已取消/)
+    expect(warnings.some((t) => t.includes('denyList'))).toBe(true)
+    expect(runner.requests).toHaveLength(0)
   })
 
   it('health 探活:--version', async () => {

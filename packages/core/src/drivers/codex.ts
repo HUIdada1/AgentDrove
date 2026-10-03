@@ -68,14 +68,28 @@ export class CodexDriver implements AgentDriver {
     if (!this.fsx.exists(input.cwd) || !this.fsx.isWritable(input.cwd)) {
       throw new Error(`工作区不可用(不存在或不可写):${input.cwd}`)
     }
+    if (signal.aborted) throw new Error('任务已取消,未启动进程')
     const agent = options.agent
     const args = this.buildArgs(input, options.modelId, agent, emit)
-    const stdoutChunks: Buffer[] = []
     const stdoutDecoder = new LineDecoder()
     const stderrDecoder = new LineDecoder()
     let timedOut = false
     let threadId: string | undefined
+    let sessionId: string | undefined
     let usage: { inputTokens?: number; outputTokens?: number } | undefined
+
+    // 会话锚点随行提取,不保留全量 stdout(长任务输出可达数十 MB)
+    const scanSession = (line: string): void => {
+      if (!sessionId && /session/i.test(line)) sessionId = extractSessionId(line)
+    }
+    const handleLine = (line: string): void => {
+      scanSession(line)
+      this.emitLine(line, emit, (id) => {
+        threadId ??= id
+      }, (u) => {
+        usage = u
+      })
+    }
 
     const handle = this.runner.spawn({
       command: agent.entry,
@@ -83,14 +97,7 @@ export class CodexDriver implements AgentDriver {
       cwd: input.cwd,
       shell: this.needsShell(agent.entry),
       onStdout: (chunk) => {
-        stdoutChunks.push(chunk)
-        for (const line of stdoutDecoder.push(chunk)) {
-          this.emitLine(line, emit, (id) => {
-            threadId ??= id
-          }, (u) => {
-            usage = u
-          })
-        }
+        for (const line of stdoutDecoder.push(chunk)) handleLine(line)
       },
       onStderr: (chunk) => {
         for (const line of stderrDecoder.push(chunk)) {
@@ -109,13 +116,7 @@ export class CodexDriver implements AgentDriver {
 
     try {
       const code = await handle.exited
-      for (const line of stdoutDecoder.flush()) {
-        this.emitLine(line, emit, (id) => {
-          threadId ??= id
-        }, (u) => {
-          usage = u
-        })
-      }
+      for (const line of stdoutDecoder.flush()) handleLine(line)
       for (const line of stderrDecoder.flush()) {
         if (line) emit({ kind: 'message', channel: 'stderr', text: line })
       }
@@ -123,11 +124,8 @@ export class CodexDriver implements AgentDriver {
         throw new Error(`看门狗超时,已终止进程树`)
       }
       if (usage) emit({ kind: 'usage', ...usage })
-      return {
-        code,
-        // thread_id 是续聊链锚点;兜底走通用提取(未来版本字段名变化时不断链)
-        sessionId: threadId ?? extractSessionId(decodeBuffer(Buffer.concat(stdoutChunks))),
-      }
+      // thread_id 是续聊链锚点;兜底走通用提取(未来版本字段名变化时不断链)
+      return { code, sessionId: threadId ?? sessionId }
     } finally {
       clearTimeout(watchdog)
       signal.removeEventListener('abort', onAbort)
@@ -166,6 +164,9 @@ export class CodexDriver implements AgentDriver {
       const denyList = input.toolPolicy?.denyList ?? []
       if (denyList.length > 0) {
         emit({ kind: 'warning', text: 'codex 的工具禁用清单经沙箱/配置实现,本次未透传 denyList' })
+      }
+      if (input.toolPolicy?.maxTurns != null) {
+        emit({ kind: 'warning', text: 'codex exec 无轮次上限参数,本次未透传 maxTurns' })
       }
     }
     args.push(input.prompt)
@@ -225,20 +226,19 @@ export class CodexDriver implements AgentDriver {
     }
     if (type === 'item.completed') {
       const item = parsed.item as Record<string, unknown> | undefined
-      if (item) {
-        const itemType = typeof item.type === 'string' ? item.type : ''
-        if (itemType === 'agent_message' && typeof item.text === 'string' && item.text) {
-          emit({ kind: 'message', channel: 'agent', text: item.text })
-          return
-        }
-        if (itemType === 'command_execution' && typeof item.command === 'string') {
-          emit({ kind: 'progress', text: `▶ ${item.command}` })
-          return
-        }
-        if (itemType === 'reasoning' && typeof item.text === 'string' && item.text) {
-          emit({ kind: 'progress', text: item.text })
-          return
-        }
+      const itemType = item && typeof item.type === 'string' ? item.type : ''
+      const text = item && typeof item.text === 'string' ? item.text : ''
+      if (itemType === 'agent_message' && text) {
+        emit({ kind: 'message', channel: 'agent', text })
+        return
+      }
+      if (itemType === 'command_execution' && typeof item?.command === 'string') {
+        emit({ kind: 'progress', text: `▶ ${item.command}` })
+        return
+      }
+      if (itemType === 'reasoning' && text) {
+        emit({ kind: 'progress', text })
+        return
       }
     }
     emit({ kind: 'message', channel: 'stdout', text: line })

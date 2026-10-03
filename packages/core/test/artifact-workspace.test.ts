@@ -12,6 +12,7 @@ import {
   WorkspaceManager,
   type DriverRunOptions,
   type OrchestratorDeps,
+  type TaskRecord,
   type WorkspaceRow,
 } from '../src/index.js'
 import { MockDriver } from '../src/drivers/mock.js'
@@ -98,6 +99,50 @@ describe('ArtifactScanner 快照基线', () => {
       io.exit(128)
     })
     await expect(scanner.scan(baseline)).rejects.toThrow(/128/)
+  })
+
+  it('补扫复用登记行的分支创建点,不重新 rev-parse HEAD(否则漏报已提交产物)', async () => {
+    const fsx = new TempFs()
+    const runner = new ScriptedRunner()
+    const scanner = new ArtifactScanner(runner, fsx)
+    const rows: WorkspaceRow[] = [
+      {
+        id: 'ws-1',
+        taskId: 'task-wt-1',
+        path: 'C:/wt',
+        kind: 'worktree',
+        source: JSON.stringify({ repo: 'C:/repo', baseHead: 'cafe1234' }),
+        status: 'done',
+        createdAt: 0,
+      },
+    ]
+    const store = {
+      put: (row: WorkspaceRow) => void rows.push(row),
+      get: (id: string) => rows.find((r) => r.id === id),
+      all: () => rows,
+      delete: (id: string) => void rows.splice(0, rows.length, ...rows.filter((r) => r.id !== id)),
+    }
+    const tracking = new ArtifactTracking(scanner, store)
+    const events: string[] = []
+    const orchestrator = {
+      emitTaskEvent: (_id: string, event: { kind: string }) => void events.push(event.kind),
+    } as unknown as Orchestrator
+    // status --porcelain 与 diff <baseHead> 两次调用,无 rev-parse HEAD
+    runner.enqueue((_req, io) => {
+      io.stdout('?? new.txt\n')
+      io.exit(0)
+    })
+    runner.enqueue((_req, io) => {
+      io.stdout('')
+      io.exit(0)
+    })
+    await tracking.rescanAfterMarkFailed(
+      { id: 'task-wt-1', cwd: 'C:/wt' } as TaskRecord,
+      orchestrator,
+    )
+    expect(runner.requests).toHaveLength(2)
+    expect(runner.requests.map((r) => r.args.join(' ')).join('|')).toContain('cafe1234')
+    expect(events).toEqual(['artifact'])
   })
 })
 

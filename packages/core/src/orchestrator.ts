@@ -1,4 +1,5 @@
 import { randomUUID } from 'node:crypto'
+import type { ThrottleConfig } from './config.js'
 import type { AgentDriver } from './driver.js'
 import { Journal, type JournalStore } from './journal.js'
 import type { Clock, EventSink, TaskRepository } from './ports.js'
@@ -8,6 +9,7 @@ import { MemoryUsageLedger } from './usage.js'
 import { Throttle } from './throttle.js'
 import type {
   AgentId,
+  AgentProfile,
   StoredEvent,
   TaskAttachment,
   TaskEvent,
@@ -34,6 +36,22 @@ const LEGAL_TRANSITIONS: Record<TaskState, TaskState[]> = {
 }
 
 const DEFAULT_MODE: TaskMode = 'build'
+
+/** 节拍重试定时器的定时器精度补偿(ms):避免到点边界抖动导致空转 */
+const RETRY_TIMER_SLACK_MS = 5
+
+/** 未注入节流器(测试/无持久化冒烟)时的兜底参数:几乎不限流,只保留基本并发保护 */
+const FALLBACK_THROTTLE: ThrottleConfig = {
+  globalConcurrency: 4,
+  minIntervalMs: 0,
+  jitterMs: 0,
+}
+
+/** 单轮放行扫描的跨客户端累计量 */
+interface ReleaseScan {
+  globalRunning: number
+  earliestRetryMs: number | undefined
+}
 
 export interface SubmitRequest {
   agentId: AgentId
@@ -91,6 +109,8 @@ export class Orchestrator {
   private readonly live = new Map<string, TaskRecord>()
   private readonly queues = new Map<AgentId, TaskRecord[]>()
   private readonly controllers = new Map<string, AbortController>()
+  /** 已放行但还没进入 running 的任务(健康闸/基线钩子窗口);此窗口内仍算占槽 */
+  private readonly starting = new Set<string>()
   private readonly seqCursors = new Map<string, number>()
   private readonly clock: Clock
   private readonly throttle: Throttle
@@ -105,12 +125,7 @@ export class Orchestrator {
   ) {
     this.clock = deps.clock ?? systemClock
     this.throttle =
-      deps.throttle ??
-      new Throttle(new MemoryUsageLedger(), this.clock, {
-        globalConcurrency: 4,
-        minIntervalMs: 0,
-        jitterMs: 0,
-      })
+      deps.throttle ?? new Throttle(new MemoryUsageLedger(), this.clock, FALLBACK_THROTTLE)
     this.journal = new Journal(deps.journal, this.clock)
     this.recover()
   }
@@ -131,18 +146,18 @@ export class Orchestrator {
   }
 
   onTaskTerminal(listener: TerminalListener): () => void {
-    this.terminalListeners.push(listener)
-    return () => {
-      const index = this.terminalListeners.indexOf(listener)
-      if (index >= 0) this.terminalListeners.splice(index, 1)
-    }
+    return this.addListener(this.terminalListeners, listener)
   }
 
   onTaskSubmitted(listener: TerminalListener): () => void {
-    this.submittedListeners.push(listener)
+    return this.addListener(this.submittedListeners, listener)
+  }
+
+  private addListener(list: TerminalListener[], listener: TerminalListener): () => void {
+    list.push(listener)
     return () => {
-      const index = this.submittedListeners.indexOf(listener)
-      if (index >= 0) this.submittedListeners.splice(index, 1)
+      const index = list.indexOf(listener)
+      if (index >= 0) list.splice(index, 1)
     }
   }
 
@@ -158,7 +173,7 @@ export class Orchestrator {
     this.throttle.checkCapAtSubmit(profile)
     const id = request.id ?? randomUUID()
     // 组合根预生成 id 的场景必须幂等:重复 id 会覆盖既有任务记录
-    if (this.live.has(id) || this.repo.getTask(id)) {
+    if (this.live.has(id) || this.deps.repo.getTask(id)) {
       throw new Error(`任务 id 冲突:${id}`)
     }
     const now = this.clock.now()
@@ -182,17 +197,18 @@ export class Orchestrator {
       retryOf: request.retryOf,
     }
     this.live.set(task.id, task)
-    this.repo.putTask(task)
+    this.deps.repo.putTask(task)
     this.throttle.chargeAtSubmit(task)
     this.journal.record('task.submit', task.origin, {
       agentId: profile.id,
       taskId: task.id,
       detail: `attempt=${task.attempt}`,
     })
-    for (const listener of this.submittedListeners) listener(task)
     this.enqueue(task)
     // 异步调度:submit 返回时任务仍为 queued,调度与入队解耦
     queueMicrotask(() => this.tryRelease())
+    // 入队先于钩子:钩子抛错不能留下"已记账未入队"的孤儿任务
+    this.notify(this.submittedListeners, task, '提交钩子')
     return task
   }
 
@@ -213,6 +229,8 @@ export class Orchestrator {
       this.controllers.get(taskId)?.abort()
       this.transition(task, 'canceled')
       this.journal.record('task.cancel', task.origin, { agentId: task.agentId, taskId: task.id })
+      // 槽位随状态即时释放,不等驱动收尾(驱动可能忽略 abort 长时间挂起)
+      this.tryRelease()
       return true
     }
     return false
@@ -248,6 +266,7 @@ export class Orchestrator {
       resumeLatest: !parent.sessionId,
       modelId: parent.modelId,
       mode: parent.mode,
+      toolPolicy: parent.toolPolicy,
       parentId: parent.id,
       origin: 'panel',
     })
@@ -277,20 +296,16 @@ export class Orchestrator {
   }
 
   eventsOf(taskId: string): StoredEvent[] {
-    return this.repo.eventsOf(taskId)
-  }
-
-  private get repo(): TaskRepository {
-    return this.deps.repo
+    return this.deps.repo.eventsOf(taskId)
   }
 
   private taskOf(taskId: string): TaskRecord | undefined {
-    return this.live.get(taskId) ?? this.repo.getTask(taskId)
+    return this.live.get(taskId) ?? this.deps.repo.getTask(taskId)
   }
 
   private recover(): void {
     const resumedAgents: AgentId[] = []
-    for (const task of this.repo.allTasks()) {
+    for (const task of this.deps.repo.allTasks()) {
       this.live.set(task.id, task)
       if (task.state === 'running') {
         // 宿主上次未正常退出,标记中断待人工处理
@@ -321,58 +336,68 @@ export class Orchestrator {
       this.clearReleaseTimer()
       return
     }
-    let globalRunning = this.countRunning()
-    let earliestRetryMs: number | undefined
+    const scan: ReleaseScan = {
+      globalRunning: this.countRunning(),
+      earliestRetryMs: undefined,
+    }
     for (const [agentId, queue] of this.queues) {
       if (queue.length === 0) continue
-      const profile = this.registry.get(agentId)
-      let agentRunning = this.countRunning(agentId)
-      let index = 0
-      while (index < queue.length) {
-        const task = queue[index]
-        const decision = this.throttle.canRelease(task, profile, {
-          agentRunning,
-          globalRunning,
-          cwdOccupied: this.cwdOccupied(task.cwd, task.id),
-        })
-        if (!decision.ok) {
-          if (decision.reason === 'global-concurrency') return
-          if (
-            decision.reason === 'agent-concurrency' ||
-            decision.reason === 'interval' ||
-            decision.reason === 'daily-cap'
-          ) {
-            // 客户端级阻塞:整队让位,并安排节拍到期后的重试
-            if (decision.retryInMs !== undefined) {
-              earliestRetryMs =
-                earliestRetryMs === undefined
-                  ? decision.retryInMs
-                  : Math.min(earliestRetryMs, decision.retryInMs)
-            }
-            break
-          }
-          // cwd-busy:只跳过该任务,后续任务可能工作区不同
-          index++
-          continue
-        }
-        queue.splice(index, 1)
-        const driver = this.drivers.get(profile.driver)
-        if (!driver) {
-          // 驱动缺失直接失败,不推进节拍/并发计数(未实际放行)
-          this.failTask(task, `no driver registered: ${profile.driver}`)
-          continue
-        }
-        this.throttle.markReleased(agentId)
-        agentRunning++
-        globalRunning++
-        this.journal.record('task.release', task.origin, {
-          agentId,
-          taskId: task.id,
-        })
-        void this.execute(task, profile, driver)
-      }
+      if (this.releaseFromQueue(agentId, queue, scan)) return
     }
-    this.scheduleRetry(earliestRetryMs)
+    this.scheduleRetry(scan.earliestRetryMs)
+  }
+
+  /** 扫描单客户端队列;返回 true 表示全局槽已满,本轮应停止扫描其余客户端 */
+  private releaseFromQueue(agentId: AgentId, queue: TaskRecord[], scan: ReleaseScan): boolean {
+    const profile = this.registry.get(agentId)
+    let agentRunning = this.countRunning(agentId)
+    let index = 0
+    while (index < queue.length) {
+      const task = queue[index]
+      const decision = this.throttle.canRelease(task, profile, {
+        agentRunning,
+        globalRunning: scan.globalRunning,
+        cwdOccupied: this.cwdOccupied(task.cwd, task.id),
+      })
+      if (!decision.ok) {
+        if (decision.reason === 'global-concurrency') return true
+        if (
+          decision.reason === 'agent-concurrency' ||
+          decision.reason === 'interval' ||
+          decision.reason === 'daily-cap'
+        ) {
+          // 客户端级阻塞:整队让位,并安排节拍到期后的重试
+          if (decision.retryInMs !== undefined) {
+            scan.earliestRetryMs =
+              scan.earliestRetryMs === undefined
+                ? decision.retryInMs
+                : Math.min(scan.earliestRetryMs, decision.retryInMs)
+          }
+          return false
+        }
+        // cwd-busy:只跳过该任务,后续任务可能工作区不同
+        index++
+        continue
+      }
+      queue.splice(index, 1)
+      const driver = this.drivers.get(profile.driver)
+      if (!driver) {
+        // 驱动缺失直接失败,不推进节拍/并发计数(未实际放行)
+        this.failTask(task, `no driver registered: ${profile.driver}`)
+        continue
+      }
+      this.throttle.markReleased(agentId)
+      // 进入放行窗口:健康闸/基线钩子期间按占槽计,防止同窗口内重复放行超发
+      this.starting.add(task.id)
+      agentRunning++
+      scan.globalRunning++
+      this.journal.record('task.release', task.origin, {
+        agentId,
+        taskId: task.id,
+      })
+      void this.execute(task, profile, driver)
+    }
+    return false
   }
 
   private scheduleRetry(retryInMs: number | undefined): void {
@@ -381,7 +406,7 @@ export class Orchestrator {
     this.releaseTimer = setTimeout(() => {
       this.releaseTimer = undefined
       this.tryRelease()
-    }, retryInMs + 5)
+    }, retryInMs + RETRY_TIMER_SLACK_MS)
   }
 
   private clearReleaseTimer(): void {
@@ -394,102 +419,129 @@ export class Orchestrator {
   private countRunning(agentId?: AgentId): number {
     let count = 0
     for (const task of this.live.values()) {
-      if (task.state !== 'running') continue
+      if (!this.isOccupying(task)) continue
       if (agentId === undefined || task.agentId === agentId) count++
     }
     return count
   }
 
-  /** 同 cwd 互斥按任务状态判定:仅 running 占用,queued 不占(6.6) */
+  /** running 与"已放行未进入 running"(健康闸/基线窗口)都占槽,放行窗口内不允许超发 */
+  private isOccupying(task: TaskRecord): boolean {
+    return task.state === 'running' || this.starting.has(task.id)
+  }
+
+  /** 同 cwd 互斥按占槽判定:仅 running/放行窗口占用,queued 不占(6.6) */
   private cwdOccupied(cwd: string, excludeTaskId: string): boolean {
     for (const task of this.live.values()) {
       if (task.id === excludeTaskId) continue
-      if (task.state === 'running' && task.cwd === cwd) return true
+      if (this.isOccupying(task) && task.cwd === cwd) return true
     }
     return false
   }
 
   private async execute(
     task: TaskRecord,
-    profile: ReturnType<Registry['get']>,
+    profile: AgentProfile,
     driver: AgentDriver,
   ): Promise<void> {
-    // 健康闸在进入 running 之前:不通过走 queued→failed,
-    // 未运行即终态自动返还计数,并经终态钩子交给降级决策
-    if (this.deps.healthAtRelease) {
-      const report = await this.deps.healthAtRelease(profile.id).catch((error) => ({
-        ok: false,
-        reason: error instanceof Error ? error.message : String(error),
-      }))
-      if (!report.ok) {
-        // 放行后取消竞态:健康探活期间任务可能已被取消,此时不再落 failed
-        if (task.state === 'queued') {
-          this.failTask(task, `客户端不健康:${report.reason ?? '未知原因'}`)
-        }
-        this.tryRelease()
-        return
-      }
-    }
-    // 放行后到 execute 实际推进之间存在取消窗口;已离开 queued 说明已被取消,直接退出
-    if (task.state !== 'queued') return
-    this.transition(task, 'running')
-    const controller = new AbortController()
-    this.controllers.set(task.id, controller)
     const emit = (event: TaskEvent) => this.recordEvent(task.id, event)
-    if (
-      driver.supportedVersions &&
-      profile.version &&
-      !satisfiesRange(profile.version, driver.supportedVersions)
-    ) {
-      emit({
-        kind: 'warning',
-        text: `客户端版本 ${profile.version} 超出驱动声明范围 ${driver.supportedVersions},参数兼容性不保证`,
-      })
-    }
-    const baseline = await this.deps.onRunStart?.(task)
     try {
-      const result = await driver.run({
-        agent: profile,
-        modelId: task.modelId,
-        input: {
-          prompt: task.prompt,
-          cwd: task.cwd,
-          sessionId: task.sessionId,
-          resumeLatest: task.resumeLatest,
-          attachments: task.attachments,
-          toolPolicy: task.toolPolicy,
-          mode: task.mode,
-        },
-        emit,
-        signal: controller.signal,
-        timeoutMs: this.deps.defaultTimeoutMs,
-      })
-      if (controller.signal.aborted) return // 取消已由 cancel() 落状态
-      if (result.sessionId && !task.sessionId) {
-        task.sessionId = result.sessionId
-        this.repo.putTask(task)
-      }
-      if (result.usage) {
-        emit({ kind: 'usage', ...result.usage })
-      }
-      if (result.code === 0) {
-        this.transition(task, 'completed')
-      } else {
-        this.failTask(task, `driver exited with code ${result.code}`)
-      }
-    } catch (error) {
-      if (controller.signal.aborted) return
-      this.failTask(task, error instanceof Error ? error.message : String(error))
-    } finally {
-      // 收尾钩子(产物扫描)为异步,失败只留 warning,不允许未处理拒绝击穿主进程
-      void Promise.resolve(this.deps.onRunEnd?.(task, baseline)).catch((error: unknown) => {
-        this.recordEvent(task.id, {
+      // 健康闸在进入 running 之前:不通过走 queued→failed,
+      // 未运行即终态自动返还计数,并经终态钩子交给降级决策
+      if (!(await this.passesHealthGate(task, profile))) return
+      // 放行后到 execute 实际推进之间存在取消窗口;已离开 queued 说明已被取消,直接退出
+      if (task.state !== 'queued') return
+      this.transition(task, 'running')
+      // 已进入 running,占槽改由任务状态承载
+      this.starting.delete(task.id)
+      const controller = new AbortController()
+      this.controllers.set(task.id, controller)
+      if (
+        driver.supportedVersions &&
+        profile.version &&
+        !satisfiesRange(profile.version, driver.supportedVersions)
+      ) {
+        emit({
           kind: 'warning',
-          text: `收尾钩子执行失败:${error instanceof Error ? error.message : String(error)}`,
+          text: `客户端版本 ${profile.version} 超出驱动声明范围 ${driver.supportedVersions},参数兼容性不保证`,
         })
-      })
+      }
+      const baseline = await this.runBaselineHook(task)
+      try {
+        const result = await driver.run({
+          agent: profile,
+          modelId: task.modelId,
+          input: {
+            prompt: task.prompt,
+            cwd: task.cwd,
+            sessionId: task.sessionId,
+            resumeLatest: task.resumeLatest,
+            attachments: task.attachments,
+            toolPolicy: task.toolPolicy,
+            mode: task.mode,
+          },
+          emit,
+          signal: controller.signal,
+          timeoutMs: this.deps.defaultTimeoutMs,
+        })
+        if (controller.signal.aborted) return // 取消已由 cancel() 落状态
+        if (result.sessionId && !task.sessionId) {
+          task.sessionId = result.sessionId
+          this.deps.repo.putTask(task)
+        }
+        if (result.usage) {
+          emit({ kind: 'usage', ...result.usage })
+        }
+        if (result.code === 0) {
+          this.transition(task, 'completed')
+        } else {
+          this.failTask(task, `driver exited with code ${result.code}`)
+        }
+      } catch (error) {
+        if (controller.signal.aborted) return
+        this.failTask(task, error instanceof Error ? error.message : String(error))
+      } finally {
+        // 收尾钩子(产物扫描)为异步,失败只留 warning,不允许未处理拒绝击穿主进程
+        void Promise.resolve(this.deps.onRunEnd?.(task, baseline)).catch((error: unknown) => {
+          this.recordEvent(task.id, {
+            kind: 'warning',
+            text: `收尾钩子执行失败:${error instanceof Error ? error.message : String(error)}`,
+          })
+        })
+      }
+    } finally {
+      // 无论走哪条返回路径都要释放占槽并让路给队列
+      this.starting.delete(task.id)
       this.controllers.delete(task.id)
       this.tryRelease()
+    }
+  }
+
+  /** 放行健康闸:探活自身异常按不健康收敛,任务落 failed 后返回 false */
+  private async passesHealthGate(task: TaskRecord, profile: AgentProfile): Promise<boolean> {
+    if (!this.deps.healthAtRelease) return true
+    const report = await this.deps.healthAtRelease(profile.id).catch((error) => ({
+      ok: false,
+      reason: error instanceof Error ? error.message : String(error),
+    }))
+    if (report.ok) return true
+    // 放行后取消竞态:健康探活期间任务可能已被取消,此时不再落 failed
+    if (task.state === 'queued') {
+      this.failTask(task, `客户端不健康:${report.reason ?? '未知原因'}`)
+    }
+    return false
+  }
+
+  /** run 前基线钩子:失败只留 warning,不阻断执行(缺基线最多漏判产物新增) */
+  private async runBaselineHook(task: TaskRecord): Promise<unknown> {
+    try {
+      return await this.deps.onRunStart?.(task)
+    } catch (error) {
+      this.recordEvent(task.id, {
+        kind: 'warning',
+        text: `产物基线建立失败:${error instanceof Error ? error.message : String(error)}`,
+      })
+      return undefined
     }
   }
 
@@ -510,7 +562,7 @@ export class Orchestrator {
     if (to === 'completed' || to === 'failed' || to === 'canceled') {
       task.finishedAt = now
     }
-    this.repo.putTask(task)
+    this.deps.repo.putTask(task)
     this.recordEvent(task.id, { kind: 'state-changed', from, to })
     if (to === 'completed' || to === 'failed' || to === 'canceled') {
       // 未运行即终态:返还入队计数(记回创建日)
@@ -520,12 +572,26 @@ export class Orchestrator {
         taskId: task.id,
         detail: task.error,
       })
-      for (const listener of [...this.terminalListeners]) listener(task)
+      this.notify(this.terminalListeners, task, '终态钩子')
+    }
+  }
+
+  /** 逐个调用监听器并隔离异常:钩子抛错不得回灌状态机(否则终态迁移会被二次触发) */
+  private notify(listeners: TerminalListener[], task: TaskRecord, label: string): void {
+    for (const listener of [...listeners]) {
+      try {
+        listener(task)
+      } catch (error) {
+        this.recordEvent(task.id, {
+          kind: 'warning',
+          text: `${label}执行失败:${error instanceof Error ? error.message : String(error)}`,
+        })
+      }
     }
   }
 
   private recordEvent(taskId: string, event: TaskEvent): void {
-    const seq = (this.seqCursors.get(taskId) ?? this.repo.maxSeqOf(taskId)) + 1
+    const seq = (this.seqCursors.get(taskId) ?? this.deps.repo.maxSeqOf(taskId)) + 1
     this.seqCursors.set(taskId, seq)
     const stored: StoredEvent = { taskId, seq, at: this.clock.now(), event }
     this.deps.sink.append([stored])

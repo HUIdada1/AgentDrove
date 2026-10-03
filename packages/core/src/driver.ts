@@ -1,6 +1,7 @@
 import type {
   AgentProfile,
   ModelId,
+  ModelPreset,
   TaskEvent,
   TaskInput,
 } from './types.js'
@@ -41,13 +42,13 @@ export interface AgentDriver {
   readonly id: string
   readonly supportedVersions?: string
   /** 在候选入口中探测本客户端;未命中返回 null */
-  detect(entries: string[]): Promise<import('./driver.js').DetectedAgent | null>
+  detect(entries: string[]): Promise<DetectedAgent | null>
   /** 探活(如 doctor);登录态缺失等不健康场景返回 ok:false + reason */
   health(agent: AgentProfile): Promise<{ ok: boolean; reason?: string }>
   resolveModelArg(modelId: ModelId, agent: AgentProfile): string[]
   run(options: DriverRunOptions): Promise<RunResult>
   /** 拉取套餐可选模型(qoder 可刷新;zcode 不支持,不实现) */
-  fetchModels?(agent: AgentProfile): Promise<import('./types.js').ModelPreset[]>
+  fetchModels?(agent: AgentProfile): Promise<ModelPreset[]>
 }
 
 export interface DetectedAgent {

@@ -3,6 +3,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import {
   MemoryTaskRepository,
+  MODEL_CLIENT_FOLLOW,
   Orchestrator,
   Registry,
   ZcodeDriver,
@@ -12,7 +13,6 @@ import {
   type TaskMode,
   type TaskRecord,
 } from '@agent-drove/core'
-import { MODEL_CLIENT_FOLLOW } from '@agent-drove/core'
 import { NodeFileSystem } from './adapters/node-fs.js'
 import { NodeProcessRunner } from './adapters/node-process.js'
 
@@ -48,7 +48,11 @@ function parseArgs(argv: string[]): CliArgs {
       case '--zcode-cli': args.zcodeCli = next(); break
       case '--resume': args.resume = next(); break
       case '--deny': args.deny = (next() ?? '').split(',').filter(Boolean); break
-      case '--timeout': args.timeoutMs = Number(next()); break
+      case '--timeout': {
+        const ms = Number(next())
+        if (Number.isFinite(ms) && ms > 0) args.timeoutMs = ms
+        break
+      }
     }
   }
   return args
@@ -153,6 +157,8 @@ async function main(): Promise<number> {
     const watchdogMs = (args.timeoutMs ?? 600_000) + 30_000
     setTimeout(() => {
       clearInterval(timer)
+      // 先取消任务以中止并回收 CLI 进程树,避免僵尸进程残留
+      orchestrator.cancel(task.id)
       console.error(`等待终态超时(${Math.round(watchdogMs / 1000)}s),按失败退出`)
       resolve(1)
     }, watchdogMs).unref()

@@ -6,6 +6,7 @@ import type {
 } from '../driver.js'
 import { DEFAULT_RUN_TIMEOUT_MS } from '../driver.js'
 import type { AgentProfile, ModelId, ModelPreset, TaskInput } from '../types.js'
+import { MODEL_CLIENT_FOLLOW } from '../types.js'
 import type { FileSystem, ProcessRunner } from '../ports.js'
 import { LineDecoder, decodeBuffer, extractSessionId } from '../text.js'
 
@@ -53,7 +54,7 @@ export class QoderDriver implements AgentDriver {
   }
 
   resolveModelArg(modelId: ModelId, _agent: AgentProfile): string[] {
-    if (modelId === 'client-follow') return []
+    if (modelId === MODEL_CLIENT_FOLLOW) return []
     return ['--model', modelId]
   }
 
@@ -68,19 +69,16 @@ export class QoderDriver implements AgentDriver {
       throw new Error(`工作区不可用(不存在或不可写):${input.cwd}`)
     }
     const agent = options.agent
-    const args = [
-      '-p',
-      input.prompt,
-      '--output-format',
-      'stream-json',
-      ...this.resolveModelArg(options.modelId, agent),
-      ...this.buildResumeArgs(input),
-      ...this.buildPolicyArgs(input, emit),
-    ]
-    const stdoutChunks: Buffer[] = []
+    if (signal.aborted) throw new Error('任务已取消,未启动进程')
+    const args = this.buildArgs(input, options.modelId, agent, emit)
     const stdoutDecoder = new LineDecoder()
     const stderrDecoder = new LineDecoder()
     let timedOut = false
+    let sessionId: string | undefined
+
+    const scanSession = (line: string): void => {
+      if (!sessionId && /session/i.test(line)) sessionId = extractSessionId(line)
+    }
 
     const handle = this.runner.spawn({
       command: agent.entry,
@@ -88,8 +86,10 @@ export class QoderDriver implements AgentDriver {
       cwd: input.cwd,
       shell: this.needsShell(agent.entry),
       onStdout: (chunk) => {
-        stdoutChunks.push(chunk)
-        for (const line of stdoutDecoder.push(chunk)) this.emitLine(line, emit)
+        for (const line of stdoutDecoder.push(chunk)) {
+          scanSession(line)
+          this.emitLine(line, emit)
+        }
       },
       onStderr: (chunk) => {
         for (const line of stderrDecoder.push(chunk)) {
@@ -108,21 +108,39 @@ export class QoderDriver implements AgentDriver {
 
     try {
       const code = await handle.exited
-      for (const line of stdoutDecoder.flush()) this.emitLine(line, emit)
+      for (const line of stdoutDecoder.flush()) {
+        scanSession(line)
+        this.emitLine(line, emit)
+      }
       for (const line of stderrDecoder.flush()) {
         if (line) emit({ kind: 'message', channel: 'stderr', text: line })
       }
       if (timedOut && !signal.aborted) {
         throw new Error(`看门狗超时,已终止进程树`)
       }
-      return {
-        code,
-        sessionId: extractSessionId(decodeBuffer(Buffer.concat(stdoutChunks))),
-      }
+      return { code, sessionId }
     } finally {
       clearTimeout(watchdog)
       signal.removeEventListener('abort', onAbort)
     }
+  }
+
+  /** 参数装配纯函数,形态与 codex/zcode 对齐,便于单测锁定 */
+  buildArgs(
+    input: TaskInput,
+    modelId: ModelId,
+    agent: AgentProfile,
+    emit?: DriverRunOptions['emit'],
+  ): string[] {
+    return [
+      '-p',
+      input.prompt,
+      '--output-format',
+      'stream-json',
+      ...this.resolveModelArg(modelId, agent),
+      ...this.buildResumeArgs(input),
+      ...this.buildPolicyArgs(input, emit),
+    ]
   }
 
   /** stream-json 行尽量结构化,解析不出就原样透传(6.2 规范 3) */
@@ -150,24 +168,26 @@ export class QoderDriver implements AgentDriver {
 
   private buildPolicyArgs(
     input: TaskInput,
-    emit: DriverRunOptions['emit'],
+    emit?: DriverRunOptions['emit'],
   ): string[] {
     const args: string[] = []
     const policy = input.toolPolicy
     if (policy?.maxTurns != null) {
       args.push('--max-turns', String(policy.maxTurns))
     }
-    if (policy?.denyList && policy.denyList.length > 0) {
-      emit({
-        kind: 'warning',
-        text: 'qoder 的工具禁用清单等价参数未确认,本次未透传',
-      })
-    }
-    if (input.attachments && input.attachments.length > 0) {
-      emit({
-        kind: 'warning',
-        text: 'qoder 的附件参数待 V5 核实,本次未透传附件',
-      })
+    if (emit) {
+      if (policy?.denyList && policy.denyList.length > 0) {
+        emit({
+          kind: 'warning',
+          text: 'qoder 的工具禁用清单等价参数未确认,本次未透传',
+        })
+      }
+      if (input.attachments && input.attachments.length > 0) {
+        emit({
+          kind: 'warning',
+          text: 'qoder 的附件参数待 V5 核实,本次未透传附件',
+        })
+      }
     }
     return args
   }
@@ -177,7 +197,8 @@ export class QoderDriver implements AgentDriver {
   }
 
   private needsShell(entry: string): boolean {
-    return /\.(cmd|bat)$/i.test(entry)
+    // PATH 命令名与 .cmd/.bat shim 在 Windows 上都需经 shell 解析,否则 ENOENT
+    return /\.(cmd|bat)$/i.test(entry) || this.isCommandName(entry)
   }
 
   private async probeVersion(entry: string): Promise<string | undefined> {
@@ -195,6 +216,7 @@ export class QoderDriver implements AgentDriver {
     entry: string,
     args: string[],
     onStdout: (chunk: Buffer) => void = () => {},
+    timeoutMs: number = PROBE_TIMEOUT_MS,
   ): Promise<number> {
     return new Promise<number>((resolve, reject) => {
       const handle = this.runner.spawn({
@@ -207,8 +229,8 @@ export class QoderDriver implements AgentDriver {
       })
       const timer = setTimeout(() => {
         void handle.killTree()
-        reject(new Error(`探测超时(${PROBE_TIMEOUT_MS}ms)`))
-      }, PROBE_TIMEOUT_MS)
+        reject(new Error(`探测超时(${timeoutMs}ms)`))
+      }, timeoutMs)
       void handle.exited.then(
         (code) => {
           clearTimeout(timer)

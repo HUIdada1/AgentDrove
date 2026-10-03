@@ -50,6 +50,49 @@ describe('EventBuffer 批量策略', () => {
     await new Promise((resolve) => setTimeout(resolve, 40))
     expect(pushed).toEqual([1]) // 定时器被清掉,不重复推
   })
+
+  it('落库成功但批推失败:不重复落库(幂等)', () => {
+    const repo = new MemoryTaskRepository()
+    let rendererDown = true
+    const buffer = new EventBuffer(
+      repo,
+      () => {
+        if (rendererDown) throw new Error('renderer down')
+      },
+      { flushMs: 60_000, maxBatch: 100 },
+    )
+    buffer.append([eventOf('t1', 1)])
+    buffer.flush()
+    expect(repo.eventsOf('t1')).toHaveLength(1)
+    rendererDown = false
+    buffer.flush()
+    expect(repo.eventsOf('t1')).toHaveLength(1) // 已落库,不得重复写
+  })
+
+  it('落库失败回灌缓冲,下次 flush 补齐(不丢事件)', () => {
+    class FlakyRepo extends MemoryTaskRepository {
+      fail = true
+      appendEvents(events: StoredEvent[]): void {
+        if (this.fail) throw new Error('db down')
+        super.appendEvents(events)
+      }
+    }
+    const repo = new FlakyRepo()
+    const buffer = new EventBuffer(repo, () => undefined, { flushMs: 60_000, maxBatch: 100 })
+    buffer.append([eventOf('t1', 1)])
+    buffer.flush()
+    expect(repo.eventsOf('t1')).toHaveLength(0)
+    repo.fail = false
+    buffer.flush()
+    expect(repo.eventsOf('t1')).toHaveLength(1)
+  })
+
+  it('deleteTask 同步清理事件,不留残留', () => {
+    const repo = new MemoryTaskRepository()
+    repo.appendEvents([eventOf('t1', 1)])
+    repo.deleteTask('t1')
+    expect(repo.eventsOf('t1')).toHaveLength(0)
+  })
 })
 
 describe('Config 合并', () => {

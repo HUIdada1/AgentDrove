@@ -1,5 +1,4 @@
-import { exec } from 'node:child_process'
-import { spawn as nodeSpawn } from 'node:child_process'
+import { exec, spawn as nodeSpawn } from 'node:child_process'
 import type { ProcessHandle, ProcessRunner, SpawnRequest } from '@agent-drove/core'
 
 export class NodeProcessRunner implements ProcessRunner {

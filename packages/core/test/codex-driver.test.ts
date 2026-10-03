@@ -74,6 +74,20 @@ describe('CodexDriver 参数装配', () => {
     )
     expect(warnings).toHaveLength(2)
   })
+
+  it('maxTurns 无等价参数时同样告警,不静默丢弃', () => {
+    const { driver } = makeDriver()
+    const warnings: string[] = []
+    driver.buildArgs(
+      baseInput({ toolPolicy: { maxTurns: 5 } }),
+      'client-follow',
+      codexProfile,
+      (e) => {
+        if (e.kind === 'warning') warnings.push(e.text)
+      },
+    )
+    expect(warnings.some((t) => t.includes('maxTurns'))).toBe(true)
+  })
 })
 
 describe('CodexDriver 执行路径', () => {
@@ -87,6 +101,43 @@ describe('CodexDriver 执行路径', () => {
       signal: new AbortController().signal,
     })).rejects.toThrow(/工作区不可用/)
     expect(runner.requests).toHaveLength(0)
+  })
+
+  it('abort 已置位时拒绝派发,不 spawn', async () => {
+    const fsx = new FakeFileSystem()
+    fsx.addWritable('C:/tmp/ws')
+    const runner = new ScriptedRunner()
+    const driver = new CodexDriver(runner, fsx)
+    const controller = new AbortController()
+    controller.abort()
+    await expect(driver.run({
+      agent: codexProfile,
+      modelId: 'gpt-5.1-codex',
+      input: baseInput(),
+      emit: () => {},
+      signal: controller.signal,
+    })).rejects.toThrow(/已取消/)
+    expect(runner.requests).toHaveLength(0)
+  })
+
+  it('运行中 abort:终止进程树并返回退出码', async () => {
+    const fsx = new FakeFileSystem()
+    fsx.addWritable('C:/tmp/ws')
+    const runner = new ScriptedRunner()
+    runner.enqueue(() => {})
+    const driver = new CodexDriver(runner, fsx)
+    const controller = new AbortController()
+    const pending = driver.run({
+      agent: codexProfile,
+      modelId: 'gpt-5.1-codex',
+      input: baseInput(),
+      emit: () => {},
+      signal: controller.signal,
+    })
+    controller.abort()
+    const result = await pending
+    expect(result.code).toBe(1)
+    expect(runner.killed).toHaveLength(1)
   })
 
   it('JSONL 事件流:thread_id 为会话锚点,agent_message/进度分流,usage 汇总', async () => {

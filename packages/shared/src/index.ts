@@ -138,12 +138,16 @@ export interface PushEvents {
   onHotkeyConflict(listener: (accelerator: string) => void): () => void
   /** 迷你条唤起时主进程推送剪贴板预填文本 */
   onMiniPrefill(listener: (text: string) => void): () => void
+  /** 自定义标题栏:主窗最大化状态变化(最大化/还原图标切换) */
+  onWindowMaximized(listener: (maximized: boolean) => void): () => void
 }
 
 export interface AgentDroveApi extends PushEvents {
   // agents:*
   agentsList(): Promise<AgentView[]>
   agentsSetEnabled(agentId: string, enabled: boolean): Promise<void>
+  /** 重新扫描本机已安装客户端(保留启停状态),返回最新列表 */
+  agentsRescan(): Promise<AgentView[]>
   // projects:* 项目工作区(侧栏可选中)
   projectsList(): Promise<Project[]>
   /** 登记项目:原生目录选择弹窗选文件夹,取消返回 null */
@@ -192,6 +196,10 @@ export interface AgentDroveApi extends PushEvents {
   openPath(targetPath: string): Promise<void>
   // 换客户端(手动指定降级目标,语义同 failover:attempt+1/retry_of 记链)
   tasksResubmitOn(taskId: string, targetAgentId: string): Promise<TaskRecord>
+  // 窗口控制(自定义标题栏右上角按钮):sender 定位窗口
+  windowMinimize(): Promise<void>
+  windowToggleMaximize(): Promise<void>
+  windowClose(): Promise<void>
   // 隐藏迷你条窗口(Esc/派发成功后调用)
   hideMini(): Promise<void>
   // 渲染层拿不到 File 真实路径,经 preload 的 webUtils 解析

@@ -1,10 +1,17 @@
-import type { AgentDroveApi, AgentView } from '@agent-drove/shared'
-import type { AppConfig, StoredEvent, TaskRecord } from '@agent-drove/core'
+import type {
+  AgentDroveApi,
+  AgentView,
+  AppConfig,
+  Project,
+  StoredEvent,
+  TaskRecord,
+} from '@agent-drove/shared'
 import { DEFAULT_CONFIG, MODEL_CLIENT_FOLLOW } from '@agent-drove/core'
 
 /**
  * 浏览器直开(无 Electron 桥)时的样例数据,
  * 仅 import.meta.env.DEV 生效且会被产物构建剔除,不影响打包产物。
+ * 所有方法按 shared 的 AgentDroveApi 契约实现,形状与真实 preload 一致。
  */
 export function installDevMock(): void {
   const agents: AgentView[] = [
@@ -79,17 +86,47 @@ export function installDevMock(): void {
   }))
 
   let seq = 100
-  const projects: import('@agent-drove/core').Project[] = [
+  const projects: Project[] = [
     { id: 'daily', name: '日常工作区', path: null, createdAt: now },
     { id: 'demo-proj-1', name: 'AgentDrove', path: 'E:/idea work/AgentDrove', createdAt: now - 1 },
   ]
+  /** 可变配置:settingsUpdate 落地后 settingsGet 能读回,开发期验证保存链路 */
+  let currentConfig: AppConfig = DEFAULT_CONFIG
+
+  /** 每任务的样例事件流,按 seq 升序;翻页时按 beforeSeq 截取 */
+  function eventsFor(taskId: string): StoredEvent[] {
+    const task = tasks.find((t) => t.id === taskId)
+    if (!task) return []
+    const base = task.createdAt
+    return [
+      { taskId, seq: 1, at: base, event: { kind: 'state-changed', from: 'queued', to: 'running' } },
+      { taskId, seq: 2, at: base + 6_000, event: { kind: 'message', channel: 'stdout', text: '已读取 14 个文件,定位到 throttle.ts 与 orchestrator.ts 的耦合点。' } },
+      { taskId, seq: 3, at: base + 21_000, event: { kind: 'progress', text: '分析依赖图 (3/7)' } },
+      { taskId, seq: 4, at: base + 40_000, event: { kind: 'warning', text: '客户端版本 0.16.9 超出驱动声明范围 >=0.16 <0.17 边缘' } },
+      { taskId, seq: 5, at: base + 61_000, event: { kind: 'artifact', path: 'packages/core/src/throttle.ts', change: 'modified' } },
+      { taskId, seq: 6, at: base + 62_000, event: { kind: 'usage', inputTokens: 12400, outputTokens: 3120 } },
+      { taskId, seq: 7, at: base + 63_000, event: { kind: 'state-changed', from: 'running', to: 'completed' } },
+    ]
+  }
+
+  function findTask(taskId: string): TaskRecord {
+    const task = tasks.find((t) => t.id === taskId)
+    if (!task) throw new Error(`mock: 任务不存在 ${taskId}`)
+    return task
+  }
+
   const mock: AgentDroveApi = {
     agentsList: async () => agents,
-    agentsSetEnabled: async () => {},
+    agentsSetEnabled: async (agentId, enabled) => {
+      const agent = agents.find((a) => a.id === agentId)
+      if (agent) agent.enabled = enabled
+    },
+    agentsRescan: async () => agents,
     projectsList: async () => projects,
     projectsPickAndAdd: async () => null, // 浏览器环境无原生目录弹窗
     projectsBindDaily: async (path) => {
-      const daily = projects.find((p) => p.id === 'daily')!
+      const daily = projects.find((p) => p.id === 'daily')
+      if (!daily) throw new Error('mock: 日常工作区缺失')
       daily.path = path
       return daily
     },
@@ -104,31 +141,24 @@ export function installDevMock(): void {
     pickDirectory: async () => null, // 浏览器环境无原生目录弹窗
     tasksList: async () => tasks,
     tasksGet: async (id) => tasks.find((t) => t.id === id) ?? null,
-    tasksEventsPage: async ({ taskId, limit = 200 }) => {
-      const task = tasks.find((t) => t.id === taskId)
-      if (!task) return []
-      const events: StoredEvent[] = [
-        { taskId, seq: 1, at: task.createdAt, event: { kind: 'state-changed', from: 'queued', to: 'running' } },
-        { taskId, seq: 2, at: task.createdAt + 6_000, event: { kind: 'message', channel: 'stdout', text: '已读取 14 个文件,定位到 throttle.ts 与 orchestrator.ts 的耦合点。' } },
-        { taskId, seq: 3, at: task.createdAt + 21_000, event: { kind: 'progress', text: '分析依赖图 (3/7)' } },
-        { taskId, seq: 4, at: task.createdAt + 40_000, event: { kind: 'warning', text: '客户端版本 0.16.9 超出驱动声明范围 >=0.16 <0.17 边缘' } },
-        { taskId, seq: 5, at: task.createdAt + 61_000, event: { kind: 'artifact', path: 'packages/core/src/throttle.ts', change: 'modified' } },
-        { taskId, seq: 6, at: task.createdAt + 62_000, event: { kind: 'usage', inputTokens: 12400, outputTokens: 3120 } },
-        { taskId, seq: 7, at: task.createdAt + 63_000, event: { kind: 'state-changed', from: 'running', to: 'completed' } },
-      ]
-      void limit
-      return events
+    tasksEventsPage: async ({ taskId, beforeSeq, limit = 200 }) => {
+      const all = eventsFor(taskId)
+      const page = beforeSeq === undefined ? all : all.filter((e) => e.seq < beforeSeq)
+      return page.slice(-limit)
     },
     tasksSubmit: async (dto) => {
       const task: TaskRecord = {
         id: `demo-${++seq}`,
         agentId: dto.agentId,
-        modelId: MODEL_CLIENT_FOLLOW,
+        modelId: dto.modelId ?? MODEL_CLIENT_FOLLOW,
         prompt: dto.prompt,
         cwd: dto.cwd ?? 'E:/idea work/AgentDrove',
         projectId: dto.projectId,
         state: 'queued',
-        attachments: [],
+        sessionId: dto.sessionId,
+        resumeLatest: dto.resumeLatest,
+        attachments: dto.attachments ?? [],
+        toolPolicy: dto.toolPolicy,
         mode: dto.mode ?? 'build',
         origin: dto.origin ?? 'panel',
         createdAt: Date.now(),
@@ -138,33 +168,86 @@ export function installDevMock(): void {
       return task
     },
     tasksSubmitBatch: async (dtos) => {
-      const out = []
-      for (const dto of dtos) out.push(await mock.tasksSubmit!(dto))
+      const out: TaskRecord[] = []
+      for (const dto of dtos) out.push(await mock.tasksSubmit(dto))
       return out
     },
     tasksRetry: async (taskId) => {
-      const parent = tasks.find((t) => t.id === taskId)!
-      return mock.tasksSubmit!({ agentId: parent.agentId, prompt: parent.prompt, origin: 'panel' })
+      const parent = findTask(taskId)
+      return mock.tasksSubmit({ agentId: parent.agentId, prompt: parent.prompt, origin: 'panel' })
     },
     tasksContinue: async (taskId, prompt) => {
-      const parent = tasks.find((t) => t.id === taskId)!
-      return mock.tasksSubmit!({ agentId: parent.agentId, prompt, sessionId: parent.sessionId })
+      const parent = findTask(taskId)
+      return mock.tasksSubmit({
+        agentId: parent.agentId,
+        prompt,
+        sessionId: parent.sessionId,
+        resumeLatest: parent.resumeLatest,
+      })
     },
-    tasksCancel: async () => true,
-    tasksMarkFailed: async () => true,
-    tasksBatchCancel: async (ids) => ids.length,
-    tasksBatchDelete: async (ids) => ids.length,
+    tasksCancel: async (taskId) => {
+      const task = tasks.find((t) => t.id === taskId)
+      if (!task || (task.state !== 'queued' && task.state !== 'running')) return false
+      task.state = 'canceled'
+      task.finishedAt = Date.now()
+      return true
+    },
+    tasksMarkFailed: async (taskId, reason) => {
+      const task = tasks.find((t) => t.id === taskId)
+      if (!task) return false
+      task.state = 'failed'
+      task.error = reason ?? '手动标记失败'
+      task.finishedAt = Date.now()
+      return true
+    },
+    tasksBatchCancel: async (ids) => {
+      let canceled = 0
+      for (const task of tasks) {
+        if (!ids.includes(task.id)) continue
+        if (task.state !== 'queued' && task.state !== 'running') continue
+        task.state = 'canceled'
+        task.finishedAt = Date.now()
+        canceled++
+      }
+      return canceled
+    },
+    tasksBatchDelete: async (ids) => {
+      let removed = 0
+      for (let i = tasks.length - 1; i >= 0; i--) {
+        const task = tasks[i]!
+        if (ids.includes(task.id) && task.state !== 'running') {
+          tasks.splice(i, 1)
+          removed++
+        }
+      }
+      return removed
+    },
     tasksResubmitOn: async (taskId, target) => {
-      const parent = tasks.find((t) => t.id === taskId)!
-      return mock.tasksSubmit!({ agentId: target, prompt: parent.prompt, origin: 'failover' })
+      const parent = findTask(taskId)
+      return mock.tasksSubmit({ agentId: target, prompt: parent.prompt, origin: 'failover' })
     },
     healthCheck: async () => ({ ok: true, at: Date.now() }),
     launchApp: async () => 'deep-link',
-    usageGet: async () =>
-      agents.map((a) => ({ agentId: a.id, label: a.label, day: '2026-10-01', taskCount: a.usedToday, estimated: 0, dailyTaskCap: a.plan.dailyTaskCap })),
-    settingsGet: async () => DEFAULT_CONFIG as AppConfig,
-    settingsUpdate: async (patch) => ({ ...DEFAULT_CONFIG, ...patch }),
-    schedulerPause: async () => {},
+    usageGet: async () => {
+      const today = new Date()
+      const day = `${today.getFullYear()}-${String(today.getMonth() + 1).padStart(2, '0')}-${String(today.getDate()).padStart(2, '0')}`
+      return agents.map((a) => ({
+        agentId: a.id,
+        label: a.label,
+        day,
+        taskCount: a.usedToday,
+        estimated: 0,
+        dailyTaskCap: a.plan.dailyTaskCap,
+      }))
+    },
+    settingsGet: async () => currentConfig,
+    settingsUpdate: async (patch) => {
+      currentConfig = { ...currentConfig, ...patch }
+      return currentConfig
+    },
+    schedulerPause: async (paused) => {
+      currentConfig = { ...currentConfig, schedulerPaused: paused }
+    },
     logsTail: async () => ['2026-10-01T22:00:00 info 保留期清理完成 { removedTasks: 3 }'],
     exportData: async () => ({ path: 'C:/Users/demo/Desktop/agentdrove-export.json' }),
     exportWeeklyReport: async () => ({ path: 'C:/Users/demo/Desktop/agentdrove-weekly.csv' }),
@@ -183,6 +266,10 @@ export function installDevMock(): void {
     onPanelFocus: () => () => {},
     onHotkeyConflict: () => () => {},
     onMiniPrefill: () => () => {},
+    onWindowMaximized: () => () => {},
+    windowMinimize: async () => {},
+    windowToggleMaximize: async () => {},
+    windowClose: async () => {},
     hideMini: async () => {},
     filePath: (file) => file.name,
   }

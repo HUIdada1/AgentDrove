@@ -185,6 +185,25 @@ describe('ZcodeDriver 执行路径', () => {
     })
     expect(pid).toBeGreaterThan(0)
   })
+
+  it('maxTurns 无等价参数时告警,不静默丢弃', async () => {
+    const fsx = new FakeFileSystem()
+    fsx.addWritable('C:/tmp/ws')
+    const runner = new ScriptedRunner()
+    runner.enqueue((_req, io) => io.exit(0))
+    const driver = new ZcodeDriver(runner, fsx, locator)
+    const warnings: string[] = []
+    await driver.run({
+      agent: zcodeProfile,
+      modelId: 'client-follow',
+      input: baseInput({ toolPolicy: { maxTurns: 3 } }),
+      emit: (e) => {
+        if (e.kind === 'warning') warnings.push(e.text)
+      },
+      signal: new AbortController().signal,
+    })
+    expect(warnings.some((t) => t.includes('maxTurns'))).toBe(true)
+  })
 })
 
 describe('ZcodeDriver 探测与健康', () => {

@@ -11,8 +11,8 @@ if (import.meta.env.DEV && !window.api) {
   try {
     const { installDevMock } = await import('./mock')
     installDevMock()
-  } catch {
-    // mock 仅为开发辅助,缺失不阻断
+  } catch (error) {
+    console.error('[renderer] 开发用 mock 加载失败,页面将显示空态', error)
   }
 }
 

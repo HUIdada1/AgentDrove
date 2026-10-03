@@ -57,6 +57,7 @@ function renameSafe(from: string, to: string): void {
 export function tailLogs(logsDir: string, limit = 200): string[] {
   const current = join(logsDir, 'agent.log')
   if (!existsSync(current)) return []
-  const lines = readFileSync(current, 'utf8').trim().split('\n')
-  return lines.slice(-limit)
+  const content = readFileSync(current, 'utf8').trim()
+  if (!content) return []
+  return content.split('\n').slice(-limit)
 }

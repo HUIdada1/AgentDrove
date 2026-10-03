@@ -1,4 +1,4 @@
-import { mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { mkdirSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { describe, expect, it } from 'vitest'
@@ -59,6 +59,16 @@ describe('YAML 配置源', () => {
     expect(source.load().hotkey).toBe('Alt+Space')
     // 文件内容可人工检阅
     expect(readFileSync(join(dir, 'settings.yaml'), 'utf8')).toContain('Alt+Space')
+    rmSync(dir, { recursive: true, force: true })
+  })
+
+  it('saveYamlConfig 原子写入:不残留临时文件且覆盖旧值', () => {
+    const dir = configDir()
+    saveYamlConfig(dir, { ...DEFAULT_CONFIG, hotkey: 'Ctrl+1' })
+    saveYamlConfig(dir, { ...DEFAULT_CONFIG, hotkey: 'Ctrl+2' })
+    // 两次写入后目录里只有正式文件,没有 .tmp- 中间产物
+    expect(readdirSync(dir).filter((f) => f.includes('.tmp-'))).toEqual([])
+    expect(loadYamlConfig(dir).source.load().hotkey).toBe('Ctrl+2')
     rmSync(dir, { recursive: true, force: true })
   })
 })

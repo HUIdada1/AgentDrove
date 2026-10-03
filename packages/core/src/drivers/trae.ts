@@ -1,3 +1,4 @@
+import { join } from 'node:path'
 import type {
   AgentDriver,
   DetectedAgent,
@@ -5,14 +6,14 @@ import type {
   RunResult,
 } from '../driver.js'
 import { DEFAULT_RUN_TIMEOUT_MS } from '../driver.js'
-import type { AgentProfile, ModelId } from '../types.js'
+import type { AgentProfile, ModelId, TaskMode } from '../types.js'
 import type { FileSystem, ProcessRunner } from '../ports.js'
 import { LineDecoder, decodeBuffer } from '../text.js'
 
 const PROBE_TIMEOUT_MS = 15_000
 
 /** TaskMode 到 trae chat -m 档位的映射;trae 无 plan/yolo 概念,就近落 ask/agent */
-const MODE_TO_TRAE: Record<string, string> = {
+const MODE_TO_TRAE: Record<TaskMode, string> = {
   build: 'agent',
   edit: 'edit',
   plan: 'ask',
@@ -35,10 +36,10 @@ export class TraeDriver implements AgentDriver {
 
   async detect(entries: string[]): Promise<DetectedAgent | null> {
     for (const entry of entries) {
-      // 候选是安装根(拼 bin\trae.cmd)或 trae.cmd 全路径
+      // 候选是安装根(拼 bin/trae.cmd)或 trae.cmd 全路径
       const candidates = /trae\.cmd$/i.test(entry)
         ? [entry]
-        : [`${entry}\\bin\\trae.cmd`]
+        : [join(entry, 'bin', 'trae.cmd')]
       for (const cli of candidates) {
         if (!this.fsx.exists(cli)) continue
         return {
@@ -73,10 +74,14 @@ export class TraeDriver implements AgentDriver {
       'chat',
       input.prompt,
       '-m',
-      MODE_TO_TRAE[input.mode ?? 'build'] ?? 'agent',
-      ...(input.attachments ?? []).map((a) => ['-a', a.path]).flat(),
+      MODE_TO_TRAE[input.mode ?? 'build'],
+      ...(input.attachments ?? []).flatMap((a) => ['-a', a.path]),
     ]
-    const chunks: Buffer[] = []
+    if (input.toolPolicy?.denyList?.length) {
+      emit({ kind: 'warning', text: 'trae 半自动通道无工具禁用参数,本次未透传 denyList' })
+    }
+    // 派发前再确认未被取消:取消语义下不应再拉起 GUI 窗口
+    if (signal.aborted) throw new Error('任务已取消,未启动进程')
     const decoder = new LineDecoder()
     const stderrDecoder = new LineDecoder()
     let timedOut = false
@@ -85,9 +90,8 @@ export class TraeDriver implements AgentDriver {
       command: options.agent.entry,
       args,
       cwd: input.cwd,
-      shell: /\.(cmd|bat)$/i.test(options.agent.entry),
+      shell: this.needsShell(options.agent.entry),
       onStdout: (chunk) => {
-        chunks.push(chunk)
         for (const line of decoder.push(chunk)) {
           if (line) emit({ kind: 'message', channel: 'stdout', text: line })
         }
@@ -129,6 +133,11 @@ export class TraeDriver implements AgentDriver {
     }
   }
 
+  private needsShell(entry: string): boolean {
+    // .cmd/.bat shim 与 PATH 命令名在 Windows 上都需经 shell 解析
+    return /\.(cmd|bat)$/i.test(entry) || (!entry.includes('\\') && !entry.includes('/'))
+  }
+
   private async probeVersion(entry: string): Promise<string | undefined> {
     const chunks: Buffer[] = []
     try {
@@ -150,7 +159,7 @@ export class TraeDriver implements AgentDriver {
         command: entry,
         args,
         cwd: process.cwd(),
-        shell: /\.(cmd|bat)$/i.test(entry),
+        shell: this.needsShell(entry),
         onStdout,
         onStderr: () => {},
       })

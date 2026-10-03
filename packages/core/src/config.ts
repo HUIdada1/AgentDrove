@@ -89,9 +89,10 @@ function deepMerge(base: unknown, patch: unknown): unknown {
     }
     return out
   }
-  // 数组叶子(如 denyList)必须克隆,否则调用方改穿内置默认
+  // 数组叶子(如 denyList)必须克隆;patch 数组同样克隆,否则用户配置的数组引用被改穿
   if (Array.isArray(base)) {
-    return patch === undefined ? [...base] : patch
+    if (patch === undefined) return [...base]
+    return Array.isArray(patch) ? [...patch] : patch
   }
   return patch === undefined ? base : patch
 }

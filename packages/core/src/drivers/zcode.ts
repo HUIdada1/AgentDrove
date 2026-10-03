@@ -87,20 +87,30 @@ export class ZcodeDriver implements AgentDriver {
       throw new Error(`工作区不可用(不存在或不可写):${input.cwd}`)
     }
     const args = [this.locator.cliPath, ...this.buildArgs(input)]
-    const stdoutChunks: Buffer[] = []
+    if (input.toolPolicy?.maxTurns != null) {
+      emit({ kind: 'warning', text: 'zcode 无轮次上限参数,本次未透传 maxTurns' })
+    }
+    if (signal.aborted) throw new Error('任务已取消,未启动进程')
     const stdoutDecoder = new LineDecoder()
     const stderrDecoder = new LineDecoder()
     let timedOut = false
+    let sessionId: string | undefined
+
+    // 会话锚点随行提取,不保留全量 stdout
+    const scanSession = (line: string): void => {
+      if (!sessionId && /session/i.test(line)) sessionId = extractSessionId(line)
+    }
+    const handleLine = (line: string): void => {
+      scanSession(line)
+      if (line) emit({ kind: 'message', channel: 'stdout', text: line })
+    }
 
     const handle = this.runner.spawn({
       command: this.locator.nodeBin,
       args,
       cwd: input.cwd,
       onStdout: (chunk) => {
-        stdoutChunks.push(chunk)
-        for (const line of stdoutDecoder.push(chunk)) {
-          if (line) emit({ kind: 'message', channel: 'stdout', text: line })
-        }
+        for (const line of stdoutDecoder.push(chunk)) handleLine(line)
       },
       onStderr: (chunk) => {
         for (const line of stderrDecoder.push(chunk)) {
@@ -121,9 +131,7 @@ export class ZcodeDriver implements AgentDriver {
 
     try {
       const code = await handle.exited
-      for (const line of stdoutDecoder.flush()) {
-        if (line) emit({ kind: 'message', channel: 'stdout', text: line })
-      }
+      for (const line of stdoutDecoder.flush()) handleLine(line)
       for (const line of stderrDecoder.flush()) {
         if (line) emit({ kind: 'message', channel: 'stderr', text: line })
       }
@@ -131,10 +139,7 @@ export class ZcodeDriver implements AgentDriver {
         const elapsed = Math.round(this.clock.monotonic() - startedMono)
         throw new Error(`看门狗超时(${elapsed}ms ≥ ${limit}ms),已终止进程树`)
       }
-      return {
-        code,
-        sessionId: extractSessionId(decodeBuffer(Buffer.concat(stdoutChunks))),
-      }
+      return { code, sessionId }
     } finally {
       clearTimeout(watchdog)
       signal.removeEventListener('abort', onAbort)

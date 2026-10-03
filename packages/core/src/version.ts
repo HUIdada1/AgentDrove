@@ -2,12 +2,20 @@
 
 type Op = '>=' | '>' | '<=' | '<' | '='
 
+/** 版本段取前导数字,容忍 "0.16.9-beta" 这类客户端自带后缀 */
+function segment(value: string | undefined): number {
+  const match = /^\d+/.exec(value ?? '')
+  return match ? Number(match[0]) : 0
+}
+
 function compare(a: string, b: string): number {
-  const [a1 = 0, a2 = 0, a3 = 0] = a.split('.').map(Number)
-  const [b1 = 0, b2 = 0, b3 = 0] = b.split('.').map(Number)
-  if (a1 !== b1) return a1 - b1
-  if (a2 !== b2) return a2 - b2
-  return a3 - b3
+  const left = a.split('.')
+  const right = b.split('.')
+  for (let i = 0; i < 3; i++) {
+    const diff = segment(left[i]) - segment(right[i])
+    if (diff !== 0) return diff
+  }
+  return 0
 }
 
 export function satisfiesRange(version: string, range: string): boolean {

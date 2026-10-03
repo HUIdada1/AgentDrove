@@ -9,6 +9,8 @@ import { MODEL_CLIENT_FOLLOW } from './types.js'
 
 const DEFAULT_DAILY_TASK_CAP = 20
 const DEFAULT_MAX_CONCURRENCY = 1
+/** modelSwitch=none 时 UI 展示的伪模型档位 */
+const CLIENT_FOLLOW_LABEL = '跟随客户端'
 
 function normalizePlan(plan: Partial<PlanInfo> | undefined, label: string): PlanInfo {
   return {
@@ -46,6 +48,11 @@ export class Registry {
       throw new Error(`maxConcurrency must be >= 1: ${profile.id}`)
     }
     this.agents.set(profile.id, profile)
+  }
+
+  /** 重扫场景专用:按最新探测结果重建档案前先移除旧登记;id 不存在时静默,保证重扫幂等 */
+  unregister(id: AgentId): void {
+    this.agents.delete(id)
   }
 
   get(id: AgentId): AgentProfile {
@@ -93,7 +100,7 @@ export class Registry {
     const profile = this.get(agentId)
     if (profile.capabilities.modelSwitch === 'none') {
       // 无可选模型,UI 展示为"跟随客户端"
-      return [{ id: MODEL_CLIENT_FOLLOW, label: '跟随客户端' }]
+      return [{ id: MODEL_CLIENT_FOLLOW, label: CLIENT_FOLLOW_LABEL }]
     }
     return profile.models
   }

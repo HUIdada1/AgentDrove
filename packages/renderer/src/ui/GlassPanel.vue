@@ -8,7 +8,7 @@ withDefaults(defineProps<{
 </script>
 
 <template>
-  <section class="glass glass-panel" :class="{ strong, pad }">
+  <section class="glass glass-panel" :class="{ 'glass-strong': strong, pad }">
     <header v-if="title" class="head">
       <h3>{{ title }}</h3>
       <slot name="extra" />

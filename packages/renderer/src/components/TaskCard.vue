@@ -1,25 +1,20 @@
 <script setup lang="ts">
 import { computed } from 'vue'
 import type { TaskRecord } from '@agent-drove/shared'
+import { CLIENT_FOLLOW_MODEL, STATE_TEXT } from '../labels'
 
 const props = defineProps<{
   task: TaskRecord
   selected: boolean
   checked: boolean
+  /** 客户端展示名;缺省回落 agentId */
+  agentLabel?: string
 }>()
 
 defineEmits<{ click: []; check: [] }>()
 
-const STATE_TEXT: Record<TaskRecord['state'], string> = {
-  queued: '排队',
-  running: '运行中',
-  completed: '已完成',
-  failed: '失败',
-  canceled: '已取消',
-  interrupted: '已中断',
-}
-
 const ORIGIN_MARK: Partial<Record<TaskRecord['origin'], string>> = {
+  panel: '面板',
   hotkey: '热键',
   selection: '选中',
   tray: '托盘',
@@ -45,8 +40,8 @@ const time = computed(() => {
 <template>
   <article class="card spot" :class="[`s-${task.state}`, { selected }]" @click="$emit('click')">
     <div class="top">
-      <span class="agent">{{ task.agentId }}</span>
-      <span class="model">{{ task.modelId === 'client-follow' ? '跟随客户端' : task.modelId }}</span>
+      <span class="agent">{{ agentLabel ?? task.agentId }}</span>
+      <span class="model">{{ task.modelId === CLIENT_FOLLOW_MODEL ? '跟随客户端' : task.modelId }}</span>
       <span class="badge">{{ STATE_TEXT[task.state] }}</span>
       <span v-if="duration" class="num dur">{{ duration }}</span>
       <span class="num time">{{ time }}</span>

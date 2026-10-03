@@ -4,6 +4,7 @@ import { useAppStore } from '../stores/app'
 import GlassButton from '../ui/GlassButton.vue'
 import GlassInput from '../ui/GlassInput.vue'
 import GlassSelect from '../ui/GlassSelect.vue'
+import { CLIENT_FOLLOW_MODEL, MODE_OPTIONS } from '../labels'
 import type { SubmitTaskDto } from '@agent-drove/shared'
 
 const store = useAppStore()
@@ -19,77 +20,150 @@ const batchMode = ref(false)
 const submitting = ref(false)
 const notice = ref('')
 const agentId = ref('')
+const promptBox = ref<{ focus: () => void } | null>(null)
 
 const activeAgents = computed(() => store.agents.value.filter((a) => a.enabled && a.capabilities.headless))
 const selectedAgent = computed(() => store.agents.value.find((a) => a.id === agentId.value))
 const selectedProject = computed(() => store.selectedProject.value)
+const modelId = ref('')
 
-// 侧栏选中工作区 → 发布框目录跟随(显式改写仍可临时覆盖,项目归属不变)
-watch(selectedProject, (project) => {
-  workspace.value = project?.path ?? ''
+// modelSwitch=none 的客户端(如 zcode)没有可选模型,只展示哨兵项且锁定
+const modelLocked = computed(() => selectedAgent.value?.capabilities.modelSwitch === 'none')
+
+const modelOptions = computed(() => {
+  const agent = selectedAgent.value
+  if (!agent) return []
+  if (modelLocked.value) return [{ value: CLIENT_FOLLOW_MODEL, label: '跟随客户端' }]
+  // 套餐声明覆盖范围时取交集,避免发出会被 registry.resolveModel 拒绝的模型
+  const covered = agent.plan.modelIds
+  const list = covered.length > 0 ? agent.models.filter((m) => covered.includes(m.id)) : agent.models
+  return list.map((m) => ({ value: m.id, label: m.label }))
 })
+
+// 仅在客户端支持切模型且已选中时随 DTO 透传;其余情况省略字段
+const resolvedModelId = computed(() =>
+  selectedAgent.value && !modelLocked.value && modelId.value ? modelId.value : undefined,
+)
+
+// 切客户端回填模型:优先档案默认模型,其次该客户端首个可选模型,避免下拉框选中值不在选项里而显示空白
+watch(agentId, () => {
+  const options = modelOptions.value
+  const preferred = selectedAgent.value?.defaultModel
+  modelId.value =
+    preferred && options.some((o) => o.value === preferred) ? preferred : (options[0]?.value ?? '')
+})
+
+// 默认档位来自设置(settings 异步到达后生效);yolo 不在发布框可选档位内,回落到 build
+watch(
+  () => store.settings.value?.task.defaultMode,
+  (configured) => {
+    if (configured === 'build' || configured === 'edit' || configured === 'plan') mode.value = configured
+  },
+  { immediate: true },
+)
+
+// 侧栏选中工作区 → 发布框目录跟随(显式改写仍可临时覆盖,项目归属不变);
+// 只跟 path 而不是项目对象:项目列表刷新会换对象引用,按对象监听会误清用户手填的临时目录
+watch(
+  () => selectedProject.value?.path ?? '',
+  (path) => {
+    workspace.value = path
+  },
+)
 
 onMounted(() => {
   window.addEventListener('focus-composer', focusPrompt)
 })
 
 // agents 异步到达后回填默认选中,否则下拉框显示为空
-watch(activeAgents, (list) => {
-  if (!agentId.value && list.length > 0) agentId.value = list[0]!.id
-})
+watch(
+  activeAgents,
+  (list) => {
+    if (!agentId.value && list.length > 0) agentId.value = list[0]!.id
+  },
+  { immediate: true },
+)
 
 onBeforeUnmount(() => window.removeEventListener('focus-composer', focusPrompt))
 
 function focusPrompt(): void {
-  document.querySelector<HTMLTextAreaElement>('.composer textarea')?.focus()
+  promptBox.value?.focus()
 }
 
-async function pickAttachment(): Promise<void> {
+const IMAGE_EXT = /\.(png|jpe?g|gif|webp|bmp)$/i
+
+/** 附件只引用原路径;重复路径跳过,避免同一文件多次入队 */
+function addFiles(files: FileList | null): void {
+  for (const file of files ?? []) {
+    let path: string
+    try {
+      path = window.api.filePath(file)
+    } catch {
+      notice.value = `无法解析附件路径:${file.name}`
+      continue
+    }
+    if (attachments.value.some((a) => a.path === path)) continue
+    attachments.value.push({ path, kind: IMAGE_EXT.test(file.name) ? 'image' : 'file' })
+  }
+}
+
+function pickAttachment(): void {
   const input = document.createElement('input')
   input.type = 'file'
   input.multiple = true
-  input.onchange = async () => {
-    for (const file of input.files ?? []) {
-      attachments.value.push({
-        path: await window.api.filePath(file),
-        kind: /\.(png|jpe?g|gif|webp|bmp)$/i.test(file.name) ? 'image' : 'file',
-      })
-    }
-  }
+  input.onchange = () => addFiles(input.files)
   input.click()
 }
 
-async function onDrop(event: DragEvent): Promise<void> {
-  for (const file of event.dataTransfer?.files ?? []) {
-    attachments.value.push({
-      path: await window.api.filePath(file),
-      kind: /\.(png|jpe?g|gif|webp|bmp)$/i.test(file.name) ? 'image' : 'file',
-    })
+function onDrop(event: DragEvent): void {
+  addFiles(event.dataTransfer?.files ?? null)
+}
+
+/** 附件路径去重后唯一,可作稳定 key;移除按路径而非数组下标 */
+function removeAttachment(path: string): void {
+  attachments.value = attachments.value.filter((a) => a.path !== path)
+}
+
+async function pickWorkspace(): Promise<void> {
+  try {
+    const dir = await window.api.pickDirectory()
+    if (dir) workspace.value = dir
+  } catch (error) {
+    notice.value = `选择目录失败:${error instanceof Error ? error.message : String(error)}`
   }
+}
+
+/** 高级选项转 toolPolicy:非法/非正的 max-turns 忽略,绝不把 NaN 透传给主进程 */
+function resolveToolPolicy(): SubmitTaskDto['toolPolicy'] {
+  const denyList = denyList.value
+    .split(',')
+    .map((t) => t.trim())
+    .filter(Boolean)
+  const turns = Number(maxTurns.value)
+  const maxTurns = maxTurns.value && Number.isFinite(turns) && turns > 0 ? turns : null
+  if (denyList.length === 0 && maxTurns === null) return undefined
+  return { denyList, maxTurns }
 }
 
 async function submit(): Promise<void> {
   const text = prompt.value.trim()
-  if (!text || !agentId.value) return
+  // Enter 与发送按钮可能几乎同时触发:这里兜住重复提交,避免同一批任务入队两次
+  if (!text || !agentId.value || submitting.value) return
   submitting.value = true
   notice.value = ''
   try {
     const lines = batchMode.value ? text.split('\n').map((l) => l.trim()).filter(Boolean) : [text]
     const projectId = store.selectedProjectId.value ?? undefined
+    const toolPolicy = resolveToolPolicy()
     const dtos: SubmitTaskDto[] = lines.map((line) => ({
       agentId: agentId.value,
       prompt: line,
       cwd: workspace.value || undefined,
       projectId,
+      ...(resolvedModelId.value ? { modelId: resolvedModelId.value } : {}),
       mode: mode.value,
       attachments: attachments.value.length > 0 ? attachments.value : undefined,
-      toolPolicy:
-        denyList.value || maxTurns.value
-          ? {
-              denyList: denyList.value ? denyList.value.split(',').map((t) => t.trim()).filter(Boolean) : [],
-              maxTurns: maxTurns.value ? Number(maxTurns.value) : null,
-            }
-          : undefined,
+      ...(toolPolicy ? { toolPolicy } : {}),
     }))
     // 派生工作区:git 源建 worktree,非 git 整拷降级(主进程完成)
     if (workspaceSource.value) {
@@ -102,11 +176,12 @@ async function submit(): Promise<void> {
     }
     prompt.value = ''
     attachments.value = []
-    await store.refreshTasks()
   } catch (error) {
+    // 批量入队可能部分成功,失败后仍要刷新列表,避免界面漏掉已入队的任务
     notice.value = error instanceof Error ? error.message : String(error)
   } finally {
     submitting.value = false
+    await store.refreshTasks()
   }
 }
 
@@ -121,11 +196,15 @@ function onKeydown(event: KeyboardEvent): void {
 <template>
   <section class="composer glass" @dragover.prevent @drop.prevent="onDrop">
     <GlassInput
+      ref="promptBox"
       v-model="prompt"
       multiline
       :rows="3"
+      send-label="派发"
+      :send-disabled="submitting || !prompt.trim()"
       :placeholder="batchMode ? '每行一条任务,批量入队…(Enter 提交 / Shift+Enter 换行)' : '把任务派发给客户端…(Enter 提交 / Shift+Enter 换行)'"
       @keydown="onKeydown"
+      @send="submit"
     />
 
     <div class="toolbar">
@@ -136,23 +215,17 @@ function onKeydown(event: KeyboardEvent): void {
         :options="activeAgents.map((a) => ({ value: a.id, label: a.label }))"
       />
       <GlassSelect
+        v-model="modelId"
+        class="model"
+        title="模型"
+        :options="modelOptions"
+        :disabled="modelLocked"
+      />
+      <GlassSelect
         v-model="mode"
         title="档位"
-        :options="[
-          { value: 'build', label: 'build' },
-          { value: 'edit', label: 'edit' },
-          { value: 'plan', label: 'plan' },
-        ]"
+        :options="MODE_OPTIONS"
       />
-      <GlassInput v-model="workspace" class="ws" mono :placeholder="selectedProject ? `${selectedProject.name} · 可临时改写目录` : '工作目录(留空=默认目录)'" />
-      <span
-        v-if="selectedProject"
-        class="ws-chip"
-        :title="selectedProject.path ?? '未绑定目录,派发落默认工作区'"
-      >
-        ⌂ {{ selectedProject.name }}
-        <button class="x" title="取消选中工作区" @click="store.selectedProjectId.value = null">×</button>
-      </span>
       <GlassButton variant="ghost" size="sm" @click="pickAttachment">
         附件{{ attachments.length ? ` ${attachments.length}` : '' }}
       </GlassButton>
@@ -162,10 +235,21 @@ function onKeydown(event: KeyboardEvent): void {
       <GlassButton variant="ghost" size="sm" :class="{ on: advanced }" @click="advanced = !advanced">
         高级
       </GlassButton>
-      <span class="spacer" />
-      <GlassButton variant="primary" :disabled="submitting || !prompt.trim()" @click="submit">
-        派发
+    </div>
+
+    <div class="ws-row">
+      <GlassInput v-model="workspace" class="ws" mono :placeholder="selectedProject ? `${selectedProject.name} · 可临时改写目录` : '工作目录(留空=默认目录)'" />
+      <GlassButton variant="ghost" size="sm" title="选择目录填入工作区" @click="pickWorkspace">
+        选目录
       </GlassButton>
+      <span
+        v-if="selectedProject"
+        class="ws-chip"
+        :title="selectedProject.path ?? '未绑定目录,派发落默认工作区'"
+      >
+        ⌂ {{ selectedProject.name }}
+        <button class="x" title="取消选中工作区" @click="store.selectedProjectId.value = null">×</button>
+      </span>
     </div>
 
     <div v-if="advanced" class="advanced">
@@ -187,9 +271,9 @@ function onKeydown(event: KeyboardEvent): void {
     </div>
 
     <div v-if="attachments.length" class="chips">
-      <span v-for="(a, i) in attachments" :key="a.path + i" class="chip">
+      <span v-for="a in attachments" :key="a.path" class="chip">
         {{ a.kind === 'image' ? '🖼' : '📄' }} {{ a.path.split(/[\\/]/).pop() }}
-        <button class="x" @click="attachments.splice(i, 1)">×</button>
+        <button class="x" @click="removeAttachment(a.path)">×</button>
       </span>
     </div>
 
@@ -213,6 +297,17 @@ function onKeydown(event: KeyboardEvent): void {
 
 .who {
   max-width: 130px;
+}
+
+.model {
+  max-width: 160px;
+}
+
+/* 工作区行:目录输入占主导 */
+.ws-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
 }
 
 .ws {
@@ -245,7 +340,7 @@ function onKeydown(event: KeyboardEvent): void {
   cursor: pointer;
 }
 
-.toolbar :deep(.on),
+/* 批量/高级开关的激活态:GlassButton ghost 默认 muted,这里给品牌色 */
 :deep(.on) {
   color: var(--accent-strong);
   border-color: var(--accent-line);

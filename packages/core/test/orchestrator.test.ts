@@ -240,6 +240,54 @@ describe('停用与恢复', () => {
   })
 })
 
+describe('钩子异常隔离', () => {
+  it('onRunStart 基线钩子抛错不阻断执行,任务仍完成并留 warning', async () => {
+    const registry = new Registry()
+    registry.register(zcodeProfile)
+    const repo = new MemoryTaskRepository()
+    const orchestrator = new Orchestrator(registry, {
+      repo,
+      sink: new PassthroughSink(repo),
+      defaultCwd: 'C:/tmp/ws',
+      onRunStart: () => {
+        throw new Error('基线扫描失败')
+      },
+    })
+    orchestrator.registerDriver(new MockDriver('zcode'))
+    const task = orchestrator.submit({ agentId: 'zcode', prompt: '基线异常' })
+    await waitFor(() => task.state === 'completed')
+    expect(
+      repo
+        .eventsOf(task.id)
+        .some(
+          (e) => e.event.kind === 'warning' && e.event.text.includes('产物基线建立失败'),
+        ),
+    ).toBe(true)
+  })
+
+  it('提交钩子抛错不回灌:任务仍入队并正常完成', async () => {
+    const h = buildHarness()
+    h.orchestrator.registerDriver(new MockDriver('zcode'))
+    h.orchestrator.onTaskSubmitted(() => {
+      throw new Error('登记钩子炸了')
+    })
+    const task = h.orchestrator.submit({ agentId: 'zcode', prompt: '提交钩子异常' })
+    await waitFor(() => task.state === 'completed')
+    expect(h.orchestrator.list()).toHaveLength(1)
+  })
+
+  it('终态钩子抛错不破坏状态机,任务保持 completed', async () => {
+    const h = buildHarness()
+    h.orchestrator.registerDriver(new MockDriver('zcode'))
+    h.orchestrator.onTaskTerminal(() => {
+      throw new Error('终态钩子炸了')
+    })
+    const task = h.orchestrator.submit({ agentId: 'zcode', prompt: '终态钩子异常' })
+    await waitFor(() => task.state === 'completed')
+    expect(states(task, h.repo)).toEqual(['running', 'completed'])
+  })
+})
+
 describe('续聊派生请求', () => {
   it('submit 支持 origin/parentId/retryOf/attempt 透传落库', async () => {
     const h = buildHarness()

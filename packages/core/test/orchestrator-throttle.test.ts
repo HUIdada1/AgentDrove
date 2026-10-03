@@ -185,3 +185,85 @@ describe('编排器 × 节流器', () => {
     expect(task.modelId).toBe(MODEL_CLIENT_FOLLOW)
   })
 })
+
+describe('放行窗口占槽(健康闸期间不超发)', () => {
+  it('全局并发=1:健康探活窗口内第二个任务不得并行执行', async () => {
+    const registry = new Registry()
+    registry.register({ ...zcodeProfile, plan: { ...zcodeProfile.plan, maxConcurrency: 4 } })
+    const repo = new MemoryTaskRepository()
+    const throttle = new Throttle(
+      new MemoryUsageLedger(),
+      { now: () => Date.now(), monotonic: () => performance.now() },
+      { globalConcurrency: 1, minIntervalMs: 0, jitterMs: 0 },
+    )
+    let active = 0
+    let maxActive = 0
+    const orchestrator = new Orchestrator(registry, {
+      repo,
+      sink: new PassthroughSink(repo),
+      defaultCwd: 'C:/tmp/ws',
+      throttle,
+      healthAtRelease: async () => {
+        await new Promise((resolve) => setTimeout(resolve, 40))
+        return { ok: true }
+      },
+    })
+    orchestrator.registerDriver({
+      id: 'zcode',
+      async detect() {
+        return null
+      },
+      async health() {
+        return { ok: true }
+      },
+      resolveModelArg: () => [],
+      async run() {
+        active++
+        maxActive = Math.max(maxActive, active)
+        await new Promise((resolve) => setTimeout(resolve, 30))
+        active--
+        return { code: 0 }
+      },
+    })
+    const first = orchestrator.submit({ agentId: 'zcode', prompt: 'a', cwd: 'C:/tmp/ws' })
+    const second = orchestrator.submit({ agentId: 'zcode', prompt: 'b', cwd: 'C:/tmp/other' })
+    await waitFor(() => first.state === 'completed' && second.state === 'completed')
+    expect(maxActive).toBe(1)
+  })
+
+  it('取消 running 立即释放槽位,不等驱动收尾', async () => {
+    const registry = new Registry()
+    registry.register({ ...zcodeProfile, plan: { ...zcodeProfile.plan, maxConcurrency: 1 } })
+    const repo = new MemoryTaskRepository()
+    const throttle = new Throttle(
+      new MemoryUsageLedger(),
+      { now: () => Date.now(), monotonic: () => performance.now() },
+      { globalConcurrency: 4, minIntervalMs: 0, jitterMs: 0 },
+    )
+    const orchestrator = new Orchestrator(registry, {
+      repo,
+      sink: new PassthroughSink(repo),
+      defaultCwd: 'C:/tmp/ws',
+      throttle,
+    })
+    // 忽略 abort、永不收尾的驱动:模拟挂死进程
+    orchestrator.registerDriver({
+      id: 'zcode',
+      async detect() {
+        return null
+      },
+      async health() {
+        return { ok: true }
+      },
+      resolveModelArg: () => [],
+      run: () => new Promise<never>(() => {}),
+    })
+    const running = orchestrator.submit({ agentId: 'zcode', prompt: '挂死', cwd: 'C:/tmp/ws' })
+    await waitFor(() => running.state === 'running')
+    const queued = orchestrator.submit({ agentId: 'zcode', prompt: '等待', cwd: 'C:/tmp/other' })
+    await new Promise((resolve) => setTimeout(resolve, 20))
+    expect(queued.state).toBe('queued')
+    expect(orchestrator.cancel(running.id)).toBe(true)
+    await waitFor(() => queued.state === 'running')
+  })
+})

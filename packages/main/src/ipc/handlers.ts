@@ -2,12 +2,12 @@ import { BrowserWindow, dialog, ipcMain, shell } from 'electron'
 import { basename, join } from 'node:path'
 import { randomUUID } from 'node:crypto'
 import {
+  closeSync,
   copyFileSync,
   existsSync,
   mkdirSync,
   openSync,
   readSync,
-  closeSync,
   statSync,
   writeFileSync,
 } from 'node:fs'
@@ -23,13 +23,13 @@ import type {
 import {
   ArtifactScanner,
   localDayOf,
+  mergeConfig,
   type AppConfig,
   type TaskRecord,
   type WorkspaceRow,
 } from '@agent-drove/core'
-import type { AppContext } from '../context.js'
+import { DAILY_PROJECT_ID, persistAgent, type AppContext } from '../context.js'
 import { tailLogs } from '../logger.js'
-import { DAILY_PROJECT_ID, persistAgent } from '../app.js'
 
 /** 事件单页最大条数:防止渲染层传超大 limit 一次性压垮 IPC */
 const EVENTS_PAGE_MAX_LIMIT = 1000
@@ -40,7 +40,8 @@ export function registerIpcHandlers(ctx: AppContext): void {
   const today = (): string => localDayOf(Date.now())
 
   // ---- agents ----
-  ipcMain.handle('agents:list', async (): Promise<AgentView[]> => {
+  // 列表组装口径只维护一份:agents:list 与 agents:rescan 共用
+  const buildAgentViews = async (): Promise<AgentView[]> => {
     const day = today()
     const views: AgentView[] = []
     for (const profile of ctx.registry.list()) {
@@ -64,6 +65,14 @@ export function registerIpcHandlers(ctx: AppContext): void {
       })
     }
     return views
+  }
+
+  ipcMain.handle('agents:list', (): Promise<AgentView[]> => buildAgentViews())
+
+  ipcMain.handle('agents:rescan', async (): Promise<AgentView[]> => {
+    // 重扫幂等且保留启停状态(以 agents 表落库为准),完成后按最新注册表组装列表
+    await ctx.rescanAgents()
+    return buildAgentViews()
   })
 
   ipcMain.handle('agents:set-enabled', (_e, agentId: string, enabled: boolean) => {
@@ -113,20 +122,22 @@ export function registerIpcHandlers(ctx: AppContext): void {
 
   // ---- tasks ----
   ipcMain.handle('tasks:list', (_e, filter?: TaskFilterDto): TaskRecord[] => {
-    const tasks = ctx.orchestrator.list().filter((task) => matchesFilter(task, filter))
+    // 以仓库为事实源:任务删除/保留期清理能立刻从列表消失(orchestrator 存活表不感知删除)
+    const tasks = ctx.store.allTasks().filter((task) => matchesFilter(task, filter))
     return tasks.sort((a, b) => b.createdAt - a.createdAt)
   })
 
-  ipcMain.handle('tasks:get', (_e, taskId: string) => ctx.orchestrator.get(taskId) ?? null)
+  ipcMain.handle('tasks:get', (_e, taskId: string) => ctx.store.getTask(taskId) ?? null)
 
   ipcMain.handle('tasks:events-page', (_e, query: EventsPageDto) => {
-    const all = ctx.orchestrator.eventsOf(query.taskId)
     const limit = Math.min(Math.max(1, query.limit ?? 200), EVENTS_PAGE_MAX_LIMIT)
-    const end = query.beforeSeq !== undefined
-      ? all.findIndex((event) => event.seq === query.beforeSeq)
-      : all.length
-    const slice = end <= 0 ? [] : all.slice(Math.max(0, end - limit), end)
-    return slice
+    // 直接走 SQL 分页取尾部,避免为一个任务的上万条事件做全量读取 + JSON.parse
+    const page = ctx.store.eventsPageOf(query.taskId, query.beforeSeq, limit)
+    // beforeSeq 未命中(任务被清理/传入过期 seq)时回落到最新一页,而不是返回空页
+    if (page.length === 0 && query.beforeSeq !== undefined) {
+      return ctx.store.eventsPageOf(query.taskId, undefined, limit)
+    }
+    return page
   })
 
   ipcMain.handle('tasks:submit', async (_e, dto: SubmitTaskDto): Promise<TaskRecord> => {
@@ -191,6 +202,8 @@ export function registerIpcHandlers(ctx: AppContext): void {
       const task = ctx.orchestrator.get(id)
       if (!task) continue
       if (task.state === 'running') continue // 运行中不可删,先取消
+      // queued 必须先出队再删:否则调度器稍后放行会把已删任务重新落库"复活"
+      ctx.orchestrator.cancel(id)
       // 派生工作区随任务一并清理,避免删了任务留下孤儿目录等保留期兜底
       for (const row of ctx.workspaces.rowsForTask(id)) {
         void ctx.workspaces.cleanup(row).catch(() => undefined)
@@ -206,8 +219,7 @@ export function registerIpcHandlers(ctx: AppContext): void {
     if (!parent) throw new Error(`unknown task: ${taskId}`)
     const target = ctx.registry.get(targetAgentId)
     // 换客户端 = 手动指定目标的降级:模型映射到目标 default_model,附件按目标能力决定是否继承
-    const attachments =
-      target.capabilities.attachments && target.id !== parent.agentId ? parent.attachments : []
+    const attachments = target.capabilities.attachments ? parent.attachments : []
     return ctx.orchestrator.submit({
       agentId: targetAgentId,
       prompt: parent.prompt,
@@ -253,12 +265,15 @@ export function registerIpcHandlers(ctx: AppContext): void {
   ipcMain.handle('settings:get', (): AppConfig => ctx.getConfig())
 
   ipcMain.handle('settings:update', (_e, patch: Partial<AppConfig>): AppConfig => {
-    const next = { ...ctx.getConfig(), ...patch }
+    const prev = ctx.getConfig()
+    // 深合并:renderer 只送局部嵌套配置(如仅改 throttle.minIntervalMs)时不得整体覆盖丢默认项
+    const next = mergeConfig(prev, patch)
     ctx.saveConfig(next)
     // 运行中的模块热应用新配置:节流参数/暂停闸/降级策略都持有可变引用
     ctx.orchestrator.throttleState.configure(next.throttle)
     ctx.orchestrator.throttleState.setPaused(next.schedulerPaused)
     ctx.failover.config = next.task.failover
+    if (next.hotkey !== prev.hotkey) ctx.applyHotkey(next.hotkey)
     return ctx.getConfig()
   })
 
@@ -338,6 +353,21 @@ export function registerIpcHandlers(ctx: AppContext): void {
   ipcMain.on('window:hide-mini', (event) => {
     BrowserWindow.fromWebContents(event.sender)?.hide()
   })
+
+  // ---- 自定义标题栏窗口控制 ----
+  ipcMain.handle('window:minimize', (event) => {
+    BrowserWindow.fromWebContents(event.sender)?.minimize()
+  })
+  ipcMain.handle('window:toggle-maximize', (event) => {
+    const win = BrowserWindow.fromWebContents(event.sender)
+    if (!win) return
+    if (win.isMaximized()) win.unmaximize()
+    else win.maximize()
+  })
+  // 主窗 close 被统一拦截为隐藏到托盘(7.1),走 close() 与系统关闭钮同路径
+  ipcMain.handle('window:close', (event) => {
+    BrowserWindow.fromWebContents(event.sender)?.close()
+  })
 }
 
 /** 同内容派发在窗口期内去重:双击/Enter 连击在渲染层 disable 生效前可能重入 */
@@ -345,8 +375,19 @@ const SUBMIT_DEDUP_MS = 1500
 const recentSubmits = new Map<string, number>()
 
 function submitDedupKey(dto: SubmitTaskDto): string {
-  return [dto.agentId, dto.prompt, dto.cwd ?? '', dto.projectId ?? '', dto.workspaceSource ?? '', dto.mode ?? '']
-    .join('')
+  // 用 NUL 分隔,避免字段拼接产生歧义碰撞;附件/模型/会话不同即视为不同任务
+  const attachments = (dto.attachments ?? []).map((a) => a.path).join('|')
+  return [
+    dto.agentId,
+    dto.prompt,
+    dto.cwd ?? '',
+    dto.projectId ?? '',
+    dto.workspaceSource ?? '',
+    dto.mode ?? '',
+    dto.modelId ?? '',
+    dto.sessionId ?? '',
+    attachments,
+  ].join('\u0000')
 }
 
 function pruneRecentSubmits(now: number): void {
@@ -372,23 +413,34 @@ async function submitDedup(ctx: AppContext, dto: SubmitTaskDto): Promise<TaskRec
 /** 派发单条:选中工作区注入 projectId;显式 cwd 优先,否则项目目录,再否则编排层默认目录 */
 async function submitOne(ctx: AppContext, dto: SubmitTaskDto): Promise<TaskRecord> {
   const { workspaceSource, projectId, ...rest } = dto
+  const config = ctx.getConfig()
+  const mode = rest.mode ?? config.task.defaultMode
+  // yolo 为全权限档位:未在设置页显式放行时一律拒绝(渲染层可绕过,此处兜底)
+  if (mode === 'yolo' && !config.danger.allowYolo) {
+    throw new Error('yolo 档位未放行:请先在设置页 Danger 区开启')
+  }
   let { cwd } = rest
   if (!cwd && projectId) {
     cwd = ctx.store.allProjects().find((p) => p.id === projectId)?.path ?? undefined
   }
+  const request = { ...rest, mode, projectId, origin: rest.origin ?? 'panel' }
   if (!workspaceSource) {
-    return ctx.orchestrator.submit({ ...rest, cwd, projectId, origin: rest.origin ?? 'panel' })
+    return ctx.orchestrator.submit({ ...request, cwd })
   }
   const taskId = randomUUID()
-  const cleanupHours = ctx.getConfig().task.workspaceCleanupHours
-  const row = await ctx.workspaces.derive(workspaceSource, taskId, ctx.paths.workspaces, cleanupHours)
-  return ctx.orchestrator.submit({
-    ...rest,
-    cwd: row.path,
-    projectId,
-    id: taskId,
-    origin: rest.origin ?? 'panel',
-  })
+  const row = await ctx.workspaces.derive(
+    workspaceSource,
+    taskId,
+    ctx.paths.workspaces,
+    config.task.workspaceCleanupHours,
+  )
+  try {
+    return ctx.orchestrator.submit({ ...request, cwd: row.path, id: taskId })
+  } catch (error) {
+    // 入队被拒(cap 超限/id 冲突)时回收刚派生的工作区,避免磁盘目录与登记行成为孤儿
+    await ctx.workspaces.cleanup(row).catch(() => undefined)
+    throw error
+  }
 }
 
 async function pickDirectory(ctx: AppContext): Promise<string | null> {

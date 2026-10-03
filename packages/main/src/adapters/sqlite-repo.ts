@@ -192,12 +192,22 @@ export class SqliteStore
     const rows = this.db
       .prepare('SELECT * FROM events WHERE task_id = ? ORDER BY seq')
       .all(taskId) as EventRow[]
-    return rows.map(({ task_id, seq, at, payload }) => ({
-      taskId: task_id,
-      seq,
-      at,
-      event: JSON.parse(payload),
-    }))
+    return rows.map(eventFromRow)
+  }
+
+  /**
+   * 事件分页(供 IPC 翻页):只取 beforeSeq 之前的最后 limit 条,按 seq 升序返回。
+   * 避免为一个任务的上万条事件做全量读取 + JSON.parse。
+   */
+  eventsPageOf(taskId: string, beforeSeq: number | undefined, limit: number): StoredEvent[] {
+    const rows = (beforeSeq === undefined
+      ? this.db
+          .prepare('SELECT * FROM events WHERE task_id = ? ORDER BY seq DESC LIMIT ?')
+          .all(taskId, limit)
+      : this.db
+          .prepare('SELECT * FROM events WHERE task_id = ? AND seq < ? ORDER BY seq DESC LIMIT ?')
+          .all(taskId, beforeSeq, limit)) as EventRow[]
+    return rows.reverse().map(eventFromRow)
   }
 
   maxSeqOf(taskId: string): number {
@@ -610,6 +620,15 @@ function taskFromRow(row: TaskRow): TaskRecord {
     finishedAt: row.finished_at ?? undefined,
     retryOf: row.retry_of ?? undefined,
     attempt: row.attempt,
+  }
+}
+
+function eventFromRow(row: EventRow): StoredEvent {
+  return {
+    taskId: row.task_id,
+    seq: row.seq,
+    at: row.at,
+    event: JSON.parse(row.payload),
   }
 }
 

@@ -1,18 +1,22 @@
 <script setup lang="ts">
 import { computed } from 'vue'
 
-const props = withDefaults(defineProps<{
+const props = defineProps<{
   value: number
   max: number
+  /** 覆盖液面配色(默认品牌色渐变) */
   color?: string
-}>(), {})
+}>()
 
-const percent = computed(() => Math.min(100, (props.value / Math.max(1, props.max)) * 100))
+// max 保护除零;value 可能为负或超限,夹到 0~100 避免负宽度
+const percent = computed(() =>
+  Math.max(0, Math.min(100, (props.value / Math.max(1, props.max)) * 100)),
+)
 </script>
 
 <template>
-  <div class="g-meter" role="progressbar" :aria-valuenow="value" :aria-valuemax="max">
-    <span class="fill" :style="{ width: `${percent}%` }" />
+  <div class="g-meter" role="progressbar" aria-valuemin="0" :aria-valuenow="value" :aria-valuemax="max">
+    <span class="fill" :style="{ width: `${percent}%`, ...(color ? { background: color } : {}) }" />
   </div>
 </template>
 

@@ -147,17 +147,27 @@ describe('Failover 候选筛选', () => {
     const outcome = await failover.deriveFor(task, healthyCtx)
     expect(outcome.derived?.sessionId).toBeUndefined()
   })
+
+  it('派生任务继承原任务 projectId 与 toolPolicy', async () => {
+    const { failover } = setup()
+    const task = {
+      ...failedTask('zcode'),
+      projectId: 'proj-1',
+      toolPolicy: { denyList: ['rm'], maxTurns: 5 },
+    }
+    const outcome = await failover.deriveFor(task, healthyCtx)
+    expect(outcome.derived?.projectId).toBe('proj-1')
+    expect(outcome.derived?.toolPolicy).toEqual({ denyList: ['rm'], maxTurns: 5 })
+  })
 })
 
 describe('attachFailover 终态联动', () => {
   it('编排器任务 failed 时自动派生降级任务', async () => {
-    const { orchestrator, failover, registry } = setup()
+    const { orchestrator, failover } = setup()
     orchestrator.registerDriver(new MockDriver('zcode', { fail: true }))
     orchestrator.registerDriver(new MockDriver('qoder'))
-    const failoverModule = failover
     const { attachFailover } = await import('../src/failover.js')
-    attachFailover(orchestrator, failoverModule, healthyCtx)
-    void registry
+    attachFailover(orchestrator, failover, healthyCtx)
     const task = orchestrator.submit({ agentId: 'zcode', prompt: '会失败' })
     await waitFor(() => task.state === 'failed')
     await waitFor(() => {

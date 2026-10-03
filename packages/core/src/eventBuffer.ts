@@ -56,15 +56,21 @@ export class EventBuffer implements EventSink {
     }
     this.flushing = true
     try {
+      // 落库与批推分开:只有落库失败才回灌重试。
+      // 落库成功后批推再失败若也回灌,下次 flush 会重复写同一批事件(幂等破坏)。
       this.repo.appendEvents(batch)
-      this.push(batch)
     } catch (error) {
-      // 落库/批推失败不丢事件:批次回灌队首等待下次 flush;
-      // 定时器回调里的未捕获异常会击穿主进程,必须在此收敛
       this.queue = [...batch, ...this.queue]
       console.error('[agent-drove] 事件落库失败,批次已回灌缓冲:', error)
-    } finally {
       this.flushing = false
+      return
     }
+    try {
+      this.push(batch)
+    } catch (error) {
+      // 事件已落库,仅渲染层推送失败;定时器回调的未捕获异常会击穿主进程,必须收敛
+      console.error('[agent-drove] 事件批推失败(已落库):', error)
+    }
+    this.flushing = false
   }
 }

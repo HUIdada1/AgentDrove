@@ -1,5 +1,6 @@
 import type { AgentDriver, DetectedAgent, DriverRunOptions, RunResult } from '../driver.js'
 import type { AgentProfile, ModelId } from '../types.js'
+import { MODEL_CLIENT_FOLLOW } from '../types.js'
 
 export interface MockBehavior {
   fail?: boolean
@@ -70,7 +71,7 @@ export class MockDriver implements AgentDriver {
   }
 
   resolveModelArg(modelId: ModelId, _agent: AgentProfile): string[] {
-    return modelId === 'client-follow' ? [] : ['--model', modelId]
+    return modelId === MODEL_CLIENT_FOLLOW ? [] : ['--model', modelId]
   }
 
   async run(options: DriverRunOptions): Promise<RunResult> {
