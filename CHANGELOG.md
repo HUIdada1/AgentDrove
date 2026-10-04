@@ -1,5 +1,10 @@
 # Changelog
 
+## v0.5.0 (2026-10-04)
+
+6899b3d feat(core+main+renderer): P0 批次整改(Agent上下文/卡片拖拽归类/模型选择与思考强度/续聊覆盖与接续可见/四栏空间守卫/额度刷新/会话流降级/引导断链)
+ffc3d42 chore(release): v0.4.8 版本同步与 CHANGELOG
+
 ## v0.4.8 (2026-10-04)
 
 5a522c6 fix(core+main+renderer): 追问接续失败容错/JSON读取兜底/exit→close/CJS import.meta.url 垫片 + 组件打磨
