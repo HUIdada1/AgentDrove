@@ -7,6 +7,8 @@ import {
   resolveZcodeCliPaths,
   resolveZcodePersonalConfigPath,
   parseZcodePersonalModels,
+  resolveZcodeReasoningLevels,
+  pickReasoningLevel,
   buildTaskZcodeProviderConfig,
   type ZcodeLocator,
 } from '../src/drivers/zcode.js'
@@ -454,20 +456,30 @@ describe('ZCode personal 模型解析与任务级临时副本注入', () => {
     expect(models.some((m) => m.id === 'p-1/m-disabled')).toBe(false)
   })
 
-  it('buildTaskZcodeProviderConfig: 双保险置顶与 defaultModelSelection options 设置', () => {
+  it('buildTaskZcodeProviderConfig: 双保险置顶;未解析到档位时不带 options(不猜写非法档位)', () => {
+    // p-2/m-backup 无 optionSpecs 规则,且未传入 reasoningLevel → 不带 options
     const modified = buildTaskZcodeProviderConfig(samplePersonalJson, 'p-2/m-backup')
     const parsed = JSON.parse(modified)
-    // 1. defaultModelSelection options
+    // 1. defaultModelSelection 不带 options,由 CLI 回落实际模型
     expect(parsed.config.defaultModelSelection).toEqual({
       providerId: 'p-2',
       modelId: 'm-backup',
-      options: { reasoningLevel: 'max' },
     })
     // 2. providerOrder 置顶
     expect(parsed.config.providerOrder[0]).toBe('p-2')
     // 3. 该 provider 的 modelOrder 置顶
     const p2 = parsed.config.providerConfigRules.providerRules.find((p: any) => p.providerId === 'p-2')
     expect(p2.config.modelOrder[0]).toBe('m-backup')
+  })
+
+  it('buildTaskZcodeProviderConfig: 传入 reasoningLevel 时写入 defaultModelSelection.options', () => {
+    const modified = buildTaskZcodeProviderConfig(samplePersonalJson, 'p-1/m-fast', 'high')
+    const parsed = JSON.parse(modified)
+    expect(parsed.config.defaultModelSelection).toEqual({
+      providerId: 'p-1',
+      modelId: 'm-fast',
+      options: { reasoningLevel: 'high' },
+    })
   })
 
   it('driver.run 带指定 modelId 时: 注入临时配置并在运行后清理', async () => {
@@ -532,6 +544,195 @@ describe('ZCode personal 模型解析与任务级临时副本注入', () => {
     })
 
     expect(runner.requests).toHaveLength(1)
+  })
+})
+
+describe('reasoningLevel 档位解析与取位 (P0-4)', () => {
+  // 四档 values 与本机 builtin 规则(如 .*deepseek-v4[.-]1-flash)对齐
+  const personalWithLevels = JSON.stringify({
+    config: {
+      providerOrder: ['p-1'],
+      providerConfigRules: {
+        providerRules: [
+          { providerId: 'p-1', providerName: '默认', config: { modelOrder: ['m-a', 'm-b'] } },
+        ],
+      },
+      modelConfigRules: {
+        providerModelRules: [
+          {
+            providerId: 'p-1',
+            modelId: 'm-a',
+            config: { optionSpecs: { reasoningLevel: { values: ['low', 'high', 'max'] } } },
+          },
+        ],
+      },
+    },
+  })
+  const builtinWithMatch = JSON.stringify({
+    config: {
+      modelConfigRules: {
+        modelRules: [
+          {
+            modelMatch: '.*m-b(?:[.\\-:/\\[].*)?',
+            config: { optionSpecs: { reasoningLevel: { values: ['disabled', 'low', 'high', 'max'] } } },
+          },
+        ],
+      },
+    },
+  })
+
+  it('resolveZcodeReasoningLevels: personal 显式规则优先', () => {
+    expect(resolveZcodeReasoningLevels(personalWithLevels, 'p-1/m-a')).toEqual([
+      'low',
+      'high',
+      'max',
+    ])
+  })
+
+  it('resolveZcodeReasoningLevels: 无显式规则时按内置 modelMatch 合并', () => {
+    expect(resolveZcodeReasoningLevels(personalWithLevels, 'p-1/m-b', builtinWithMatch)).toEqual([
+      'disabled',
+      'low',
+      'high',
+      'max',
+    ])
+  })
+
+  it('resolveZcodeReasoningLevels: 都未命中返回 undefined;非法复合 id 返回 undefined', () => {
+    expect(resolveZcodeReasoningLevels(personalWithLevels, 'p-1/m-x', builtinWithMatch)).toBeUndefined()
+    expect(resolveZcodeReasoningLevels(personalWithLevels, 'no-slash-model')).toBeUndefined()
+  })
+
+  it('pickReasoningLevel: 四档按首/中/末取位(E1 已验证合法值可被 CLI 接受)', () => {
+    const four = ['disabled', 'low', 'high', 'max']
+    expect(pickReasoningLevel(four, 'minimal')).toBe('disabled')
+    expect(pickReasoningLevel(four, 'low')).toBe('low')
+    expect(pickReasoningLevel(four, 'medium')).toBe('high')
+    expect(pickReasoningLevel(four, 'high')).toBe('max')
+  })
+
+  it('pickReasoningLevel: 三档 values 时 low/medium 落中位;缺省取最高档;空值回落 undefined', () => {
+    const three = ['low', 'high', 'max']
+    expect(pickReasoningLevel(three, 'minimal')).toBe('low')
+    expect(pickReasoningLevel(three, 'low')).toBe('high')
+    expect(pickReasoningLevel(three, 'medium')).toBe('high')
+    expect(pickReasoningLevel(three, 'high')).toBe('max')
+    // 缺省 effort 与 CLI registry-fallback 语义一致(values.at(-1))
+    expect(pickReasoningLevel(three)).toBe('max')
+    expect(pickReasoningLevel([], 'high')).toBeUndefined()
+    expect(pickReasoningLevel(undefined, 'high')).toBeUndefined()
+  })
+
+  it('driver.run 带 reasoningEffort: 档位写入副本 defaultModelSelection.options', async () => {
+    const fsx = new FakeFileSystem()
+    fsx.addWritable('C:/tmp/ws')
+    fsx.addWritable(locator.cliPath)
+    const personalConfigPath = 'C:/Users/test/.zcode/v2/provider_config.json'
+    fsx.addWritable(personalConfigPath, personalWithLevels)
+    fsx.addWritable('E:/ZCode/resources/config/provider/zcode-builtin.json', builtinWithMatch)
+
+    const runner = new ScriptedRunner()
+    runner.enqueue((req, io) => {
+      const content = JSON.parse(fsx.readTextFile(req.env!.ZCODE_PERSONAL_PROVIDER_CONFIG_FILE!))
+      // m-b 无显式规则,经内置 modelMatch 取四档 values,effort=low → 'low'
+      expect(content.config.defaultModelSelection).toEqual({
+        providerId: 'p-1',
+        modelId: 'm-b',
+        options: { reasoningLevel: 'low' },
+      })
+      io.exit(0)
+    })
+
+    const driver = new ZcodeDriver(runner, fsx, {
+      nodeBin: 'node',
+      cliPath: locator.cliPath,
+      personalProviderConfigPath: personalConfigPath,
+      builtinProviderConfigPath: 'E:/ZCode/resources/config/provider/zcode-builtin.json',
+    })
+
+    await driver.run({
+      agent: zcodeProfile,
+      modelId: 'p-1/m-b',
+      reasoningEffort: 'low',
+      input: baseInput(),
+      emit: () => {},
+      signal: new AbortController().signal,
+    })
+    expect(runner.requests).toHaveLength(1)
+  })
+
+  it('driver.run 档位取不到: 不带 options 并 emit warning,不阻断派发', async () => {
+    const fsx = new FakeFileSystem()
+    fsx.addWritable('C:/tmp/ws')
+    fsx.addWritable(locator.cliPath)
+    const personalConfigPath = 'C:/Users/test/.zcode/v2/provider_config.json'
+    fsx.addWritable(personalConfigPath, personalWithLevels)
+
+    const runner = new ScriptedRunner()
+    runner.enqueue((req, io) => {
+      const content = JSON.parse(fsx.readTextFile(req.env!.ZCODE_PERSONAL_PROVIDER_CONFIG_FILE!))
+      // m-x 无任何合法 values → 不带 options
+      expect(content.config.defaultModelSelection).toEqual({
+        providerId: 'p-1',
+        modelId: 'm-x',
+      })
+      io.exit(0)
+    })
+
+    const driver = new ZcodeDriver(runner, fsx, {
+      nodeBin: 'node',
+      cliPath: locator.cliPath,
+      personalProviderConfigPath: personalConfigPath,
+    })
+
+    const warnings: string[] = []
+    await driver.run({
+      agent: zcodeProfile,
+      modelId: 'p-1/m-x',
+      reasoningEffort: 'high',
+      input: baseInput(),
+      emit: (e) => {
+        if (e.kind === 'warning') warnings.push(e.text)
+      },
+      signal: new AbortController().signal,
+    })
+    expect(warnings.some((t) => t.includes('reasoningLevel') && t.includes('m-x'))).toBe(true)
+  })
+
+  it('driver.run 取位成功: emit info 记录实际下发档位(与请求档位不同时附注,P0-4 复审)', async () => {
+    const fsx = new FakeFileSystem()
+    fsx.addWritable('C:/tmp/ws')
+    fsx.addWritable(locator.cliPath)
+    const personalConfigPath = 'C:/Users/test/.zcode/v2/provider_config.json'
+    fsx.addWritable(personalConfigPath, personalWithLevels)
+
+    const runner = new ScriptedRunner()
+    runner.enqueue((_req, io) => {
+      io.exit(0)
+    })
+
+    const driver = new ZcodeDriver(runner, fsx, {
+      nodeBin: 'node',
+      cliPath: locator.cliPath,
+      personalProviderConfigPath: personalConfigPath,
+    })
+
+    // 三档 values ['low','high','max'] + 请求 low → 取位落 'high':详情侧以此 info 为准,不撒谎
+    const infos: Array<{ text: string; reasoningLevel?: string }> = []
+    await driver.run({
+      agent: zcodeProfile,
+      modelId: 'p-1/m-a',
+      reasoningEffort: 'low',
+      input: baseInput(),
+      emit: (e) => {
+        if (e.kind === 'info') infos.push({ text: e.text, reasoningLevel: e.reasoningLevel })
+      },
+      signal: new AbortController().signal,
+    })
+    expect(infos).toHaveLength(1)
+    expect(infos[0]!.reasoningLevel).toBe('high')
+    expect(infos[0]!.text).toContain('high')
+    expect(infos[0]!.text).toContain('low')
   })
 })
 

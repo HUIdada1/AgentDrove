@@ -1,13 +1,19 @@
 <script setup lang="ts">
 import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
-import { useAppStore } from '../stores/app'
+import { readModelPref, useAppStore, writeModelPref } from '../stores/app'
 import GlassButton from '../ui/GlassButton.vue'
 import GlassInput from '../ui/GlassInput.vue'
 import GlassSelect from '../ui/GlassSelect.vue'
 import SkillSelector from './SkillSelector.vue'
 import SlashCommandPopup, { type SlashCommand } from './SlashCommandPopup.vue'
-import { CLIENT_FOLLOW_MODEL, MODE_OPTIONS, parseChannelsAndModels, type ChannelGroup } from '../labels'
-import { skillsToDenyList, type SubmitTaskDto } from '@agent-drove/shared'
+import {
+  CLIENT_FOLLOW_MODEL,
+  MODE_OPTIONS,
+  REASONING_OPTIONS,
+  parseChannelsAndModels,
+  type ChannelGroup,
+} from '../labels'
+import { skillsToDenyList, type ReasoningEffort, type SubmitTaskDto } from '@agent-drove/shared'
 
 const store = useAppStore()
 const prompt = ref('')
@@ -23,10 +29,14 @@ const submitting = ref(false)
 const notice = ref('')
 const agentId = ref('')
 const promptBox = ref<{ focus: () => void } | null>(null)
+/** 思考档位(P0-4):''=默认(不传,跟随客户端);仅 capabilities.reasoningEffort 客户端可调 */
+const reasoningEffort = ref<ReasoningEffort | ''>('')
 
 const activeAgents = computed(() => store.agents.value.filter((a) => a.enabled && a.capabilities.headless))
 const selectedAgent = computed(() => store.agents.value.find((a) => a.id === agentId.value))
 const selectedProject = computed(() => store.selectedProject.value)
+/** 该客户端是否支持思考档位(P0-4):false/缺省 = 不支持,控件降级为说明徽标 */
+const supportsReasoning = computed(() => selectedAgent.value?.capabilities.reasoningEffort === true)
 const modelId = ref('')
 const selectedChannelId = ref('default')
 
@@ -66,6 +76,11 @@ const resolvedModelId = computed(() =>
   selectedAgent.value && !modelLocked.value && modelId.value ? modelId.value : undefined,
 )
 
+// 思考档位(P0-4):仅支持的客户端随 DTO 透传;''=默认不传,实际生效档位以事件流为准
+const resolvedReasoningEffort = computed(() =>
+  supportsReasoning.value && reasoningEffort.value ? reasoningEffort.value : undefined,
+)
+
 // 级联同步:保障渠道与模型严格合法
 function syncCascadingModel() {
   const groups = channelGroups.value
@@ -93,10 +108,38 @@ function syncCascadingModel() {
   }
 }
 
-watch(agentId, () => {
-  // 切客户端时重新选择匹配渠道
-  selectedChannelId.value = channelGroups.value[0]?.id ?? 'default'
+/**
+ * 恢复该客户端的记忆偏好(P0-5):渠道/模型/档位三元组,记忆值非法(渠道删除/模型下架)
+ * 静默回落首渠道;保留既有级联合法性校验,记忆只是优先候选。
+ */
+function restoreModelPrefForAgent(): void {
+  const groups = channelGroups.value
+  const pref = readModelPref(agentId.value)
+  if (pref) {
+    const group = groups.find((g) => g.id === pref.channelId)
+    if (group) {
+      selectedChannelId.value = group.id
+      if (!modelLocked.value && group.models.some((m) => m.value === pref.modelId)) {
+        modelId.value = pref.modelId
+      }
+      if (pref.reasoningEffort) reasoningEffort.value = pref.reasoningEffort
+      syncCascadingModel()
+      return
+    }
+  }
+  selectedChannelId.value = groups[0]?.id ?? 'default'
   syncCascadingModel()
+}
+
+// 启动期程序回填标记(P0-1 复审):activeAgents 首拉回填 agentId 时经由此标志跳过上下文反写,
+// 否则侧栏第一个客户端未点击即呈选中态,且用户首点会被 toggle 语义解释为"取消绑定"
+let programmaticAgentSet = false
+
+watch(agentId, (id) => {
+  // P0-1:发布框 → 侧栏单向同步,手动改写后侧栏选中态跟随高亮(程序回填不反写)
+  if (!programmaticAgentSet && store.agentContext.value !== id) store.agentContext.value = id
+  // P0-5:切客户端先恢复记忆渠道/模型/档位(与上下文联动同链执行,避免 watch 竞态)
+  restoreModelPrefForAgent()
 })
 
 watch(selectedChannelId, (newChannelId) => {
@@ -111,6 +154,16 @@ watch(selectedChannelId, (newChannelId) => {
 watch(channelGroups, () => {
   syncCascadingModel()
 })
+
+// P0-1:侧栏点击"进入上下文" → 发布框同步该客户端;取消绑定(空)时保持现值不清除
+watch(
+  () => store.agentContext.value,
+  (ctx) => {
+    if (ctx && ctx !== agentId.value && activeAgents.value.some((a) => a.id === ctx)) {
+      agentId.value = ctx
+    }
+  },
+)
 
 // 默认档位来自设置(settings 异步到达后生效);yolo 不在发布框可选档位内,回落到 build
 watch(
@@ -132,20 +185,53 @@ watch(
 
 onMounted(() => {
   window.addEventListener('focus-composer', focusPrompt)
+  window.addEventListener('fill-composer', onFillComposer)
 })
 
-// agents 异步到达或变更后回填默认选中,避免失效或下拉框显示为空
+// ---- P0-10:引导中心空态点场景卡 → 草稿填入常驻发布框,聚焦并短暂高亮 ----
+const prefilled = ref(false)
+let prefilledTimer: ReturnType<typeof setTimeout> | null = null
+
+function onFillComposer(event: Event): void {
+  const text = (event as CustomEvent<string>).detail
+  if (typeof text !== 'string' || !text) return
+  prompt.value = text
+  showSlashPopup.value = false
+  focusPrompt()
+  prefilled.value = true
+  if (prefilledTimer) clearTimeout(prefilledTimer)
+  prefilledTimer = setTimeout(() => {
+    prefilled.value = false
+  }, 1200)
+}
+
+// agents 异步到达或变更后回填:P0-1 优先当前对话上下文,上下文无效才回落首项
 watch(
   activeAgents,
   (list) => {
-    if ((!agentId.value || !list.some((a) => a.id === agentId.value)) && list.length > 0) {
+    if (list.length === 0) return
+    const ctx = store.agentContext.value
+    if (ctx && list.some((a) => a.id === ctx)) {
+      if (agentId.value !== ctx) agentId.value = ctx
+      return
+    }
+    if (!agentId.value || !list.some((a) => a.id === agentId.value)) {
+      // 程序回填(静默赋值):走 watch(agentId) 时跳过上下文反写,P0-1 点击语义不受污染;
+      // Vue 的 watcher 经微任务 flush,恢复标记在其后注册,回调内读到的是 true
+      programmaticAgentSet = true
       agentId.value = list[0]!.id
+      queueMicrotask(() => {
+        programmaticAgentSet = false
+      })
     }
   },
   { immediate: true },
 )
 
-onBeforeUnmount(() => window.removeEventListener('focus-composer', focusPrompt))
+onBeforeUnmount(() => {
+  window.removeEventListener('focus-composer', focusPrompt)
+  window.removeEventListener('fill-composer', onFillComposer)
+})
 
 function focusPrompt(): void {
   promptBox.value?.focus()
@@ -246,6 +332,7 @@ async function submit(): Promise<void> {
       cwd: workspace.value || undefined,
       projectId,
       ...(resolvedModelId.value ? { modelId: resolvedModelId.value } : {}),
+      ...(resolvedReasoningEffort.value ? { reasoningEffort: resolvedReasoningEffort.value } : {}),
       mode: mode.value,
       skills: [...store.activeSkills.value],
       // 必须纯数据对象拷贝,避免 Vue 响应式代理引发 "An object could not be cloned"
@@ -253,7 +340,9 @@ async function submit(): Promise<void> {
         attachments.value.length > 0
           ? attachments.value.map((a) => ({ path: a.path, kind: a.kind }))
           : undefined,
-      ...(toolPolicy ? { toolPolicy: { ...toolPolicy, denyList: [...toolPolicy.denyList] } } : {}),
+      ...(toolPolicy
+        ? { toolPolicy: { ...toolPolicy, denyList: [...(toolPolicy.denyList ?? [])] } }
+        : {}),
     }))
     const cleanDtos = JSON.parse(JSON.stringify(dtos)) as SubmitTaskDto[]
     // 派生工作区:git 源建 worktree,非 git 整拷降级(主进程完成)
@@ -262,6 +351,12 @@ async function submit(): Promise<void> {
       : cleanDtos
     const tasks = await window.api.tasksSubmitBatch(finalDtos)
     if (tasks.length > 0) store.selectedTaskId.value = tasks[0]?.id ?? null
+    // P0-5:提交成功记住当前渠道/模型/档位三元组,切回该客户端或重启后自动恢复
+    writeModelPref(agentId.value, {
+      channelId: selectedChannelId.value,
+      modelId: modelId.value,
+      ...(reasoningEffort.value ? { reasoningEffort: reasoningEffort.value } : {}),
+    })
     prompt.value = ''
     attachments.value = []
   } catch (error) {
@@ -293,7 +388,7 @@ function onKeydown(event: KeyboardEvent): void {
       <SkillSelector compact />
     </div>
 
-    <div class="input-pos">
+    <div class="input-pos" :class="{ prefilled }">
       <SlashCommandPopup
         v-if="showSlashPopup"
         ref="slashPopupRef"
@@ -347,6 +442,21 @@ function onKeydown(event: KeyboardEvent): void {
           title="档位"
           :options="MODE_OPTIONS"
         />
+        <!-- 思考档位(P0-4):仅 capabilities.reasoningEffort 客户端显示;不支持时降级为说明徽标 -->
+        <GlassSelect
+          v-if="supportsReasoning"
+          v-model="reasoningEffort"
+          class="effort"
+          title="思考档位(实际生效档位以运行反馈为准)"
+          :options="REASONING_OPTIONS"
+        />
+        <span
+          v-else-if="selectedAgent"
+          class="effort-off"
+          title="该客户端不支持思考档位选择,将跟随客户端默认配置"
+        >
+          思考:不支持
+        </span>
       </div>
       <div class="actions-group">
         <GlassButton variant="ghost" size="sm" @click="pickAttachment">
@@ -455,6 +565,29 @@ function onKeydown(event: KeyboardEvent): void {
 .mode {
   min-width: 75px;
   max-width: 95px;
+}
+
+.effort {
+  min-width: 75px;
+  max-width: 95px;
+}
+
+/* 思考档位不支持说明徽标(P0-4):纯文本不可点,tooltip 说明原因 */
+.effort-off {
+  font-size: 11px;
+  color: var(--faint);
+  border: 1px dashed var(--line);
+  border-radius: var(--radius-sm);
+  padding: 5px 8px;
+  white-space: nowrap;
+  cursor: help;
+}
+
+/* P0-10:场景卡预填高亮,品牌色边框 1.2s 内自行消退 */
+.input-pos.prefilled :deep(.g-field) {
+  border-color: var(--accent-line);
+  box-shadow: 0 0 0 3px var(--accent-dim);
+  transition: border-color 400ms var(--ease), box-shadow 900ms var(--ease);
 }
 
 /* 工作区行:目录输入占主导 */

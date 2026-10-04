@@ -61,4 +61,35 @@ describe('IPC 数据克隆安全性与 Vue Proxy 净化测试', () => {
     expect(safeClone(null)).toBeNull()
     expect(safeClone(undefined)).toBeUndefined()
   })
+
+  it('续聊本轮参数(P0-6 ContinueOptions)含响应式字段时应净化为纯对象', () => {
+    // 模拟渲染层把 Vue reactive 的覆盖参数直接传给 tasks:continue 的场景
+    const toolPolicyProxy = new Proxy({ denyList: ['Bash'], maxTurns: null }, {
+      get(target, prop, receiver) {
+        return Reflect.get(target, prop, receiver)
+      },
+    })
+    const options = {
+      queueIfRunning: true,
+      skills: new Proxy(['git_review'], {
+        get(target, prop, receiver) {
+          return Reflect.get(target, prop, receiver)
+        },
+      }),
+      modelId: 'glm-4.7',
+      mode: 'edit' as const,
+      toolPolicy: toolPolicyProxy,
+      reasoningEffort: 'high' as const,
+    }
+    const cloned = safeClone(options)
+    // 净化后可被 IPC 结构化克隆无损传输
+    expect(structuredClone(cloned)).toEqual({
+      queueIfRunning: true,
+      skills: ['git_review'],
+      modelId: 'glm-4.7',
+      mode: 'edit',
+      toolPolicy: { denyList: ['Bash'], maxTurns: null },
+      reasoningEffort: 'high',
+    })
+  })
 })

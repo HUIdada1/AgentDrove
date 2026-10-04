@@ -1,6 +1,8 @@
-import { mkdirSync, renameSync, rmSync } from 'node:fs'
+import { copyFileSync, mkdirSync, renameSync, rmSync } from 'node:fs'
 import { dirname } from 'node:path'
 import Database from 'better-sqlite3'
+import { localDayOf } from '@agent-drove/core'
+import { compareTaskOrder } from '@agent-drove/shared'
 import type {
   JournalEntry,
   JournalStore,
@@ -25,7 +27,23 @@ import type {
 
 type SqliteDb = InstanceType<typeof Database>
 
-const MIGRATIONS: ((db: SqliteDb) => void)[] = [
+/**
+ * 库内任务的完整形态:core TaskRecord + main 侧维护的手动排序位(P0-2)。
+ * orderIndex 仅由本仓库的 moveTask/reorderTask 写入,编排层不感知。
+ */
+export type StoredTask = TaskRecord & { orderIndex?: number }
+
+/**
+ * 分组内展示序比较器单一事实源在 shared(P0-2 复审:渲染层分组渲染同用一份,
+ * 全局列表序与组内序职责分离),此处 re-export 兼容既有导入与测试。
+ */
+export { compareTaskOrder }
+
+/** 同上语义的 SQL 版,供 groupOrderIds 取组内基准序 */
+const GROUP_ORDER_SQL = 'ORDER BY order_index IS NULL, order_index, created_at DESC'
+
+/** 迁移步骤表(导出仅供测试构造历史版本库);index+1 = user_version */
+export const MIGRATIONS: ((db: SqliteDb) => void)[] = [
   // v1:核心三表(agents/tasks/events)
   (db) => {
     db.exec(`
@@ -103,6 +121,11 @@ const MIGRATIONS: ((db: SqliteDb) => void)[] = [
   (db) => {
     db.exec(`ALTER TABLE tasks ADD COLUMN usage_json TEXT;`)
   },
+  // v7: 卡片手动排序位(P0-2)与请求思考档位(P0-4);均可空,旧行零迁移成本
+  (db) => {
+    db.exec(`ALTER TABLE tasks ADD COLUMN order_index INTEGER;`)
+    db.exec(`ALTER TABLE tasks ADD COLUMN reasoning_effort TEXT;`)
+  },
 ]
 
 export class SqliteStore
@@ -118,7 +141,7 @@ export class SqliteStore
     const db = new Database(dbPath)
     try {
       db.pragma('journal_mode = WAL')
-      this.migrate(db)
+      this.migrate(db, dbPath)
     } catch (error) {
       // 关键:失败必须释放句柄,否则 Windows 上外层的备份重命名会因文件占用而失败
       db.close()
@@ -127,12 +150,19 @@ export class SqliteStore
     this.db = db
   }
 
-  private migrate(db: SqliteDb): void {
+  private migrate(db: SqliteDb, dbPath: string): void {
     const check = db.pragma('quick_check', { simple: true }) as string
     if (check !== 'ok') {
       throw new Error(`数据库完整性检查失败:${check}`)
     }
     const current = db.pragma('user_version', { simple: true }) as number
+    if (current < MIGRATIONS.length) {
+      // 全局数据库规范:结构迁移前先整库备份(拷贝为 <db>.bak-<日期>);
+      // 损坏库走 openStore 的"备份重命名+重建"路径,不在此列。
+      // 先把 WAL 落回主文件再拷贝,保证备份完整;备份失败向上抛,由 openStore 兜底重建。
+      db.pragma('wal_checkpoint(TRUNCATE)')
+      copyFileSync(dbPath, `${dbPath}.bak-${localDayOf(Date.now())}`)
+    }
     for (let version = current; version < MIGRATIONS.length; version++) {
       const run = db.transaction(() => {
         MIGRATIONS[version](db)
@@ -151,13 +181,24 @@ export class SqliteStore
   putTask(task: TaskRecord): void {
     this.db
       .prepare(
-        `INSERT OR REPLACE INTO tasks
+        `INSERT INTO tasks
          (id, agent_id, model_id, title, prompt, cwd, project_id, state, session_id, resume_latest, parent_id, error,
           attachments_json, skills_json, tool_policy_json, mode, origin, created_at, started_at, finished_at,
-          retry_of, attempt, usage_json)
+          retry_of, attempt, usage_json, order_index, reasoning_effort)
          VALUES (@id, @agentId, @modelId, @title, @prompt, @cwd, @projectId, @state, @sessionId, @resumeLatest, @parentId, @error,
           @attachmentsJson, @skillsJson, @toolPolicyJson, @mode, @origin, @createdAt, @startedAt, @finishedAt,
-          @retryOf, @attempt, @usageJson)`,
+          @retryOf, @attempt, @usageJson, @orderIndex, @reasoningEffort)
+         ON CONFLICT(id) DO UPDATE SET
+           agent_id = excluded.agent_id, model_id = excluded.model_id, title = excluded.title,
+           prompt = excluded.prompt, cwd = excluded.cwd, project_id = excluded.project_id,
+           state = excluded.state, session_id = excluded.session_id, resume_latest = excluded.resume_latest,
+           parent_id = excluded.parent_id, error = excluded.error, attachments_json = excluded.attachments_json,
+           skills_json = excluded.skills_json, tool_policy_json = excluded.tool_policy_json, mode = excluded.mode,
+           origin = excluded.origin, created_at = excluded.created_at, started_at = excluded.started_at,
+           finished_at = excluded.finished_at, retry_of = excluded.retry_of, attempt = excluded.attempt,
+           usage_json = excluded.usage_json,
+           order_index = COALESCE(excluded.order_index, tasks.order_index),
+           reasoning_effort = COALESCE(excluded.reasoning_effort, tasks.reasoning_effort)`,
       )
       .run(rowFromTask(task))
   }
@@ -182,6 +223,81 @@ export class SqliteStore
       this.db.prepare('DELETE FROM events WHERE task_id = ?').run(id)
     })
     run()
+  }
+
+  /**
+   * 卡片归属变更(P0-2):换项目工作区;不支持"移出项目"语义。
+   * 受影响分组的连续 orderIndex 由本方法在事务内重算,客户端不传全量数组。
+   * 任务不存在返回 null。
+   */
+  moveTask(taskId: string, projectId: string): StoredTask | null {
+    const run = this.db.transaction((): StoredTask | null => {
+      const current = this.getTask(taskId)
+      if (!current) return null
+      const fromProject = current.projectId ?? null
+      if (fromProject !== projectId) {
+        this.db.prepare('UPDATE tasks SET project_id = ? WHERE id = ?').run(projectId, taskId)
+        // 移出组剔除该任务后重赋连续值;移入组把任务追加到组尾(纯分组归属变更,不带插入锚点)
+        if (fromProject !== null) this.normalizeGroupOrder(fromProject)
+        this.normalizeGroupOrder(projectId, taskId)
+      }
+      return this.getTask(taskId) ?? null
+    })
+    return run()
+  }
+
+  /**
+   * 组内相邻插入排序(P0-2):beforeTaskId 须与本任务同分组,否则抛错;
+   * null/缺省 = 移到组尾;落位后本组 orderIndex 重赋连续值(0..n-1)。
+   */
+  reorderTask(taskId: string, beforeTaskId: string | null): StoredTask | null {
+    const run = this.db.transaction((): StoredTask | null => {
+      const current = this.getTask(taskId)
+      if (!current) return null
+      if (beforeTaskId === taskId) return this.getTask(taskId) ?? null
+      if (beforeTaskId) {
+        const anchor = this.getTask(beforeTaskId)
+        if (!anchor || (anchor.projectId ?? null) !== (current.projectId ?? null)) {
+          throw new Error('排序锚点不在同一分组')
+        }
+      }
+      const ids = this.groupOrderIds(current.projectId ?? null).filter((id) => id !== taskId)
+      const at = beforeTaskId ? Math.max(0, ids.indexOf(beforeTaskId)) : ids.length
+      ids.splice(at, 0, taskId)
+      this.writeGroupOrder(ids)
+      return this.getTask(taskId) ?? null
+    })
+    return run()
+  }
+
+  /**
+   * 读出某分组的任务 id 序列,基准与任务列表展示序一致(P0-2):
+   * orderIndex 有值者按值升序在前(手动区),空缺者按 createdAt 倒序随后(兼容旧数据)。
+   */
+  private groupOrderIds(projectId: string | null): string[] {
+    const rows = (
+      projectId === null
+        ? this.db
+            .prepare(`SELECT id FROM tasks WHERE project_id IS NULL ${GROUP_ORDER_SQL}`)
+            .all()
+        : this.db
+            .prepare(`SELECT id FROM tasks WHERE project_id = ? ${GROUP_ORDER_SQL}`)
+            .all(projectId)
+    ) as Array<{ id: string }>
+    return rows.map((row) => row.id)
+  }
+
+  /** 重赋某分组连续 orderIndex(0..n-1):appendTaskId 存在时先追加到组尾再整体编号 */
+  private normalizeGroupOrder(projectId: string | null, appendTaskId?: string): void {
+    const ids = this.groupOrderIds(projectId).filter((id) => id !== appendTaskId)
+    if (appendTaskId !== undefined) ids.push(appendTaskId)
+    this.writeGroupOrder(ids)
+  }
+
+  /** 事务内批量写回组内顺序;调用方保证 ids 与库内分组一致 */
+  private writeGroupOrder(ids: string[]): void {
+    const update = this.db.prepare('UPDATE tasks SET order_index = ? WHERE id = ?')
+    ids.forEach((id, index) => update.run(index, id))
   }
 
   appendEvents(events: StoredEvent[]): void {
@@ -571,6 +687,8 @@ interface TaskRow {
   retry_of: string | null
   attempt: number
   usage_json: string | null
+  order_index: number | null
+  reasoning_effort: string | null
 }
 
 interface EventRow {
@@ -648,6 +766,8 @@ function rowFromTask(task: TaskRecord) {
     retryOf: task.retryOf ?? null,
     attempt: task.attempt,
     usageJson: task.usage ? JSON.stringify(task.usage) : null,
+    orderIndex: (task as StoredTask).orderIndex ?? null,
+    reasoningEffort: task.reasoningEffort ?? null,
   }
 }
 
@@ -660,7 +780,7 @@ function safeJsonParse<T>(raw: string | null | undefined, fallback: T): T {
   }
 }
 
-function taskFromRow(row: TaskRow): TaskRecord {
+function taskFromRow(row: TaskRow): StoredTask {
   return {
     id: row.id,
     agentId: row.agent_id,
@@ -685,6 +805,8 @@ function taskFromRow(row: TaskRow): TaskRecord {
     retryOf: row.retry_of ?? undefined,
     attempt: row.attempt,
     usage: safeJsonParse<TaskUsage | undefined>(row.usage_json, undefined),
+    orderIndex: row.order_index ?? undefined,
+    reasoningEffort: (row.reasoning_effort ?? undefined) as TaskRecord['reasoningEffort'],
   }
 }
 

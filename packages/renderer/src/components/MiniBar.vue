@@ -86,6 +86,8 @@ function onKeydown(event: KeyboardEvent): void {
           class="fill"
           multiline
           :rows="2"
+          auto-grow
+          :max-grow-height="86"
           send-label="派发"
           :send-disabled="submitting || !prompt.trim() || !agentId"
           placeholder="把任务派发给客户端…(Enter 派发 / Esc 关闭)"
@@ -127,6 +129,7 @@ function onKeydown(event: KeyboardEvent): void {
   flex: 1;
   min-width: 0;
   display: flex;
+  align-items: center;
 }
 
 /* GlassInput 根是定位 wrapper,行方向 flex 里需显式撑满 */
@@ -135,8 +138,8 @@ function onKeydown(event: KeyboardEvent): void {
   min-width: 0;
 }
 
+/* 高度交由 autoGrow 管理(150px 迷你窗 40vh 无意义,传固定上限 86px),不再强制撑满 */
 .field :deep(.g-field) {
-  height: 100%;
   resize: none;
 }
 </style>

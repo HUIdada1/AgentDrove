@@ -2,6 +2,7 @@ import type {
   AgentDroveApi,
   AgentView,
   AppConfig,
+  FollowupQueueItem,
   Project,
   StoredEvent,
   TaskRecord,
@@ -86,6 +87,7 @@ export function installDevMock(): void {
   }))
 
   let seq = 100
+  const followups = new Map<string, FollowupQueueItem[]>()
   const projects: Project[] = [
     { id: 'daily', name: '日常工作区', path: null, createdAt: now },
     { id: 'demo-proj-1', name: 'AgentDrove', path: 'E:/idea work/AgentDrove', createdAt: now - 1 },
@@ -113,6 +115,31 @@ export function installDevMock(): void {
     const task = tasks.find((t) => t.id === taskId)
     if (!task) throw new Error(`mock: 任务不存在 ${taskId}`)
     return task
+  }
+
+  /** mock 组内展示序比较器:orderIndex 非空升序在前,空缺按 createdAt 倒序随后(与 main 同语义) */
+  function byManualOrder(a: TaskRecord, b: TaskRecord): number {
+    return (
+      (a.orderIndex ?? Number.MAX_SAFE_INTEGER) - (b.orderIndex ?? Number.MAX_SAFE_INTEGER) ||
+      b.createdAt - a.createdAt
+    )
+  }
+
+  /** mock 重赋某分组连续 orderIndex(0..n-1);appendTask 存在时先追加到组尾再整体编号 */
+  function renumberGroup(projectId: string | null, appendTask?: TaskRecord): void {
+    const ids = tasks
+      .filter((t) => (t.projectId ?? null) === projectId)
+      .sort(byManualOrder)
+      .map((t) => t.id)
+    if (appendTask) {
+      const at = ids.indexOf(appendTask.id)
+      if (at >= 0) ids.splice(at, 1)
+      ids.push(appendTask.id)
+    }
+    ids.forEach((id, index) => {
+      const t = tasks.find((x) => x.id === id)
+      if (t) t.orderIndex = index
+    })
   }
 
   const mock: AgentDroveApi = {
@@ -226,6 +253,88 @@ export function installDevMock(): void {
       const parent = findTask(taskId)
       return mock.tasksSubmit({ agentId: target, prompt: parent.prompt, origin: 'failover' })
     },
+    tasksEnqueueFollowup: async (taskId, prompt, skills) => {
+      findTask(taskId)
+      const item: FollowupQueueItem = {
+        id: `fq-${++seq}`,
+        parentTaskId: taskId,
+        prompt,
+        skills,
+        createdAt: Date.now(),
+      }
+      const queue = followups.get(taskId) ?? []
+      queue.push(item)
+      followups.set(taskId, queue)
+      return item
+    },
+    tasksGetFollowups: async (taskId) => [...(followups.get(taskId) ?? [])],
+    tasksRemoveFollowup: async (taskId, followupId) => {
+      const queue = followups.get(taskId)
+      if (!queue) return false
+      const idx = queue.findIndex((item) => item.id === followupId)
+      if (idx < 0) return false
+      queue.splice(idx, 1)
+      if (queue.length === 0) followups.delete(taskId)
+      return true
+    },
+    tasksClearFollowups: async (taskId) => {
+      followups.delete(taskId)
+    },
+    // —— P0-2/P0-6 通道内存实现:编辑排队文案/拖拽排序/移动归属/队列迁移,dev 自测不失真 ——
+    tasksUpdateFollowup: async (taskId, followupId, prompt) => {
+      const item = followups.get(taskId)?.find((i) => i.id === followupId)
+      if (!item) throw new Error(`mock: 排队消息不存在 ${followupId}`)
+      item.prompt = prompt.trim()
+      return item
+    },
+    tasksReorderFollowup: async (taskId, followupId, beforeFollowupId) => {
+      const queue = followups.get(taskId)
+      const idx = queue?.findIndex((i) => i.id === followupId) ?? -1
+      if (!queue || idx < 0) throw new Error(`mock: 排队消息不存在 ${followupId}`)
+      if (beforeFollowupId === followupId) return
+      if (beforeFollowupId != null && !queue.some((i) => i.id === beforeFollowupId)) {
+        throw new Error(`mock: 排队消息不存在 ${beforeFollowupId}`)
+      }
+      const [item] = queue.splice(idx, 1)
+      if (beforeFollowupId == null) queue.push(item!)
+      else queue.splice(queue.findIndex((i) => i.id === beforeFollowupId), 0, item!)
+    },
+    tasksMigrateFollowups: async (fromTaskId, toTaskId) => {
+      if (fromTaskId === toTaskId) return 0
+      const queue = followups.get(fromTaskId)
+      if (!queue || queue.length === 0) return 0
+      for (const item of queue) item.parentTaskId = toTaskId
+      const target = followups.get(toTaskId) ?? []
+      target.push(...queue)
+      followups.set(toTaskId, target)
+      followups.delete(fromTaskId)
+      return queue.length
+    },
+    tasksMove: async (dto) => {
+      const task = findTask(dto.taskId)
+      const fromProject = task.projectId ?? null
+      task.projectId = dto.projectId
+      // 与 core 语义一致:移出组剔除后重赋,移入组追加组尾
+      renumberGroup(fromProject)
+      renumberGroup(dto.projectId, task)
+    },
+    tasksReorder: async (taskId, beforeTaskId) => {
+      const task = findTask(taskId)
+      const group = tasks
+        .filter((t) => (t.projectId ?? null) === (task.projectId ?? null))
+        .sort(byManualOrder)
+        .map((t) => t.id)
+      const ids = group.filter((id) => id !== taskId)
+      const at = beforeTaskId ? Math.max(0, ids.indexOf(beforeTaskId)) : ids.length
+      ids.splice(at, 0, taskId)
+      ids.forEach((id, index) => {
+        const t = tasks.find((x) => x.id === id)
+        if (t) t.orderIndex = index
+      })
+    },
+    tasksRename: async (taskId, title) => {
+      findTask(taskId).title = title
+    },
     healthCheck: async () => ({ ok: true, at: Date.now() }),
     launchApp: async () => 'deep-link',
     usageGet: async () => {
@@ -238,6 +347,10 @@ export function installDevMock(): void {
         taskCount: a.usedToday,
         estimated: 0,
         dailyTaskCap: a.plan.dailyTaskCap,
+        usedTokensToday: 0,
+        usedCreditsToday: 0,
+        cachedTokensToday: 0,
+        cacheHitRateToday: 0,
       }))
     },
     settingsGet: async () => currentConfig,

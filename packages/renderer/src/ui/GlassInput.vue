@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ref } from 'vue'
+import { nextTick, onMounted, ref, watch } from 'vue'
 import GlassButton from './GlassButton.vue'
 
 const props = withDefaults(
@@ -14,6 +14,10 @@ const props = withDefaults(
     sendLabel?: string
     /** true 时发送按钮置灰且不触发 send */
     sendDisabled?: boolean
+    /** 多行时随内容自动增高(P0-9/F3);未传 maxGrowHeight 时上限走 CSS min(40vh, 280px) */
+    autoGrow?: boolean
+    /** 自动增高的像素上限:固定小窗(如迷你条 150px)40vh 无意义,传固定值 */
+    maxGrowHeight?: number
   }>(),
   { rows: 3 },
 )
@@ -27,7 +31,26 @@ const el = ref<HTMLInputElement | HTMLTextAreaElement | null>(null)
 
 function onInput(event: Event): void {
   emit('update:modelValue', (event.target as HTMLInputElement | HTMLTextAreaElement).value)
+  // 输入路径同步增高,避免经 watch 的一帧迟滞
+  syncGrow()
 }
+
+/** 自动增高:先置 auto 取内容实际高度,再夹到显式上限(若有);CSS max-height 始终兜底 */
+function syncGrow(): void {
+  const node = el.value
+  if (!props.autoGrow || !props.multiline || !(node instanceof HTMLTextAreaElement)) return
+  node.style.height = 'auto'
+  node.style.height = `${Math.min(node.scrollHeight, props.maxGrowHeight ?? node.scrollHeight)}px`
+}
+
+// 外部赋值(清空/回填)路径经 watch 同步复位高度
+watch(
+  () => props.modelValue,
+  () => {
+    void nextTick(syncGrow)
+  },
+)
+onMounted(syncGrow)
 
 function onSend(): void {
   if (props.disabled || props.sendDisabled) return
@@ -47,7 +70,8 @@ defineExpose({ focus })
       v-if="props.multiline"
       ref="el"
       class="g-field"
-      :class="{ mono: props.mono, 'with-send': !!props.sendLabel }"
+      :class="{ mono: props.mono, 'with-send': !!props.sendLabel, grow: props.autoGrow }"
+      :style="props.maxGrowHeight != null ? { maxHeight: `${props.maxGrowHeight}px` } : undefined"
       :value="props.modelValue"
       :placeholder="props.placeholder"
       :rows="props.rows"
@@ -119,6 +143,12 @@ defineExpose({ focus })
 
 textarea.g-field {
   resize: none;
+}
+
+/* 自动增高模式:超限后内部滚动;未传 maxGrowHeight 时上限为视口 40%(至少 280px) */
+textarea.g-field.grow {
+  max-height: min(40vh, 280px);
+  overflow-y: auto;
 }
 
 /* 内嵌按钮的避让空间:多行留底部,单行留右侧 */

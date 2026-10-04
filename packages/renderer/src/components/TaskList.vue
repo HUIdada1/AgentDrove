@@ -2,11 +2,12 @@
 import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
 import { useAppStore } from '../stores/app'
 import TaskCard from './TaskCard.vue'
+import TaskContextMenu, { type ContextMenuItem } from './ContextMenu.vue'
 import GlassButton from '../ui/GlassButton.vue'
 import GlassInput from '../ui/GlassInput.vue'
 import GlassSelect from '../ui/GlassSelect.vue'
 import { STATE_FILTER_OPTIONS } from '../labels'
-import type { TaskRecord } from '@agent-drove/shared'
+import { compareTaskOrder, type TaskRecord } from '@agent-drove/shared'
 
 const store = useAppStore()
 const searchRef = ref<{ focus: () => void } | null>(null)
@@ -22,8 +23,13 @@ function onHotkey(event: KeyboardEvent): void {
 onMounted(() => window.addEventListener('keydown', onHotkey))
 onBeforeUnmount(() => window.removeEventListener('keydown', onHotkey))
 
-const visible = computed(() =>
-  store.tasks.value.filter((t) => {
+/**
+ * 可见列表(P0-2):过滤后在各分组的子序列内应用手动排序位——orderIndex 是组内连续值,
+ * 组间相对位置保持 tasks:list 的 createdAt 倒序,未手动排过序的组不受其他组拖拽影响;
+ * 全局序若在此直接比较会把手动组的任务整体前置(复审修正,与主进程口径配套)。
+ */
+const visible = computed(() => {
+  const filtered = store.tasks.value.filter((t) => {
     if (store.filter.value.agentId && t.agentId !== store.filter.value.agentId) return false
     if (store.filter.value.state && t.state !== store.filter.value.state) return false
     if (store.filter.value.search) {
@@ -35,8 +41,24 @@ const visible = computed(() =>
     // 侧栏选中工作区 → 只看该项目下的任务(日常工作区未绑定目录时按 projectId 分组,不受 cwd 影响)
     if (store.selectedProjectId.value && t.projectId !== store.selectedProjectId.value) return false
     return true
-  }),
-)
+  })
+  const buckets = new Map<string, TaskRecord[]>()
+  for (const t of filtered) {
+    const key = t.projectId ?? ''
+    const bucket = buckets.get(key)
+    if (bucket) bucket.push(t)
+    else buckets.set(key, [t])
+  }
+  for (const bucket of buckets.values()) bucket.sort(compareTaskOrder)
+  // 按原(createdAt 倒序)骨架逐槽放回各分组排序后的元素:组内有序,组间交错不变
+  const cursors = new Map<string, number>()
+  return filtered.map((t) => {
+    const key = t.projectId ?? ''
+    const index = cursors.get(key) ?? 0
+    cursors.set(key, index + 1)
+    return buckets.get(key)![index]!
+  })
+})
 
 const activeProject = computed(() => store.selectedProject.value)
 
@@ -89,6 +111,161 @@ function toggleSelectAll(): void {
   const allSelected = list.length > 0 && list.every((t) => store.selection.value.has(t.id))
   store.selection.value = allSelected ? new Set() : new Set(list.map((t) => t.id))
 }
+
+// ---- 拖拽归类与组内排序(P0-2) ----
+/** 插入指示线:画在该卡之前;dropAtEnd=true 时画在列表末尾(组尾) */
+const dropBeforeId = ref<string | null>(null)
+const dropAtEnd = ref(false)
+
+function clearDropMark(): void {
+  dropBeforeId.value = null
+  dropAtEnd.value = false
+}
+
+/** 悬停卡片:指针在上半部 → 插到本卡前;下半部 → 插到下一卡前(末卡=组尾) */
+function onCardDragOver(task: TaskRecord, event: DragEvent): void {
+  const dragId = store.draggingTaskId.value
+  if (!dragId || dragId === task.id) return
+  event.preventDefault()
+  if (event.dataTransfer) event.dataTransfer.dropEffect = 'move'
+  const idx = visible.value.findIndex((t) => t.id === task.id)
+  const rect = (event.currentTarget as HTMLElement).getBoundingClientRect()
+  if (event.clientY < rect.top + rect.height / 2) {
+    dropAtEnd.value = false
+    dropBeforeId.value = task.id
+    return
+  }
+  const next = visible.value[idx + 1]
+  if (next) {
+    dropAtEnd.value = false
+    dropBeforeId.value = next.id
+  } else {
+    dropBeforeId.value = null
+    dropAtEnd.value = true
+  }
+}
+
+function onCardDrop(task: TaskRecord, event: DragEvent): void {
+  event.preventDefault()
+  if (!store.draggingTaskId.value) return
+  const beforeId = dropBeforeId.value
+  const atEnd = dropAtEnd.value
+  clearDropMark()
+  commitDrop(atEnd ? null : (beforeId ?? task.id))
+}
+
+/** 列表空白区(容器本体):一律视为移到组尾 */
+function onListDragOver(event: DragEvent): void {
+  if (!store.draggingTaskId.value || event.target !== event.currentTarget) return
+  event.preventDefault()
+  dropBeforeId.value = null
+  dropAtEnd.value = true
+}
+
+function onListDrop(event: DragEvent): void {
+  if (event.target !== event.currentTarget) return
+  event.preventDefault()
+  clearDropMark()
+  if (!store.draggingTaskId.value) return
+  commitDrop(null)
+}
+
+/** 拖拽离开列表(相关目标不在容器内)时收起指示线 */
+function onListDragLeave(event: DragEvent): void {
+  const to = event.relatedTarget as Node | null
+  if (to && (event.currentTarget as HTMLElement).contains(to)) return
+  clearDropMark()
+}
+
+/** 卡片拖拽结束(含 Esc 取消):统一清理拖拽状态 */
+function onDragEnd(): void {
+  clearDropMark()
+}
+
+/**
+ * 落点提交:同组 → tasks:reorder 相邻插入;跨组 → 降级为 tasks:move(移入锚点卡
+ * 所在工作区,core 落组尾);源已归项目而锚点无项目 → 契约不支持移出,提示说明。
+ * 筛选(客户端/状态/关键词)开启时可见列表横跨多个项目,跨项目落点静默改归属
+ * 与未分组锚点的拒绝行为不对称(P0-2 复审)——此时禁用移动并提示,仅工作区视图/全部
+ * 未筛选视图保留静默 move 语义。
+ */
+function commitDrop(beforeId: string | null): void {
+  const dragId = store.draggingTaskId.value
+  if (!dragId) return
+  const dragTask = store.tasks.value.find((t) => t.id === dragId)
+  if (!dragTask) return
+  const filtering = Boolean(
+    store.filter.value.agentId || store.filter.value.state || store.filter.value.search,
+  )
+  let anchorProjectId: string | undefined
+  if (beforeId) {
+    anchorProjectId = store.tasks.value.find((t) => t.id === beforeId)?.projectId
+  } else {
+    // 组尾:取可见列表末卡的分组;列表只有自己时维持原分组(纯重排到尾)
+    const last = visible.value[visible.value.length - 1]
+    anchorProjectId = last && last.id !== dragId ? last.projectId : dragTask.projectId
+  }
+  store.draggingTaskId.value = null
+  if (dragTask.projectId === anchorProjectId) {
+    void store.reorderTask(dragId, beforeId)
+    return
+  }
+  if (anchorProjectId) {
+    if (filtering) {
+      store.showToast('筛选视图中暂不支持跨工作区移动:清除筛选后拖到侧栏工作区项即可')
+      return
+    }
+    void store.moveTask(dragId, anchorProjectId)
+    return
+  }
+  store.showToast('已归属工作区的任务暂不支持移回未分组')
+}
+
+// ---- 卡片右键菜单(P0-2):移动到…/取消任务/删除(置顶属 P1 不做) ----
+const ctxTask = ref<TaskRecord | null>(null)
+const ctxX = ref(0)
+const ctxY = ref(0)
+
+function openContextMenu(task: TaskRecord, event: MouseEvent): void {
+  ctxTask.value = task
+  ctxX.value = event.clientX
+  ctxY.value = event.clientY
+}
+
+async function deleteTask(taskId: string): Promise<void> {
+  const task = store.tasks.value.find((t) => t.id === taskId)
+  const name = (task?.title || task?.prompt || '').replace(/\s+/g, ' ').slice(0, 24)
+  if (!window.confirm(`删除任务「${name}」及其事件记录?运行中的任务会跳过。`)) return
+  await window.api.tasksBatchDelete([taskId])
+  await store.refreshTasks()
+}
+
+const ctxItems = computed<ContextMenuItem[]>(() => {
+  const task = ctxTask.value
+  if (!task) return []
+  const items: ContextMenuItem[] = []
+  const targets = store.projects.value.filter((p) => p.id !== task.projectId)
+  if (targets.length > 0) {
+    items.push({ key: 'grp-move', label: '移动到工作区', group: true })
+    for (const p of targets) {
+      items.push({
+        key: `move:${p.id}`,
+        label: `「${p.name}」`,
+        action: () => void store.moveTask(task.id, p.id),
+      })
+    }
+  }
+  if (task.state === 'queued' || task.state === 'running') {
+    items.push({ key: 'cancel', label: '取消任务', action: () => void store.stopTask(task.id) })
+  }
+  items.push({
+    key: 'delete',
+    label: '删除',
+    danger: true,
+    action: () => void deleteTask(task.id),
+  })
+  return items
+})
 </script>
 
 <template>
@@ -131,22 +308,37 @@ function toggleSelectAll(): void {
       </GlassButton>
     </div>
 
-    <div class="list">
-      <TaskCard
-        v-for="task in visible"
-        :key="task.id"
-        :task="task"
-        :agent-label="agentLabels.get(task.agentId)"
-        :selected="store.selectedTaskId.value === task.id"
-        :checked="store.selection.value.has(task.id)"
-        @click="onCardClick(task)"
-        @check="toggleSelect(task.id)"
-      />
+    <div class="list" @dragover="onListDragOver" @drop="onListDrop" @dragleave="onListDragLeave">
+      <template v-for="task in visible" :key="task.id">
+        <div v-if="dropBeforeId === task.id" class="drop-line" aria-hidden="true" />
+        <TaskCard
+          :task="task"
+          :agent-label="agentLabels.get(task.agentId)"
+          :selected="store.selectedTaskId.value === task.id"
+          :checked="store.selection.value.has(task.id)"
+          @click="onCardClick(task)"
+          @check="toggleSelect(task.id)"
+          @drag-over="onCardDragOver(task, $event)"
+          @drop="onCardDrop(task, $event)"
+          @drag-end="onDragEnd"
+          @context="openContextMenu(task, $event)"
+        />
+      </template>
+      <div v-if="dropAtEnd" class="drop-line" aria-hidden="true" />
       <div v-if="visible.length === 0" class="empty">
         <p class="big">{{ activeProject ? '该工作区还没有任务' : '还没有任务' }}</p>
         <p class="sub">在上方发布框写下第一条,Enter 派发。</p>
       </div>
     </div>
+
+    <!-- 卡片右键菜单(P0-2):移动到…/取消任务/删除 -->
+    <TaskContextMenu
+      v-if="ctxTask"
+      :x="ctxX"
+      :y="ctxY"
+      :items="ctxItems"
+      @close="ctxTask = null"
+    />
   </section>
 </template>
 
@@ -164,6 +356,8 @@ function toggleSelectAll(): void {
   align-items: center;
   gap: 6px;
   padding-bottom: 10px;
+  /* P0-7:允许换行,任何列宽下都不再横向裁切(窄列时下拉折行显示) */
+  flex-wrap: wrap;
 }
 
 .filters > :first-child {
@@ -173,7 +367,7 @@ function toggleSelectAll(): void {
 
 .filters :deep(.g-select-wrap) {
   flex: none;
-  min-width: 98px;
+  min-width: 88px;
 }
 
 .batch {
@@ -252,5 +446,17 @@ function toggleSelectAll(): void {
   margin: 4px 0 0;
   font-size: 12px;
   color: var(--faint);
+}
+
+/* 拖拽插入指示线(P0-2):负 margin 抵消自身高度,整体骑在 8px 卡片间距中央不顶开布局 */
+.drop-line {
+  height: 2px;
+  margin: -5px 0;
+  border-radius: 1px;
+  background: var(--accent);
+  box-shadow: 0 0 6px var(--accent-line);
+  position: relative;
+  z-index: 1;
+  flex: none;
 }
 </style>

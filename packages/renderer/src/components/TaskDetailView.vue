@@ -50,9 +50,41 @@ const duration = computed(() => {
   const end = task.value.finishedAt ?? Date.now()
   const ms = Math.max(0, end - task.value.startedAt)
   if (ms < 60_000) return `${Math.round(ms / 1000)}s`
-  if (ms < 3600_000) return `${Math.floor(ms / 60_000)}m${Math.round((ms % 60_000) / 1000)}s`
+  if (ms < 3600_000) return `${Math.floor(ms / 3600_000)}m${Math.round((ms % 60_000) / 1000)}s`
   return `${Math.floor(ms / 3600_000)}h${Math.floor((ms % 3600_000) / 60_000)}m`
 })
+
+/**
+ * 实际思考档位(P0-4):驱动按 CLI 合法 values 取位,实际下发值可能与请求四档不同
+ * (如三档 values 请求 low 实际下发 high)。档位 info 事件在起跑早期发出,
+ * 取事件流头部一页即可覆盖;取不到(旧任务/无档位事件)回落显示请求档位。
+ */
+const actualReasoningLevel = ref<string | null>(null)
+
+const effortDisplay = computed(() => {
+  const requested = task.value?.reasoningEffort
+  if (actualReasoningLevel.value) {
+    return actualReasoningLevel.value === requested
+      ? `${actualReasoningLevel.value}`
+      : `${actualReasoningLevel.value}(请求 ${requested ?? '默认'})`
+  }
+  return requested ?? ''
+})
+
+let effortLoadSeq = 0
+
+async function loadActualEffort(taskId: string): Promise<void> {
+  const seq = ++effortLoadSeq
+  try {
+    // beforeSeq=501 命中事件流头部 seq 1..500,档位 info 恒在 stdout 之前,一页即覆盖
+    const head = await window.api.tasksEventsPage({ taskId, limit: 500, beforeSeq: 501 })
+    if (seq !== effortLoadSeq) return
+    const hit = [...head].reverse().find((e) => e.event.kind === 'info' && e.event.reasoningLevel)
+    actualReasoningLevel.value = hit && hit.event.kind === 'info' ? (hit.event.reasoningLevel ?? null) : null
+  } catch {
+    if (seq === effortLoadSeq) actualReasoningLevel.value = null
+  }
+}
 
 /** 选中任务切换的竞态守卫:慢响应回来时若已切走,丢弃结果 */
 let loadId = 0
@@ -66,6 +98,7 @@ watch(
     mergeResult.value = null
     switching.value = false
     notice.value = ''
+    if (id) void loadActualEffort(id)
     await store.refreshWorkspaces()
   },
   { immediate: true },
@@ -205,6 +238,12 @@ function fmt(ts?: number): string {
         </div>
         <div><dt>模型</dt><dd>{{ displayModel }}</dd></div>
         <div><dt>档位</dt><dd>{{ task.mode }}</dd></div>
+        <div v-if="effortDisplay">
+          <dt>思考档位</dt>
+          <dd :title="actualReasoningLevel ? '实际下发档位(以事件流为准)' : '请求档位(实际以会话流运行反馈为准)'">
+            {{ effortDisplay }}
+          </dd>
+        </div>
         <div><dt>创建时间</dt><dd class="num">{{ fmt(task.createdAt) }}</dd></div>
         <div>
           <dt>结束/耗时</dt>

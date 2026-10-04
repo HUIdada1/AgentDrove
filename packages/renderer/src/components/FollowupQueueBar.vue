@@ -1,19 +1,65 @@
 <script setup lang="ts">
 import { ref } from 'vue'
+import type { ComponentPublicInstance } from 'vue'
 import type { FollowupQueueItem } from '@agent-drove/shared'
 import GlassButton from '../ui/GlassButton.vue'
 
 const props = defineProps<{
   taskId: string
   followups: FollowupQueueItem[]
+  /** 父任务是否执行中:决定是否提供"打断当前轮并立即发送" */
+  taskRunning?: boolean
 }>()
 
 const emit = defineEmits<{
   (e: 'remove', followupId: string): void
   (e: 'clear'): void
+  /** 编辑排队文案(P0-6/D3):prompt 已由组件 trim,空串与原文不变不触发 */
+  (e: 'edit', followupId: string, prompt: string): void
+  /** 提前发送:移到队首(P0-6/D3) */
+  (e: 'promote', followupId: string): void
+  /** 打断当前轮并立即发送(P0-6/D3):确认在父层,IPC 也在父层 */
+  (e: 'interrupt', followupId: string): void
 }>()
 
 const expanded = ref(false)
+const editingId = ref('')
+const editingText = ref('')
+
+function startEdit(item: FollowupQueueItem): void {
+  editingId.value = item.id
+  editingText.value = item.prompt
+}
+
+function cancelEdit(): void {
+  editingId.value = ''
+  editingText.value = ''
+}
+
+function commitEdit(): void {
+  const id = editingId.value
+  if (!id) return
+  const text = editingText.value.trim()
+  const original = props.followups.find((item) => item.id === id)?.prompt ?? ''
+  cancelEdit()
+  // 文案未变化不触发 IPC;prompt.trim() 归一化单点在 core,这里只挡空串
+  if (text && text !== original) emit('edit', id, text)
+}
+
+/** Enter 提交编辑;IME 组词态(isComposing/229)的 Enter 是选词确认,不是提交意图(与其余输入框口径一致) */
+function onEditKeydown(event: KeyboardEvent): void {
+  if (event.isComposing || event.keyCode === 229) return
+  event.preventDefault()
+  commitEdit()
+}
+
+/** 函数 ref:编辑框挂载即聚焦并全选 */
+function setEditRef(el: Element | ComponentPublicInstance | null): void {
+  if (el instanceof HTMLInputElement) {
+    el.focus()
+    el.select()
+  }
+}
 
 function formatTime(ts?: number): string {
   if (!ts || Number.isNaN(ts)) return ''
@@ -44,8 +90,49 @@ function formatTime(ts?: number): string {
     <div v-if="expanded" class="queue-list">
       <div v-for="(item, index) in followups" :key="item.id" class="queue-item">
         <span class="index num">#{{ index + 1 }}</span>
-        <span class="text" :title="item.prompt">{{ item.prompt }}</span>
+        <input
+          v-if="editingId === item.id"
+          :ref="setEditRef"
+          v-model="editingText"
+          class="edit-input"
+          @keydown.enter="onEditKeydown"
+          @keydown.esc="cancelEdit"
+          @blur="commitEdit"
+        />
+        <span
+          v-else
+          class="text clickable"
+          :title="`${item.prompt}(点击编辑文案)`"
+          @click.stop="startEdit(item)"
+        >
+          {{ item.prompt }}
+        </span>
+        <span
+          v-if="item.modelId || item.mode || item.reasoningEffort || item.toolPolicy"
+          class="ov-tag"
+          title="本条携带着本轮参数覆盖,接续时按此执行"
+        >
+          带参数
+        </span>
         <span class="time num">{{ formatTime(item.createdAt) }}</span>
+        <button
+          v-if="index > 0"
+          type="button"
+          class="act-btn"
+          title="移到队首:当前轮结束后最先发送"
+          @click.stop="emit('promote', item.id)"
+        >
+          ↑
+        </button>
+        <button
+          v-if="taskRunning"
+          type="button"
+          class="act-btn warn"
+          title="打断当前轮并立即发送本条(需确认)"
+          @click.stop="emit('interrupt', item.id)"
+        >
+          ⏵
+        </button>
         <button
           type="button"
           class="remove-btn"
@@ -144,15 +231,68 @@ function formatTime(ts?: number): string {
 
 .queue-item .text {
   flex: 1;
+  min-width: 0;
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
   color: var(--text);
 }
 
+.queue-item .text.clickable {
+  cursor: pointer;
+  transition: color var(--fast) var(--ease);
+}
+
+.queue-item .text.clickable:hover {
+  color: var(--accent-strong);
+}
+
+.edit-input {
+  flex: 1;
+  min-width: 0;
+  background: var(--field-bg);
+  border: 1px solid var(--accent);
+  border-radius: 4px;
+  color: var(--text);
+  font-size: 12px;
+  padding: 2px 6px;
+  outline: none;
+}
+
+.ov-tag {
+  flex: none;
+  font-size: 10px;
+  padding: 1px 5px;
+  border-radius: 4px;
+  background: var(--accent-dim);
+  color: var(--accent-strong);
+}
+
 .queue-item .time {
   font-size: 10px;
   color: var(--faint);
+}
+
+.act-btn {
+  background: transparent;
+  border: none;
+  color: var(--muted);
+  cursor: pointer;
+  padding: 2px 6px;
+  border-radius: 4px;
+  font-size: 12px;
+  line-height: 1;
+  transition: all var(--fast) var(--ease);
+}
+
+.act-btn:hover {
+  background: var(--accent-dim);
+  color: var(--accent-strong);
+}
+
+.act-btn.warn:hover {
+  background: color-mix(in srgb, var(--warn) 20%, transparent);
+  color: var(--warn);
 }
 
 .remove-btn {

@@ -324,4 +324,279 @@ describe('任务运行中追问排队与自动接续 (Followup Queue)', () => {
     orchestrator.clearFollowups(first.id)
     expect(orchestrator.getFollowups(first.id)).toHaveLength(0)
   })
+
+  it('migrateFollowups:打断发送后把遗留排队项整体迁移到新任务(P0-6 复审)', async () => {
+    const registry = new Registry()
+    registry.register(zcodeProfile)
+    const repo = new MemoryTaskRepository()
+    const orchestrator = new Orchestrator(registry, {
+      repo,
+      sink: new PassthroughSink(repo),
+      defaultCwd: 'C:/tmp/ws',
+    })
+    orchestrator.registerDriver(new MockDriver('zcode', { delayMs: 200 }))
+    const first = orchestrator.submit({ agentId: 'zcode', prompt: '被打断的任务' })
+    await waitFor(() => first.state === 'running')
+
+    const kept = orchestrator.enqueueFollowup(first.id, '问1', undefined, { reasoningEffort: 'high' })
+    const dropped = orchestrator.enqueueFollowup(first.id, '问2')
+    expect(orchestrator.getFollowups(first.id)).toHaveLength(2)
+
+    // 模拟打断发送:取消父任务(clearFollowups=false)后显式续聊发出 dropped 那条
+    expect(orchestrator.cancel(first.id, false)).toBe(true)
+    const next = orchestrator.continueConversation(first.id, dropped.prompt) as any
+    expect(next.state).toBe('queued')
+    orchestrator.removeFollowup(first.id, dropped.id)
+    // 剩余排队项迁移:父任务已 canceled,processFollowupQueue 只在 completed 路径消费,不迁移则永不发送
+    expect(orchestrator.migrateFollowups(first.id, next.id)).toBe(1)
+    expect(orchestrator.getFollowups(first.id)).toHaveLength(0)
+    const migrated = orchestrator.getFollowups(next.id)
+    expect(migrated.map((i) => i.id)).toEqual([kept.id])
+    expect(migrated[0]!.parentTaskId).toBe(next.id)
+    expect(migrated[0]!.reasoningEffort).toBe('high')
+    // 新任务完成后迁移来的项自动接续
+    await waitFor(() => next.state === 'completed')
+    await waitFor(() => {
+      const all = orchestrator.list()
+      return all.some((t) => t.parentId === next.id && t.prompt === '问1')
+    })
+  })
+
+  it('migrateFollowups:源队列为空或同任务迁移返回 0', async () => {
+    const registry = new Registry()
+    registry.register(zcodeProfile)
+    const repo = new MemoryTaskRepository()
+    const orchestrator = new Orchestrator(registry, {
+      repo,
+      sink: new PassthroughSink(repo),
+      defaultCwd: 'C:/tmp/ws',
+    })
+    orchestrator.registerDriver(new MockDriver('zcode'))
+    const a = orchestrator.submit({ agentId: 'zcode', prompt: 'A' })
+    const b = orchestrator.submit({ agentId: 'zcode', prompt: 'B' })
+    expect(orchestrator.migrateFollowups(a.id, b.id)).toBe(0)
+    expect(orchestrator.migrateFollowups(a.id, a.id)).toBe(0)
+  })
+})
+
+describe('P0-4/P0-6: 思考档位透传与本轮覆盖', () => {
+  it('submit 透传 reasoningEffort 落库并传入驱动', async () => {
+    const registry = new Registry()
+    registry.register(qoderProfile)
+    const repo = new MemoryTaskRepository()
+    const orchestrator = new Orchestrator(registry, {
+      repo,
+      sink: new PassthroughSink(repo),
+      defaultCwd: 'C:/tmp/ws',
+    })
+    let seenEffort: string | undefined
+    orchestrator.registerDriver({
+      id: 'qoder',
+      async detect() {
+        return null
+      },
+      async health() {
+        return { ok: true }
+      },
+      resolveModelArg: () => [],
+      async run(options) {
+        seenEffort = options.reasoningEffort
+        return { code: 0 }
+      },
+    })
+    const task = orchestrator.submit({ agentId: 'qoder', prompt: '带档位', reasoningEffort: 'medium' })
+    await waitFor(() => task.state === 'completed')
+    expect(task.reasoningEffort).toBe('medium')
+    expect(seenEffort).toBe('medium')
+  })
+
+  it('续聊缺省沿用父任务参数,显式覆盖仅本轮生效且不污染父任务', async () => {
+    const registry = new Registry()
+    registry.register(qoderProfile)
+    const repo = new MemoryTaskRepository()
+    const orchestrator = new Orchestrator(registry, {
+      repo,
+      sink: new PassthroughSink(repo),
+      defaultCwd: 'C:/tmp/ws',
+    })
+    orchestrator.registerDriver(new MockDriver('qoder', { sessionId: 'sess-c1' }))
+    const parent = orchestrator.submit({
+      agentId: 'qoder',
+      prompt: '首轮',
+      mode: 'build',
+      toolPolicy: { denyList: ['Bash'], maxTurns: null },
+      reasoningEffort: 'low',
+    })
+    await waitFor(() => parent.state === 'completed')
+
+    // 缺省:完全沿用父任务
+    const child = orchestrator.continueConversation(parent.id, '缺省续聊') as any
+    expect(child.mode).toBe('build')
+    expect(child.toolPolicy).toEqual({ denyList: ['Bash'], maxTurns: null })
+    expect(child.reasoningEffort).toBe('low')
+    await waitFor(() => child.state === 'completed')
+
+    // 覆盖:仅本轮生效
+    const child2 = orchestrator.continueConversation(parent.id, '覆盖续聊', {
+      mode: 'plan',
+      reasoningEffort: 'high',
+      toolPolicy: { denyList: ['Write'] },
+    }) as any
+    expect(child2.mode).toBe('plan')
+    expect(child2.reasoningEffort).toBe('high')
+    expect(child2.toolPolicy).toEqual({ denyList: ['Write'] })
+    expect(child2.modelId).toBe('qwen3.7-max') // modelId 未覆盖仍沿用
+    // 父任务记录不被污染
+    expect(parent.mode).toBe('build')
+    expect(parent.reasoningEffort).toBe('low')
+  })
+
+  it('排队追问携带本轮覆盖参数,自动接续的新任务按覆盖提交', async () => {
+    const registry = new Registry()
+    registry.register(qoderProfile)
+    const repo = new MemoryTaskRepository()
+    const orchestrator = new Orchestrator(registry, {
+      repo,
+      sink: new PassthroughSink(repo),
+      defaultCwd: 'C:/tmp/ws',
+    })
+    orchestrator.registerDriver(new MockDriver('qoder', { delayMs: 80, sessionId: 'sess-q9' }))
+    const first = orchestrator.submit({
+      agentId: 'qoder',
+      prompt: '第一步',
+      mode: 'build',
+      reasoningEffort: 'low',
+    })
+    await waitFor(() => first.state === 'running')
+
+    const item = orchestrator.continueConversation(first.id, '换档追问', {
+      queueIfRunning: true,
+      mode: 'plan',
+      reasoningEffort: 'high',
+    }) as any
+    expect(item.mode).toBe('plan')
+    expect(item.reasoningEffort).toBe('high')
+
+    await waitFor(() => first.state === 'completed')
+    await waitFor(() => {
+      const all = orchestrator.list()
+      return all.some((t) => t.parentId === first.id && t.prompt === '换档追问')
+    })
+    const second = orchestrator.list().find((t) => t.parentId === first.id)!
+    expect(second.mode).toBe('plan')
+    expect(second.reasoningEffort).toBe('high')
+  })
+
+  it('接续成功后推送 followup:continued,新任务事件流头部写"接续自"message 事件', async () => {
+    const registry = new Registry()
+    registry.register(qoderProfile)
+    const repo = new MemoryTaskRepository()
+    const orchestrator = new Orchestrator(registry, {
+      repo,
+      sink: new PassthroughSink(repo),
+      defaultCwd: 'C:/tmp/ws',
+    })
+    orchestrator.registerDriver(new MockDriver('qoder', { delayMs: 80 }))
+    const first = orchestrator.submit({ agentId: 'qoder', prompt: '首问' })
+    await waitFor(() => first.state === 'running')
+    orchestrator.enqueueFollowup(first.id, '接续问')
+    const continued: Array<{ fromTaskId: string; toTaskId: string }> = []
+    orchestrator.onFollowupContinued((p) => continued.push(p))
+
+    await waitFor(() => first.state === 'completed')
+    await waitFor(() => {
+      const all = orchestrator.list()
+      return all.some((t) => t.parentId === first.id && t.prompt === '接续问')
+    })
+    const second = orchestrator.list().find((t) => t.parentId === first.id)!
+    expect(continued).toEqual([{ fromTaskId: first.id, toTaskId: second.id }])
+    // message 事件落库且位于事件流头部(seq=1),会话链可回溯
+    const events = repo.eventsOf(second.id)
+    expect(events[0]!.seq).toBe(1)
+    expect(events[0]!.event.kind).toBe('message')
+    expect(
+      events[0]!.event.kind === 'message' && events[0]!.event.text,
+    ).toBe(`接续自 #${first.id}`)
+  })
+
+  it('updateFollowup 归一化文案,目标不存在抛错', async () => {
+    const registry = new Registry()
+    registry.register(qoderProfile)
+    const repo = new MemoryTaskRepository()
+    const orchestrator = new Orchestrator(registry, {
+      repo,
+      sink: new PassthroughSink(repo),
+      defaultCwd: 'C:/tmp/ws',
+    })
+    orchestrator.registerDriver(new MockDriver('qoder'))
+    const first = orchestrator.submit({ agentId: 'qoder', prompt: '主任务' })
+    const item = orchestrator.enqueueFollowup(first.id, '  原始文案  ')
+    const updated = orchestrator.updateFollowup(first.id, item.id, ' 改后文案 ')
+    expect(updated.prompt).toBe('改后文案')
+    expect(orchestrator.getFollowups(first.id)[0]!.prompt).toBe('改后文案')
+    expect(() => orchestrator.updateFollowup(first.id, 'no-such', 'x')).toThrow(/unknown followup/)
+  })
+
+  it('reorderFollowup:插入到 before 之前,null 移到队尾,自身为 no-op,非法 before 抛错', async () => {
+    const registry = new Registry()
+    registry.register(qoderProfile)
+    const repo = new MemoryTaskRepository()
+    const orchestrator = new Orchestrator(registry, {
+      repo,
+      sink: new PassthroughSink(repo),
+      defaultCwd: 'C:/tmp/ws',
+    })
+    orchestrator.registerDriver(new MockDriver('qoder'))
+    const first = orchestrator.submit({ agentId: 'qoder', prompt: '主任务' })
+    const i1 = orchestrator.enqueueFollowup(first.id, '问1')
+    const i2 = orchestrator.enqueueFollowup(first.id, '问2')
+    const i3 = orchestrator.enqueueFollowup(first.id, '问3')
+    // 提前发送:i3 移到 i1 之前(队首)
+    orchestrator.reorderFollowup(first.id, i3.id, i1.id)
+    expect(orchestrator.getFollowups(first.id).map((i) => i.id)).toEqual([i3.id, i1.id, i2.id])
+    // null/缺省 = 移到队尾
+    orchestrator.reorderFollowup(first.id, i3.id, null)
+    expect(orchestrator.getFollowups(first.id).map((i) => i.id)).toEqual([i1.id, i2.id, i3.id])
+    // 自身 = no-op
+    orchestrator.reorderFollowup(first.id, i2.id, i2.id)
+    expect(orchestrator.getFollowups(first.id).map((i) => i.id)).toEqual([i1.id, i2.id, i3.id])
+    expect(() => orchestrator.reorderFollowup(first.id, i1.id, 'no-such')).toThrow(/unknown followup/)
+    expect(() => orchestrator.reorderFollowup(first.id, 'no-such', null)).toThrow(/unknown followup/)
+  })
+})
+
+describe('P0-2 复审: 归属变更后 live 表同步', () => {
+  it('syncTaskProject 更新 live 任务对象的 projectId,后续 putTask 不再把旧归属回写', async () => {
+    const registry = new Registry()
+    registry.register(zcodeProfile)
+    const repo = new MemoryTaskRepository()
+    const orchestrator = new Orchestrator(registry, {
+      repo,
+      sink: new PassthroughSink(repo),
+      defaultCwd: 'C:/tmp/ws',
+    })
+    orchestrator.registerDriver(new MockDriver('zcode', { delayMs: 200 }))
+    const task = orchestrator.submit({ agentId: 'zcode', prompt: '跨组移动的任务', projectId: 'proj-a' })
+    await waitFor(() => task.state === 'running')
+
+    // 模拟 tasks:move:仓库直写新归属后同步 live 表
+    expect(orchestrator.syncTaskProject(task.id, 'proj-b')).toBe(true)
+    expect(orchestrator.get(task.id)?.projectId).toBe('proj-b')
+
+    // 运行收尾的状态迁移会再走 putTask:若 live 未同步,project_id 会被回写为 proj-a
+    await waitFor(() => task.state === 'completed')
+    expect(repo.getTask(task.id)?.projectId).toBe('proj-b')
+  })
+
+  it('syncTaskProject:任务不在 live 表时返回 false(仓库已是新值,无需同步)', async () => {
+    const registry = new Registry()
+    registry.register(zcodeProfile)
+    const repo = new MemoryTaskRepository()
+    const orchestrator = new Orchestrator(registry, {
+      repo,
+      sink: new PassthroughSink(repo),
+      defaultCwd: 'C:/tmp/ws',
+    })
+    expect(orchestrator.syncTaskProject('no-such-task', 'proj-b')).toBe(false)
+  })
 })

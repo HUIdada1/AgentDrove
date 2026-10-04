@@ -12,7 +12,14 @@ const props = defineProps<{
   agentLabel?: string
 }>()
 
-defineEmits<{ click: []; check: [] }>()
+const emit = defineEmits<{
+  click: []
+  check: []
+  'drag-over': [event: DragEvent]
+  drop: [event: DragEvent]
+  'drag-end': []
+  context: [event: MouseEvent]
+}>()
 
 const store = useAppStore()
 
@@ -53,10 +60,43 @@ const totalTokens = computed(() => {
     (props.task.usage.cachedTokens || 0)
   )
 })
+
+// ---- 拖拽归类/排序(P0-2) ----
+/** 批量选中态禁用拖拽,避免误拖选中的任务 */
+const canDrag = computed(() => store.selection.value.size === 0)
+
+function onDragStart(event: DragEvent): void {
+  if (!canDrag.value) {
+    event.preventDefault()
+    return
+  }
+  store.draggingTaskId.value = props.task.id
+  if (event.dataTransfer) {
+    // 必须 setData,否则 Chromium 不允许 drop;taskId 同时走 store 供跨组件(AgentRail)读取
+    event.dataTransfer.effectAllowed = 'move'
+    event.dataTransfer.setData('text/plain', props.task.id)
+  }
+}
+
+function onDragEnd(): void {
+  // drop 与 dragend 总是成对(dragend 兜底清理,含拖拽中途 Esc 取消)
+  store.draggingTaskId.value = null
+  emit('drag-end')
+}
 </script>
 
 <template>
-  <article class="card spot" :class="[`s-${task.state}`, { selected }]" @click="$emit('click')">
+  <article
+    class="card spot"
+    :class="[`s-${task.state}`, { selected }]"
+    :draggable="canDrag"
+    @click="$emit('click')"
+    @dragstart="onDragStart"
+    @dragend="onDragEnd"
+    @dragover="$emit('drag-over', $event)"
+    @drop="$emit('drop', $event)"
+    @contextmenu.prevent="$emit('context', $event)"
+  >
     <div class="top">
       <span class="agent">{{ agentLabel ?? task.agentId }}</span>
       <span class="badge" :class="{ 'is-running': task.state === 'running' }">
@@ -116,6 +156,8 @@ const totalTokens = computed(() => {
   box-shadow: inset 0 1px 0 var(--glass-specular);
   padding: 12px 14px;
   cursor: pointer;
+  /* 卡片即拖拽源(P0-2):禁文本原生选择,避免按住拖动时误触发文本 drag */
+  user-select: none;
   transition: transform var(--fast) var(--ease), border-color var(--fast) var(--ease),
     background var(--fast) var(--ease);
 }

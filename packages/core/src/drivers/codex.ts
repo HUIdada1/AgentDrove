@@ -6,7 +6,7 @@ import type {
   RunResult,
 } from '../driver.js'
 import { DEFAULT_RUN_TIMEOUT_MS } from '../driver.js'
-import type { AgentProfile, ModelId, ModelPreset, TaskInput } from '../types.js'
+import type { AgentProfile, ModelId, ModelPreset, ReasoningEffort, TaskInput } from '../types.js'
 import { MODEL_CLIENT_FOLLOW } from '../types.js'
 import type { FileSystem, ProcessRunner } from '../ports.js'
 import { LineDecoder, decodeBuffer, extractSessionId } from '../text.js'
@@ -72,7 +72,7 @@ export class CodexDriver implements AgentDriver {
     }
     if (signal.aborted) throw new Error('任务已取消,未启动进程')
     const agent = options.agent
-    const args = this.buildArgs(input, options.modelId, agent, emit)
+    const args = this.buildArgs(input, options.modelId, agent, emit, options.reasoningEffort)
     const stdoutDecoder = new LineDecoder()
     const stderrDecoder = new LineDecoder()
     let timedOut = false
@@ -137,12 +137,14 @@ export class CodexDriver implements AgentDriver {
   /**
    * 参数装配纯函数,单测锁定形态:
    * exec 全局旗标在前,resume 子命令居中,prompt 恒为最后一个位置参数。
+   * reasoningEffort 传入时映射 --config model_reasoning_effort(P0-4);codex 原生即同四档,直通即可。
    */
   buildArgs(
     input: TaskInput,
     modelId: ModelId,
     agent: AgentProfile,
     emit?: DriverRunOptions['emit'],
+    reasoningEffort?: ReasoningEffort,
   ): string[] {
     const args = [
       'exec',
@@ -154,6 +156,10 @@ export class CodexDriver implements AgentDriver {
       this.sandboxFor(input.mode),
       ...this.resolveModelArg(modelId, agent),
     ]
+    if (reasoningEffort) {
+      // 覆盖值按 TOML 解析失败时回落字符串,bare 值可避开 shell 引号剥除问题
+      args.push('--config', `model_reasoning_effort=${reasoningEffort}`)
+    }
     if (input.sessionId) {
       args.push('resume', input.sessionId)
     } else if (input.resumeLatest) {

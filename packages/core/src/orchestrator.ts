@@ -10,7 +10,10 @@ import { Throttle } from './throttle.js'
 import type {
   AgentId,
   AgentProfile,
+  ContinueOptions,
+  FollowupContinuedEvent,
   FollowupQueueItem,
+  ReasoningEffort,
   StoredEvent,
   TaskAttachment,
   TaskEvent,
@@ -70,6 +73,8 @@ export interface SubmitRequest {
   /** 无目标会话时续接该工作区最近会话(-c) */
   resumeLatest?: boolean
   mode?: TaskMode
+  /** 请求的思考档位(P0-4);驱动侧各自映射,任务记录只存请求档位 */
+  reasoningEffort?: ReasoningEffort
   origin?: TaskOrigin
   parentId?: string
   retryOf?: string
@@ -98,6 +103,8 @@ export interface OrchestratorDeps {
 }
 
 export type TerminalListener = (task: TaskRecord) => void
+/** 追问队列自动接续推送监听(P0-6):组合根订阅后经 IPC 通道 followup:continued 转发渲染层 */
+export type FollowupContinuedListener = (payload: FollowupContinuedEvent) => void
 
 /**
  * 调度核心:只依赖端口与注册表。
@@ -122,6 +129,7 @@ export class Orchestrator {
   private readonly journal: Journal
   private readonly terminalListeners: TerminalListener[] = []
   private readonly submittedListeners: TerminalListener[] = []
+  private readonly followupContinuedListeners: FollowupContinuedListener[] = []
   private releaseTimer: ReturnType<typeof setTimeout> | undefined
 
   constructor(
@@ -156,6 +164,15 @@ export class Orchestrator {
 
   onTaskSubmitted(listener: TerminalListener): () => void {
     return this.addListener(this.submittedListeners, listener)
+  }
+
+  /** 订阅追问队列自动接续推送(P0-6);监听器抛错只留 warning,不回灌状态机 */
+  onFollowupContinued(listener: FollowupContinuedListener): () => void {
+    this.followupContinuedListeners.push(listener)
+    return () => {
+      const index = this.followupContinuedListeners.indexOf(listener)
+      if (index >= 0) this.followupContinuedListeners.splice(index, 1)
+    }
   }
 
   private addListener(list: TerminalListener[], listener: TerminalListener): () => void {
@@ -195,6 +212,7 @@ export class Orchestrator {
       skills: request.skills,
       toolPolicy: request.toolPolicy,
       mode: request.mode ?? DEFAULT_MODE,
+      reasoningEffort: request.reasoningEffort,
       origin: request.origin ?? 'panel',
       createdAt: now,
       attempt: request.attempt ?? 1,
@@ -261,17 +279,19 @@ export class Orchestrator {
    * 无会话 id(V2 有结论前提取不到)降级 `-c` 续接该工作区最近会话,UI 需标注。
    * 当任务处于 running 或 queued 时,若允许排队(queueIfRunning: true),则自动进入排队队列;
    * 否则抛出异常以维持既有行为。
+   * options 的本轮覆盖参数(P0-6)缺省沿用父任务,完全向后兼容。
    */
-  continueConversation(
-    taskId: string,
-    prompt: string,
-    options?: { queueIfRunning?: boolean; skills?: string[] },
-  ): TaskRecord | FollowupQueueItem {
+  continueConversation(taskId: string, prompt: string, options?: ContinueOptions): TaskRecord | FollowupQueueItem {
     const parent = this.taskOf(taskId)
     if (!parent) throw new Error(`unknown task: ${taskId}`)
     if (parent.state === 'running' || parent.state === 'queued') {
       if (options?.queueIfRunning) {
-        return this.enqueueFollowup(taskId, prompt, options.skills)
+        return this.enqueueFollowup(taskId, prompt, options.skills, {
+          modelId: options.modelId,
+          mode: options.mode,
+          toolPolicy: options.toolPolicy,
+          reasoningEffort: options.reasoningEffort,
+        })
       }
       throw new Error('任务运行中:请等待完成或先取消,再继续对话')
     }
@@ -282,17 +302,23 @@ export class Orchestrator {
       projectId: parent.projectId,
       sessionId: parent.sessionId,
       resumeLatest: !parent.sessionId,
-      modelId: parent.modelId,
-      mode: parent.mode,
-      toolPolicy: parent.toolPolicy,
+      modelId: options?.modelId ?? parent.modelId,
+      mode: options?.mode ?? parent.mode,
+      toolPolicy: options?.toolPolicy ?? parent.toolPolicy,
+      reasoningEffort: options?.reasoningEffort ?? parent.reasoningEffort,
       parentId: parent.id,
       origin: 'panel',
       skills: options?.skills ?? parent.skills,
     })
   }
 
-  /** 加入排队消息:当父任务完成后自动接续执行 */
-  enqueueFollowup(taskId: string, prompt: string, skills?: string[]): FollowupQueueItem {
+  /** 加入排队消息:当父任务完成后自动接续执行;overrides 为本轮覆盖参数(P0-6),缺省沿用父任务 */
+  enqueueFollowup(
+    taskId: string,
+    prompt: string,
+    skills?: string[],
+    overrides?: Pick<ContinueOptions, 'modelId' | 'mode' | 'toolPolicy' | 'reasoningEffort'>,
+  ): FollowupQueueItem {
     const parent = this.taskOf(taskId)
     if (!parent) throw new Error(`unknown task: ${taskId}`)
     const item: FollowupQueueItem = {
@@ -302,6 +328,10 @@ export class Orchestrator {
       skills,
       createdAt: this.clock.now(),
     }
+    if (overrides?.modelId !== undefined) item.modelId = overrides.modelId
+    if (overrides?.mode !== undefined) item.mode = overrides.mode
+    if (overrides?.toolPolicy !== undefined) item.toolPolicy = overrides.toolPolicy
+    if (overrides?.reasoningEffort !== undefined) item.reasoningEffort = overrides.reasoningEffort
     const queue = this.followupQueues.get(taskId) ?? []
     queue.push(item)
     this.followupQueues.set(taskId, queue)
@@ -311,6 +341,51 @@ export class Orchestrator {
       detail: `followupId=${item.id}`,
     })
     return item
+  }
+
+  /** 编辑排队消息文案(P0-6/D3):prompt.trim() 归一化;任务或队列项不存在抛错 */
+  updateFollowup(taskId: string, followupId: string, prompt: string): FollowupQueueItem {
+    const queue = this.followupQueues.get(taskId)
+    const item = queue?.find((i) => i.id === followupId)
+    if (!item) throw new Error(`unknown followup: ${followupId} on task ${taskId}`)
+    item.prompt = prompt.trim()
+    const parent = this.taskOf(taskId)
+    if (parent) {
+      this.journal.record('task.followup.update', parent.origin, {
+        agentId: parent.agentId,
+        taskId,
+        detail: `followupId=${followupId}`,
+      })
+    }
+    return item
+  }
+
+  /**
+   * 队列内移动(P0-6/D3):插入到 beforeFollowupId 之前;
+   * null/缺省 = 移到队尾;beforeFollowupId 须同队列,否则抛错。
+   */
+  reorderFollowup(taskId: string, followupId: string, beforeFollowupId: string | null): void {
+    const queue = this.followupQueues.get(taskId)
+    const idx = queue?.findIndex((i) => i.id === followupId) ?? -1
+    if (!queue || idx < 0) throw new Error(`unknown followup: ${followupId} on task ${taskId}`)
+    if (beforeFollowupId === followupId) return
+    if (beforeFollowupId != null && !queue.some((i) => i.id === beforeFollowupId)) {
+      throw new Error(`unknown followup: ${beforeFollowupId} on task ${taskId}`)
+    }
+    const [item] = queue.splice(idx, 1)
+    if (beforeFollowupId == null) {
+      queue.push(item!)
+    } else {
+      queue.splice(queue.findIndex((i) => i.id === beforeFollowupId), 0, item!)
+    }
+    const parent = this.taskOf(taskId)
+    if (parent) {
+      this.journal.record('task.followup.reorder', parent.origin, {
+        agentId: parent.agentId,
+        taskId,
+        detail: `followupId=${followupId} before=${beforeFollowupId ?? 'tail'}`,
+      })
+    }
   }
 
   getFollowups(taskId: string): FollowupQueueItem[] {
@@ -333,12 +408,42 @@ export class Orchestrator {
     this.followupQueues.delete(taskId)
   }
 
+  /**
+   * 队列整体迁移(P0-6 复审):打断当前轮并立即发送拿到新任务后,
+   * 把旧任务遗留的排队项搬到新任务继续自动接续——被打断的父任务已终态,
+   * processFollowupQueue 只在 completed 路径消费,遗留项不迁移将永远不再发送。
+   * 返回迁移条数(源队列为空返回 0)。
+   */
+  migrateFollowups(fromTaskId: string, toTaskId: string): number {
+    if (fromTaskId === toTaskId) return 0
+    const queue = this.followupQueues.get(fromTaskId)
+    if (!queue || queue.length === 0) return 0
+    const target = this.followupQueues.get(toTaskId) ?? []
+    for (const item of queue) item.parentTaskId = toTaskId
+    target.push(...queue)
+    this.followupQueues.set(toTaskId, target)
+    this.followupQueues.delete(fromTaskId)
+    return queue.length
+  }
+
   rename(taskId: string, title: string): TaskRecord {
     const task = this.taskOf(taskId)
     if (!task) throw new Error(`unknown task: ${taskId}`)
     task.title = title.trim()
     this.deps.repo.putTask(task)
     return task
+  }
+
+  /**
+   * 归属变更同步(P0-2):tasks:move 由仓库直写 project_id,但 live 表的任务对象仍持旧值,
+   * 后续状态迁移/usage 落库经 putTask 会把旧 projectId 回写,用户移动被静默回滚。
+   * 任务在 live 表时同步更新(不在即无需同步,仓库已是新值);返回是否同步到。
+   */
+  syncTaskProject(taskId: string, projectId: string): boolean {
+    const task = this.live.get(taskId)
+    if (!task) return false
+    task.projectId = projectId
+    return true
   }
 
   /** 托盘/IPC 的"暂停调度"入口;恢复时立即重扫队列 */
@@ -540,6 +645,7 @@ export class Orchestrator {
         const result = await driver.run({
           agent: profile,
           modelId: task.modelId,
+          reasoningEffort: task.reasoningEffort,
           input: {
             prompt: task.prompt,
             cwd: task.cwd,
@@ -699,9 +805,10 @@ export class Orchestrator {
       projectId: completedTask.projectId,
       sessionId: completedTask.sessionId,
       resumeLatest: !completedTask.sessionId,
-      modelId: completedTask.modelId,
-      mode: completedTask.mode,
-      toolPolicy: completedTask.toolPolicy,
+      modelId: nextItem.modelId ?? completedTask.modelId,
+      mode: nextItem.mode ?? completedTask.mode,
+      toolPolicy: nextItem.toolPolicy ?? completedTask.toolPolicy,
+      reasoningEffort: nextItem.reasoningEffort ?? completedTask.reasoningEffort,
       parentId: completedTask.id,
       origin: 'panel',
       skills: nextItem.skills ?? completedTask.skills,
@@ -710,5 +817,26 @@ export class Orchestrator {
       this.followupQueues.set(nextTask.id, queue)
     }
     this.followupQueues.delete(completedTask.id)
+    // 在新任务事件流头部写一条"接续自"message 事件落库,会话链可回溯(P0-6/D2)
+    this.recordEvent(nextTask.id, {
+      kind: 'message',
+      channel: 'agent',
+      text: `接续自 #${completedTask.id}`,
+    })
+    // 接续可见推送(P0-6/D2):渲染层据此切换选中并提示去处
+    this.notifyFollowupContinued({ fromTaskId: completedTask.id, toTaskId: nextTask.id })
+  }
+
+  private notifyFollowupContinued(payload: FollowupContinuedEvent): void {
+    for (const listener of [...this.followupContinuedListeners]) {
+      try {
+        listener(payload)
+      } catch (error) {
+        this.recordEvent(payload.toTaskId, {
+          kind: 'warning',
+          text: `接续推送监听器执行失败:${error instanceof Error ? error.message : String(error)}`,
+        })
+      }
+    }
   }
 }

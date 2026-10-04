@@ -7,14 +7,14 @@ import type {
   AgentProfile,
   AppConfig,
   DriverUsage,
-  FollowupQueueItem,
+  FollowupQueueItem as CoreFollowupQueueItem,
   HealthReport,
   LaunchChannel,
   ModelPreset,
   PlanInfo,
   Project,
   StoredEvent,
-  TaskRecord,
+  TaskRecord as CoreTaskRecord,
   TaskUsage,
   WorkspaceRow,
 } from '@agent-drove/core'
@@ -23,16 +23,51 @@ export type {
   AgentProfile,
   AppConfig,
   DriverUsage,
-  FollowupQueueItem,
   HealthReport,
   LaunchChannel,
   ModelPreset,
   PlanInfo,
   Project,
   StoredEvent,
-  TaskRecord,
   TaskUsage,
   WorkspaceRow,
+}
+
+/**
+ * core 类型的契约增量(P0-2/P0-4/P0-6):字段正式落进 core/types.ts 前,
+ * 渲染层经 shared 视图先行获得类型;core 落地后两处结构一致(同名可选同型,继承合法)。
+ */
+
+/** 思考档位(P0-4):DTO 用通用四档,驱动侧各自映射到 CLI 实际参数(zcode reasoningLevel / codex effort) */
+export type ReasoningEffort = 'minimal' | 'low' | 'medium' | 'high'
+
+export interface TaskRecord extends CoreTaskRecord {
+  /** 组内手动排序位(P0-2):仅由 core 维护;空缺时该组仍按 createdAt 倒序 */
+  orderIndex?: number
+  /** 请求的思考档位(P0-4);实际生效档位以事件流 warning/info 为准,避免 UI 撒谎 */
+  reasoningEffort?: ReasoningEffort
+}
+
+/**
+ * 分组内展示序(P0-2):orderIndex 有值者按值升序在前(手动区),
+ * 空缺者按 createdAt 倒序随后——旧数据零迁移成本,orderIndex 仅在拖过/移过之后产生。
+ * 注意:这是【组内良构序】,orderIndex 是组内连续值;跨分组的全局列表序必须维持
+ * createdAt 倒序,手动序只在按组过滤/分组渲染的子序列上应用
+ * (main tasks:list 与 renderer TaskList.visible 共用此单一事实源)。
+ */
+export function compareTaskOrder(a: TaskRecord, b: TaskRecord): number {
+  return (
+    (a.orderIndex ?? Number.MAX_SAFE_INTEGER) - (b.orderIndex ?? Number.MAX_SAFE_INTEGER) ||
+    b.createdAt - a.createdAt
+  )
+}
+
+export interface FollowupQueueItem extends CoreFollowupQueueItem {
+  /** 排队时随项记录的本轮覆盖参数(P0-6);缺省沿用父任务 */
+  modelId?: string
+  mode?: TaskRecord['mode']
+  toolPolicy?: TaskRecord['toolPolicy']
+  reasoningEffort?: ReasoningEffort
 }
 
 export interface SkillDefinition {
@@ -184,7 +219,10 @@ export interface AgentView {
   models: ModelPreset[]
   /** UI 展示的模型目录(跟随客户端的档案展示哨兵项) */
   defaultModel: string
-  capabilities: AgentProfile['capabilities']
+  capabilities: AgentProfile['capabilities'] & {
+    /** 思考档位能力(P0-4):false/缺省 = 该客户端不支持 reasoningEffort,渲染层隐藏"思考"下拉 */
+    reasoningEffort?: boolean
+  }
   plan: PlanInfo
   enabled: boolean
   /** 最近一次健康探活结果(可能为空=未探过) */
@@ -217,12 +255,42 @@ export interface SubmitTaskDto {
   attachments?: TaskRecord['attachments']
   skills?: string[]
   toolPolicy?: TaskRecord['toolPolicy']
+  /** 思考档位(P0-4):客户端不支持时由驱动兜底回落,渲染层按 capabilities.reasoningEffort 隐藏控件 */
+  reasoningEffort?: ReasoningEffort
   /** 续聊目标会话 */
   sessionId?: string
   resumeLatest?: boolean
   origin?: TaskRecord['origin']
   /** 派生工作区源目录:git 源 → worktree;非 git → tempcopy 整拷降级 */
   workspaceSource?: string
+}
+
+/** 卡片归属变更(P0-2):把任务移入另一项目工作区;不支持"移出项目"语义 */
+export interface MoveTaskDto {
+  taskId: string
+  projectId: string
+}
+
+/**
+ * 续聊本轮参数(P0-6):缺省字段沿用父任务,完全向后兼容;
+ * 排队时(queueIfRunning)整组覆盖随 FollowupQueueItem 落 JSON。
+ */
+export interface ContinueOptions {
+  queueIfRunning?: boolean
+  skills?: string[]
+  /** 本轮覆盖:模型;缺省沿用 parent.modelId */
+  modelId?: string
+  mode?: TaskRecord['mode']
+  toolPolicy?: TaskRecord['toolPolicy']
+  reasoningEffort?: ReasoningEffort
+}
+
+/** 追问队列自动接续推送(P0-6,通道 followup:continued):渲染层据此切换选中并提示去处 */
+export interface FollowupContinuedEvent {
+  /** 接续来源(父任务) */
+  fromTaskId: string
+  /** 接续落地的新任务 */
+  toTaskId: string
 }
 
 export interface TaskFilterDto {
@@ -316,6 +384,11 @@ export interface PushEvents {
   onMiniPrefill(listener: (text: string) => void): () => void
   /** 自定义标题栏:主窗最大化状态变化(最大化/还原图标切换) */
   onWindowMaximized(listener: (maximized: boolean) => void): () => void
+  /**
+   * 追问队列自动接续(P0-6,通道 followup:continued):父任务完成后排队消息落地为新任务。
+   * 可选成员:preload 实现落地后转为必需(届时渲染层调用点同步去掉可选链)。
+   */
+  onFollowupContinued?(listener: (payload: FollowupContinuedEvent) => void): () => void
 }
 
 export interface AgentDroveApi extends PushEvents {
@@ -344,7 +417,7 @@ export interface AgentDroveApi extends PushEvents {
   tasksContinue(
     taskId: string,
     prompt: string,
-    options?: { queueIfRunning?: boolean; skills?: string[] },
+    options?: ContinueOptions,
   ): Promise<TaskRecord | FollowupQueueItem>
   tasksEnqueueFollowup(taskId: string, prompt: string, skills?: string[]): Promise<FollowupQueueItem>
   tasksGetFollowups(taskId: string): Promise<FollowupQueueItem[]>
@@ -355,6 +428,28 @@ export interface AgentDroveApi extends PushEvents {
   tasksMarkFailed(taskId: string, reason?: string): Promise<boolean>
   tasksBatchCancel(taskIds: string[]): Promise<number>
   tasksBatchDelete(taskIds: string[]): Promise<number>
+  // —— P0-2/P0-6 新增通道:可选成员,preload/mock 落地后转必需(渲染层届时去掉可选链) ——
+  /** tasks:move(P0-2):任务移入另一项目工作区;受影响分组 orderIndex 由 core 重算,客户端不传全量数组 */
+  tasksMove?(dto: MoveTaskDto): Promise<void>
+  /** tasks:reorder(P0-2):组内相邻插入重排;beforeTaskId 须与 taskId 同组,null/缺省 = 移到该组末尾 */
+  tasksReorder?(taskId: string, beforeTaskId?: string | null): Promise<void>
+  /** tasks:update-followup(P0-6/D3):编辑排队消息文案;返回归一化后的队列项,目标不存在时抛错 */
+  tasksUpdateFollowup?(
+    taskId: string,
+    followupId: string,
+    prompt: string,
+  ): Promise<FollowupQueueItem>
+  /** tasks:reorder-followup(P0-6/D3):队列内移动;beforeFollowupId 须同队列,null/缺省 = 移到队尾 */
+  tasksReorderFollowup?(
+    taskId: string,
+    followupId: string,
+    beforeFollowupId?: string | null,
+  ): Promise<void>
+  /**
+   * tasks:migrate-followups(P0-6 复审):把 from 任务遗留的排队项整体迁移到 to 任务继续自动接续,
+   * 返回迁移条数。打断当前轮并立即发送后,被打断的父任务已终态,遗留项需迁移才能接续。
+   */
+  tasksMigrateFollowups?(fromTaskId: string, toTaskId: string): Promise<number>
   // health:check
   healthCheck(agentId: string, options?: { bypassCache?: boolean }): Promise<HealthReport>
   // launch:app

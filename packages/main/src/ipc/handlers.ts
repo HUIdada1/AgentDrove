@@ -14,8 +14,10 @@ import {
 } from 'node:fs'
 import type {
   AgentView,
+  ContinueOptions,
   EventsPageDto,
   MergeResult,
+  MoveTaskDto,
   Project,
   SubmitTaskDto,
   TaskFilterDto,
@@ -36,6 +38,13 @@ import { tailLogs } from '../logger.js'
 
 /** 事件单页最大条数:防止渲染层传超大 limit 一次性压垮 IPC */
 const EVENTS_PAGE_MAX_LIMIT = 1000
+
+/**
+ * 思考档位能力(P0-4):按驱动判定的最小实现——core 的 AgentCapabilities 尚无 reasoningEffort 字段,
+ * 正式落地后改为透传 profile.capabilities。zcode 走 reasoningLevel、codex 走 model_reasoning_effort;
+ * qoder/trae 置空(缺省),渲染层据此隐藏"思考"下拉,不做假控件。
+ */
+const REASONING_EFFORT_CAPABLE = new Set(['zcode', 'codex'])
 
 function computeAgentQuotaAndUsage(
   ctx: AppContext,
@@ -145,6 +154,9 @@ export function registerIpcHandlers(ctx: AppContext): void {
   // 按调用取当天(本地时区):跨零点后注册时缓存的旧日期会让今日用量归零
   const today = (): string => localDayOf(Date.now())
 
+  // 追问队列自动接续推送(P0-6/D2):父任务完成后排队消息落地为新任务,转发渲染层切选中并提示
+  ctx.orchestrator.onFollowupContinued((payload) => ctx.notify('followup:continued', payload))
+
   // ---- agents ----
   // 列表组装口径只维护一份:agents:list 与 agents:rescan 共用
   const buildAgentViews = async (): Promise<AgentView[]> => {
@@ -168,7 +180,10 @@ export function registerIpcHandlers(ctx: AppContext): void {
         logoPath: profile.logoPath,
         models: ctx.registry.modelPresets(profile.id),
         defaultModel: profile.defaultModel,
-        capabilities: profile.capabilities,
+        capabilities: {
+          ...profile.capabilities,
+          reasoningEffort: REASONING_EFFORT_CAPABLE.has(profile.driver),
+        },
         plan: profile.plan,
         enabled: profile.enabled,
         health: healths[index],
@@ -239,9 +254,12 @@ export function registerIpcHandlers(ctx: AppContext): void {
   ipcMain.handle('dialog:pick-directory', async (): Promise<string | null> => pickDirectory(ctx))
 
   // ---- tasks ----
-  ipcMain.handle('tasks:list', (_e, filter?: TaskFilterDto): TaskRecord[] => {
+  ipcMain.handle('tasks:list', (_e, filter?: TaskFilterDto) => {
     // 以仓库为事实源:任务删除/保留期清理能立刻从列表消失(orchestrator 存活表不感知删除)
     const tasks = ctx.store.allTasks().filter((task) => matchesFilter(task, filter))
+    // 全局序维持 createdAt 倒序(P0-2 复审):compareTaskOrder 是组内良构序,orderIndex 是组内
+    // 连续值——若在此全局应用,任一组拖过一次后其余未排序组的任务会在"全部"视图整体后置,
+    // 未手动排序的组将失去创建时间倒序。手动序由渲染层在分组子序列上应用(TaskList.visible)。
     return tasks.sort((a, b) => b.createdAt - a.createdAt)
   })
 
@@ -293,12 +311,7 @@ export function registerIpcHandlers(ctx: AppContext): void {
 
   ipcMain.handle(
     'tasks:continue',
-    (
-      _e,
-      taskId: string,
-      prompt: string,
-      options?: { queueIfRunning?: boolean; skills?: string[] },
-    ) => {
+    (_e, taskId: string, prompt: string, options?: ContinueOptions) => {
       return ctx.orchestrator.continueConversation(taskId, prompt, options)
     },
   )
@@ -320,6 +333,50 @@ export function registerIpcHandlers(ctx: AppContext): void {
 
   ipcMain.handle('tasks:clear-followups', (_e, taskId: string) => {
     ctx.orchestrator.clearFollowups(taskId)
+  })
+
+  // 编辑排队消息文案(P0-6/D3):目标不存在时由编排层抛错回传渲染层
+  ipcMain.handle(
+    'tasks:update-followup',
+    (_e, taskId: string, followupId: string, prompt: string) => {
+      return ctx.orchestrator.updateFollowup(taskId, followupId, prompt)
+    },
+  )
+
+  // 队列内移动(P0-6/D3):beforeFollowupId 须同队列,null/缺省 = 移到队尾
+  ipcMain.handle(
+    'tasks:reorder-followup',
+    (_e, taskId: string, followupId: string, beforeFollowupId?: string | null) => {
+      ctx.orchestrator.reorderFollowup(taskId, followupId, beforeFollowupId ?? null)
+    },
+  )
+
+  // 队列整体迁移(P0-6 复审):打断发送拿到新任务后,遗留排队项搬到新任务继续自动接续
+  ipcMain.handle('tasks:migrate-followups', (_e, fromTaskId: string, toTaskId: string) => {
+    return ctx.orchestrator.migrateFollowups(fromTaskId, toTaskId)
+  })
+
+  // 卡片归属变更(P0-2):移入另一项目工作区;受影响分组 orderIndex 由仓库重算,客户端不传全量数组
+  ipcMain.handle('tasks:move', (_e, dto: MoveTaskDto) => {
+    if (!ctx.store.allProjects().some((p) => p.id === dto.projectId)) {
+      throw new Error('目标工作区不存在')
+    }
+    if (!ctx.store.moveTask(dto.taskId, dto.projectId)) {
+      throw new Error(`unknown task: ${dto.taskId}`)
+    }
+    // live 表同步归属:否则后续状态迁移/usage 落库经 putTask 会把旧 projectId 回写,
+    // 排序位保住了而归属被静默回滚(P0-2 复审)
+    ctx.orchestrator.syncTaskProject(dto.taskId, dto.projectId)
+    // 排序/归属不产生任务事件,经 tasks:updated 让各窗口重拉列表
+    ctx.notify('tasks:updated')
+  })
+
+  // 组内相邻插入排序(P0-2):beforeTaskId 须同组,null/缺省 = 移到组尾
+  ipcMain.handle('tasks:reorder', (_e, taskId: string, beforeTaskId?: string | null) => {
+    if (!ctx.store.reorderTask(taskId, beforeTaskId ?? null)) {
+      throw new Error(`unknown task: ${taskId}`)
+    }
+    ctx.notify('tasks:updated')
   })
 
   ipcMain.handle('tasks:rename', (_e, taskId: string, title: string) => {
@@ -555,6 +612,7 @@ function submitDedupKey(dto: SubmitTaskDto): string {
     dto.workspaceSource ?? '',
     dto.mode ?? '',
     dto.modelId ?? '',
+    dto.reasoningEffort ?? '',
     dto.sessionId ?? '',
     attachments,
   ].join('\u0000')

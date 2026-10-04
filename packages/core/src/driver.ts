@@ -2,6 +2,7 @@ import type {
   AgentProfile,
   ModelId,
   ModelPreset,
+  ReasoningEffort,
   TaskEvent,
   TaskInput,
 } from './types.js'
@@ -10,6 +11,8 @@ export interface DriverRunOptions {
   agent: AgentProfile
   modelId: ModelId
   input: TaskInput
+  /** 请求的思考档位(P0-4);驱动自行映射为 CLI 实际参数,不支持时回落并告警 */
+  reasoningEffort?: ReasoningEffort
   /** 事件经编排器包装(seq/时间戳)后落 sink,driver 只管发 */
   emit(event: TaskEvent): void
   signal: AbortSignal

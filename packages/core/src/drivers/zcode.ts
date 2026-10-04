@@ -8,7 +8,7 @@ import type {
   RunResult,
 } from '../driver.js'
 import { DEFAULT_RUN_TIMEOUT_MS } from '../driver.js'
-import type { AgentProfile, ModelId, ModelPreset, TaskInput } from '../types.js'
+import type { AgentProfile, ModelId, ModelPreset, ReasoningEffort, TaskInput } from '../types.js'
 import { MODEL_CLIENT_FOLLOW } from '../types.js'
 import type { Clock, FileSystem, ProcessRunner } from '../ports.js'
 import { systemClock } from '../ports.js'
@@ -194,15 +194,81 @@ export function parseZcodePersonalModels(configJson: string): ParsedZcodeModel[]
 }
 
 /**
+ * 从 personal 与内置配置中解析目标模型的合法 reasoningLevel 可选值(P0-4):
+ * 1. personal modelConfigRules 中该模型的显式 optionSpecs 优先;
+ * 2. 否则按内置规则的 modelMatch 正则匹配(CLI 运行时对 personal 模型同样按此合并 optionSpecs)。
+ * 取不到返回 undefined —— 调用侧不应猜测档位,应不带 options 回落客户端实际模型。
+ */
+export function resolveZcodeReasoningLevels(
+  baseConfigJson: string,
+  targetCompoundModelId: string,
+  builtinConfigJson?: string,
+): string[] | undefined {
+  const slashIdx = targetCompoundModelId.indexOf('/')
+  if (slashIdx === -1) return undefined
+  const providerId = targetCompoundModelId.slice(0, slashIdx)
+  const modelId = targetCompoundModelId.slice(slashIdx + 1)
+
+  try {
+    const data = JSON.parse(baseConfigJson)
+    const rules: any[] = data?.config?.modelConfigRules?.providerModelRules ?? []
+    const direct = rules.find((r) => r.providerId === providerId && r.modelId === modelId)
+    const values = direct?.config?.optionSpecs?.reasoningLevel?.values
+    if (Array.isArray(values) && values.length > 0) return values
+  } catch {
+    // personal 配置非法时继续尝试内置规则
+  }
+
+  if (builtinConfigJson) {
+    try {
+      const builtinData = JSON.parse(builtinConfigJson)
+      const builtinRules: any[] = builtinData?.config?.modelConfigRules?.modelRules ?? []
+      for (const br of builtinRules) {
+        if (br.modelMatch && new RegExp(`^${br.modelMatch}$`, 'i').test(modelId)) {
+          const brLevels = br.config?.optionSpecs?.reasoningLevel?.values
+          if (Array.isArray(brLevels) && brLevels.length > 0) return brLevels
+        }
+      }
+    } catch {
+      // 忽略内置配置解析异常
+    }
+  }
+  return undefined
+}
+
+/**
+ * 档位取位(P0-4):ReasoningEffort 通用四档映射到 CLI 合法 values 的首/中/末;
+ * effort 缺省取最高档(values.at(-1),与 CLI registry-fallback 语义一致)。
+ * values 为空返回 undefined,由调用侧回落"不带 options"并告警。
+ */
+export function pickReasoningLevel(
+  values: string[] | undefined,
+  effort?: ReasoningEffort,
+): string | undefined {
+  if (!values || values.length === 0) return undefined
+  if (effort === undefined) return values.at(-1)
+  const position: Record<ReasoningEffort, number> = {
+    minimal: 0,
+    low: 1 / 3,
+    medium: 2 / 3,
+    high: 1,
+  }
+  const idx = Math.round(position[effort] * (values.length - 1))
+  return values[idx]
+}
+
+/**
  * 构造任务级临时 provider 配置(双保险注入):
- * 1. 注入 config.defaultModelSelection: { providerId, modelId, options: { reasoningLevel } };
+ * 1. 注入 config.defaultModelSelection: { providerId, modelId, options?: { reasoningLevel } };
+ *    reasoningLevel 由调用侧经 resolveZcodeReasoningLevels + pickReasoningLevel 解析后传入,
+ *    取不到合法值时不带 options(CLI 校验不过会回落实际模型),绝不猜写非法档位;
  * 2. 双保险 fallback:将指定 providerId 置顶到 providerOrder;
  * 3. 双保险 fallback:将指定 modelId 置顶到该 provider 的 modelOrder 与 personalModelIds。
  */
 export function buildTaskZcodeProviderConfig(
   baseConfigJson: string,
   targetCompoundModelId: string,
-  builtinConfigJson?: string,
+  reasoningLevel?: string,
 ): string {
   const slashIdx = targetCompoundModelId.indexOf('/')
   if (slashIdx === -1) return baseConfigJson
@@ -217,39 +283,10 @@ export function buildTaskZcodeProviderConfig(
   }
   if (!data.config) data.config = {}
 
-  let reasoningLevel: string | undefined
-  const providerModelRules: any[] = data.config.modelConfigRules?.providerModelRules ?? []
-  const matchedRule = providerModelRules.find(
-    (r) => r.providerId === targetProviderId && r.modelId === targetModel,
-  )
-  const directLevels = matchedRule?.config?.optionSpecs?.reasoningLevel?.values
-  if (Array.isArray(directLevels) && directLevels.length > 0) {
-    reasoningLevel = directLevels.at(-1)
-  }
-
-  if (!reasoningLevel && builtinConfigJson) {
-    try {
-      const builtinData = JSON.parse(builtinConfigJson)
-      const builtinRules: any[] = builtinData?.config?.modelConfigRules?.modelRules ?? []
-      for (const br of builtinRules) {
-        if (br.modelMatch && new RegExp(`^${br.modelMatch}$`, 'i').test(targetModel)) {
-          const brLevels = br.config?.optionSpecs?.reasoningLevel?.values
-          if (Array.isArray(brLevels) && brLevels.length > 0) {
-            reasoningLevel = brLevels.at(-1)
-          }
-        }
-      }
-    } catch {}
-  }
-
-  if (!reasoningLevel) {
-    reasoningLevel = 'max'
-  }
-
   data.config.defaultModelSelection = {
     providerId: targetProviderId,
     modelId: targetModel,
-    options: { reasoningLevel },
+    ...(reasoningLevel !== undefined ? { options: { reasoningLevel } } : {}),
   }
 
   if (Array.isArray(data.config.providerOrder)) {
@@ -378,10 +415,34 @@ export class ZcodeDriver implements AgentDriver {
               // 忽略内置配置读取异常
             }
           }
-          const modifiedConfig = buildTaskZcodeProviderConfig(
+          // 档位解析(P0-4):按请求 effort 从合法 values 取位,取不到不带 options 回落客户端默认
+          const reasoningLevels = resolveZcodeReasoningLevels(
             rawPersonal,
             options.modelId,
             rawBuiltin,
+          )
+          const reasoningLevel = pickReasoningLevel(reasoningLevels, options.reasoningEffort)
+          if (!reasoningLevel) {
+            emit({
+              kind: 'warning',
+              text: `未解析到 ${options.modelId} 的合法 reasoningLevel${options.reasoningEffort ? `(请求档位 ${options.reasoningEffort})` : ''},本次不带档位参数,思考强度跟随客户端默认`,
+            })
+          } else {
+            // 实际档位入流(P0-4 复审):取位映射后实际下发值可能与请求四档不同
+            // (如三档 values ["low","high","max"] 请求 low 实际下发 high),详情侧取此值为准
+            emit({
+              kind: 'info',
+              text:
+                reasoningLevel === options.reasoningEffort
+                  ? `思考档位下发:${reasoningLevel}`
+                  : `思考档位下发:${reasoningLevel}(请求 ${options.reasoningEffort ?? '默认'})`,
+              reasoningLevel,
+            })
+          }
+          const modifiedConfig = buildTaskZcodeProviderConfig(
+            rawPersonal,
+            options.modelId,
+            reasoningLevel,
           )
           const tmpName = `zcode-provider-${Date.now()}-${Math.random().toString(36).slice(2, 8)}.json`
           const tmpPath = join(tmpdir(), tmpName)

@@ -4,6 +4,7 @@ import type {
   AppConfig,
   FollowupQueueItem,
   Project,
+  ReasoningEffort,
   StoredEvent,
   TaskRecord,
   UpdateStatus,
@@ -49,7 +50,20 @@ function closeDetailModal(): void {
   detailModalOpen.value = false
 }
 
+/**
+ * 详情展开前的空间守卫(P0-7):由 App.vue 注册(它持有 railW/taskW/detailW 列宽状态),
+ * 返回 false = 展开后会话流将低于 360px 且阶梯降级(收侧栏/压任务列)仍不足,
+ * 守卫内部已 toast 说明,此处保持收起。
+ */
+let expandGuard: (() => boolean) | null = null
+
+export function registerExpandGuard(guard: (() => boolean) | null): void {
+  expandGuard = guard
+}
+
 function toggleDetailCollapsed(): void {
+  // 收起不受限;展开方向先过空间守卫,不通过(已提示)则保持收起
+  if (detailCollapsed.value && expandGuard && !expandGuard()) return
   detailCollapsed.value = !detailCollapsed.value
 }
 
@@ -57,6 +71,15 @@ const selectedTaskId = ref<string | null>(null)
 const selection = ref<Set<string>>(new Set())
 const filter = ref({ search: '', agentId: '', state: '' })
 const liveEvents = shallowRef(new Map<string, StoredEvent[]>())
+
+/**
+ * 当前对话上下文的客户端(P0-1):侧栏点击 = 进入与该 Agent 的对话(发布框同步、
+ * 新建对话沿用);再点一次取消绑定回 ''。与任务筛选 filter.agentId 解耦,互不影响。
+ */
+const agentContext = ref('')
+
+/** 正在拖拽的任务卡 id(P0-2):dragstart 写入、dragend/drop 清除;AgentRail 据此接住 drop */
+const draggingTaskId = ref<string | null>(null)
 
 /** 当前激活的技能清单(默认启用终端、代码编辑、代码检索、网络搜索) */
 const activeSkills = ref<string[]>(['terminal', 'file_editor', 'code_search', 'web_search'])
@@ -111,6 +134,72 @@ async function renameTask(taskId: string, title: string): Promise<void> {
 function newChat(): void {
   selectedTaskId.value = null
   activeFollowups.value = []
+  // P0-1:新建对话保持 agentContext 不清除,发布框继续绑定当前客户端
+}
+
+/** 轻提示(P0-6/P0-7 配套最小实现):单条文本,2.6s 自动消退,App.vue 底部渲染 */
+const toast = ref('')
+let toastTimer: ReturnType<typeof setTimeout> | null = null
+
+function showToast(msg: string): void {
+  toast.value = msg
+  if (toastTimer) clearTimeout(toastTimer)
+  toastTimer = setTimeout(() => {
+    toast.value = ''
+  }, 2600)
+}
+
+/**
+ * 任务卡归属变更(P0-2):乐观改本地 projectId(筛选视图即时反映),
+ * 落库走 tasks:move 通道;core 重算受影响分组 orderIndex,客户端不传全量数组。
+ */
+async function moveTask(taskId: string, projectId: string): Promise<void> {
+  const task = tasks.value.find((t) => t.id === taskId)
+  if (!task || task.projectId === projectId) return
+  const prev = task.projectId
+  task.projectId = projectId
+  if (!window.api?.tasksMove) {
+    task.projectId = prev
+    showToast('任务移动通道未就绪,请升级主进程')
+    return
+  }
+  try {
+    await window.api.tasksMove({ taskId, projectId })
+  } catch (error) {
+    task.projectId = prev
+    showToast(`移动失败:${error instanceof Error ? error.message : String(error)}`)
+  }
+  await refreshTasks()
+}
+
+/**
+ * 组内相邻插入排序(P0-2):乐观重排本地 tasks 数组,失败(或通道未就绪)重拉还原;
+ * beforeTaskId=null = 移到组尾,与 tasks:reorder 契约语义一致。
+ */
+async function reorderTask(taskId: string, beforeTaskId: string | null): Promise<void> {
+  const list = tasks.value
+  const from = list.findIndex((t) => t.id === taskId)
+  if (from < 0) return
+  const [task] = list.splice(from, 1)
+  let to: number
+  if (beforeTaskId) {
+    const anchor = list.findIndex((t) => t.id === beforeTaskId)
+    to = anchor < 0 ? list.length : anchor
+  } else {
+    to = list.length
+  }
+  list.splice(to, 0, task!)
+  if (!window.api?.tasksReorder) {
+    showToast('任务排序通道未就绪,请升级主进程')
+    await refreshTasks()
+    return
+  }
+  try {
+    await window.api.tasksReorder(taskId, beforeTaskId)
+  } catch (error) {
+    showToast(`排序失败,已还原:${error instanceof Error ? error.message : String(error)}`)
+  }
+  await refreshTasks()
 }
 
 async function stopTask(taskId: string): Promise<void> {
@@ -173,6 +262,10 @@ export function useAppStore() {
     selection,
     filter,
     liveEvents,
+    agentContext,
+    draggingTaskId,
+    toast,
+    showToast,
     activeSkills,
     activeFollowups,
     toggleSkill,
@@ -183,6 +276,8 @@ export function useAppStore() {
     renameTask,
     newChat,
     stopTask,
+    moveTask,
+    reorderTask,
     selectedProjectId,
     selectedProject,
     refreshAgents,
@@ -285,7 +380,36 @@ export async function refreshWorkspaces(): Promise<void> {
   workspaces.value = list
 }
 
+/** 渠道/模型/思考档位三元组记忆(P0-5):按客户端落 localStorage,重启自动恢复 */
+export interface ModelPref {
+  channelId: string
+  modelId: string
+  reasoningEffort?: ReasoningEffort
+}
+
+export function readModelPref(agentId: string): ModelPref | null {
+  try {
+    const raw = localStorage.getItem(`agentdrove.modelPref.${agentId}`)
+    if (!raw) return null
+    const parsed = JSON.parse(raw) as Partial<ModelPref>
+    if (typeof parsed.channelId !== 'string' || typeof parsed.modelId !== 'string') return null
+    return parsed as ModelPref
+  } catch {
+    return null
+  }
+}
+
+export function writeModelPref(agentId: string, pref: ModelPref): void {
+  try {
+    localStorage.setItem(`agentdrove.modelPref.${agentId}`, JSON.stringify(pref))
+  } catch {
+    // 存储不可写(隐私模式/配额满)时静默放弃:记忆是增强项,不阻塞派发
+  }
+}
+
 let bridgeInstalled = false
+/** P0-8:任务高频事件下 agents/usage 重拉的 debounce 定时器 */
+let agentsRefreshTimer: ReturnType<typeof setTimeout> | null = null
 
 /** 主进程事件桥 + 首轮数据拉取,应用启动时装一次;组件卸载不拆(生命周期与窗口一致) */
 export function installAppBridge(): void {
@@ -334,6 +458,16 @@ export function installAppBridge(): void {
   window.api.onTasksUpdated(() => {
     pull(refreshTasks, 'tasks')
     pull(refreshWorkspaces, 'workspaces')
+    // P0-8:任务流(派发/完成/取消/失败)后 500ms debounce 重拉 agents+usage,
+    // 侧栏"余 N 次/点数/Token" 1~2s 内跟随;pullEpoch 护栏兜住与手动刷新的竞态
+    if (agentsRefreshTimer) clearTimeout(agentsRefreshTimer)
+    agentsRefreshTimer = setTimeout(() => pull(refreshAgents, 'agents'), 500)
+  })
+  // P0-6 配套:父任务完成后排队消息自动接续为新任务;正看着父任务时跟随切换并轻提示
+  window.api.onFollowupContinued?.((payload) => {
+    if (selectedTaskId.value !== payload.fromTaskId) return
+    selectedTaskId.value = payload.toTaskId
+    showToast('已自动接续到新任务')
   })
   // 启动期客户端探测后台完成/重扫/启停切换:主进程广播后重拉,侧栏从空态自愈
   window.api.onAgentsChanged(() => {

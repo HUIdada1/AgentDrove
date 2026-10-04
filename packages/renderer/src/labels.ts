@@ -1,4 +1,5 @@
 import type { TaskState } from '@agent-drove/core'
+import type { ReasoningEffort } from '@agent-drove/shared'
 
 /**
  * 模型"跟随客户端"哨兵,必须与 core 的 MODEL_CLIENT_FOLLOW 逐字一致。
@@ -31,6 +32,17 @@ export const MODE_OPTIONS: Array<{ value: string; label: string }> = [
 export const STATE_FILTER_OPTIONS: Array<{ value: string; label: string }> = [
   { value: '', label: '全部状态' },
   ...(Object.keys(STATE_TEXT) as TaskState[]).map((value) => ({ value, label: STATE_TEXT[value] })),
+]
+
+/**
+ * 思考档位选项(P0-4):''=默认(不随 DTO 传,跟随客户端),
+ * 低/中/高直传 DTO 通用档位 low/medium/high,由驱动侧映射 CLI 实参。
+ */
+export const REASONING_OPTIONS: Array<{ value: ReasoningEffort | ''; label: string }> = [
+  { value: '', label: '默认' },
+  { value: 'low', label: '低' },
+  { value: 'medium', label: '中' },
+  { value: 'high', label: '高' },
 ]
 
 /**
@@ -81,6 +93,16 @@ export function formatTokens(n?: number): string {
   if (n >= 1_000_000) return `${(n / 1_000_000).toFixed(1)}M`
   if (n >= 1_000) return `${(n / 1_000).toFixed(1)}k`
   return String(n)
+}
+
+/**
+ * 额度数值统一格式(P0-8):≥1000 转 x.xk,<1000 最多 1 位小数,
+ * 消除同一列 "1.2k" 与 "997.53" 两种格式并存;Token 侧沿用 formatTokens 不变。
+ */
+export function formatQuotaNumber(n?: number): string {
+  if (n === undefined || n === null || !Number.isFinite(n)) return '0'
+  if (Math.abs(n) >= 1000) return `${(n / 1000).toFixed(1)}k`
+  return String(Math.round(n * 10) / 10)
 }
 
 export interface ChannelGroup {

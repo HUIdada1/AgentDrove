@@ -6,7 +6,7 @@ import GlassMeter from '../ui/GlassMeter.vue'
 import GlassInput from '../ui/GlassInput.vue'
 import GlassModal from '../ui/GlassModal.vue'
 import Logo from './Logo.vue'
-import { formatTokens } from '../labels'
+import { formatQuotaNumber, formatTokens } from '../labels'
 import type { AgentView, Project } from '@agent-drove/shared'
 
 const store = useAppStore()
@@ -17,6 +17,9 @@ const DAILY_PROJECT_ID = 'daily'
 const notice = ref('')
 const renameTarget = ref<Project | null>(null)
 const renameText = ref('')
+
+/** 任务卡拖到工作区项上的悬停高亮(P0-2) */
+const dragOverProjectId = ref('')
 
 /** 今日用量按 agent 建索引:模板里每个客户端要读两次,避免每次渲染全表扫描 */
 const usageByAgent = computed(() => {
@@ -41,13 +44,40 @@ async function run<T>(action: () => Promise<T>, prefix: string): Promise<T | und
 }
 
 function pick(agent: AgentView): void {
-  // 切换语义:选中同一客户端再点一次回到全部
-  store.filter.value.agentId = store.filter.value.agentId === agent.id ? '' : agent.id
+  // P0-1:点击 = 进入与该客户端的对话上下文(发布框同步、新建对话沿用),
+  // 再点一次取消绑定回"全部";任务筛选(filter.agentId)与上下文解耦,由列表头下拉承担
+  store.agentContext.value = store.agentContext.value === agent.id ? '' : agent.id
 }
 
 /** 选中同一工作区再点一次回到全部(null) */
 function pickProject(project: Project): void {
   store.selectedProjectId.value = store.selectedProjectId.value === project.id ? null : project.id
+}
+
+// ---- 任务卡拖入工作区(P0-2) ----
+function onWsDragOver(project: Project, event: DragEvent): void {
+  if (!store.draggingTaskId.value) return
+  event.preventDefault()
+  if (event.dataTransfer) event.dataTransfer.dropEffect = 'move'
+  dragOverProjectId.value = project.id
+}
+
+function onWsDragLeave(project: Project, event: DragEvent): void {
+  // 相关目标仍在本项内(子元素间移动)时保持高亮,避免闪烁
+  const to = event.relatedTarget as Node | null
+  if (to && (event.currentTarget as HTMLElement).contains(to)) return
+  if (dragOverProjectId.value === project.id) dragOverProjectId.value = ''
+}
+
+async function onWsDrop(project: Project, event: DragEvent): Promise<void> {
+  event.preventDefault()
+  if (dragOverProjectId.value === project.id) dragOverProjectId.value = ''
+  const taskId = store.draggingTaskId.value
+  if (!taskId) return
+  store.draggingTaskId.value = null
+  const task = store.tasks.value.find((t) => t.id === taskId)
+  if (!task || task.projectId === project.id) return
+  await store.moveTask(taskId, project.id)
 }
 
 async function addProject(): Promise<void> {
@@ -162,7 +192,8 @@ function hasRunningTask(agentId: string): boolean {
 function quotaRemainingText(agent: AgentView): string {
   if (agent.plan.quotaKind === 'credits') {
     if (agent.remainingCredits !== undefined) {
-      return `余 ${agent.remainingCredits >= 1000 ? (agent.remainingCredits / 1000).toFixed(1) + 'k' : agent.remainingCredits} 点`
+      // P0-8:数值格式收口 formatQuotaNumber,消除 "1.2k" 与 "997.53" 并存
+      return `余 ${formatQuotaNumber(agent.remainingCredits)} 点`
     }
   } else {
     if (agent.remainingTokens !== undefined) {
@@ -190,10 +221,10 @@ function agentDetailTitle(agent: AgentView): string {
   }
   if (isCredits) {
     if (agent.remainingCredits !== undefined) {
-      parts.push(`剩余点数: ${agent.remainingCredits} 点`)
+      parts.push(`剩余点数: ${formatQuotaNumber(agent.remainingCredits)} 点`)
     }
     if (agent.usedCreditsToday !== undefined) {
-      parts.push(`今日消耗: ${agent.usedCreditsToday} 点`)
+      parts.push(`今日消耗: ${formatQuotaNumber(agent.usedCreditsToday)} 点`)
     }
   } else {
     if (agent.remainingTokens !== undefined) {
@@ -253,11 +284,17 @@ function agentDetailTitle(agent: AgentView): string {
           class="ws spot"
           role="button"
           tabindex="0"
-          :class="{ picked: store.selectedProjectId.value === project.id }"
+          :class="{
+            picked: store.selectedProjectId.value === project.id,
+            'drop-target': dragOverProjectId === project.id,
+          }"
           :title="wsTitle(project)"
           @click="pickProject(project)"
           @keydown.enter="pickProject(project)"
           @keydown.space.prevent="pickProject(project)"
+          @dragover="onWsDragOver(project, $event)"
+          @dragleave="onWsDragLeave(project, $event)"
+          @drop="onWsDrop(project, $event)"
         >
           <span class="glyph ws" aria-hidden="true">{{ wsGlyph(project) }}</span>
           <span v-if="!store.railCollapsed.value" class="meta">
@@ -306,7 +343,7 @@ function agentDetailTitle(agent: AgentView): string {
           class="agent spot"
           role="button"
           tabindex="0"
-          :class="{ picked: store.filter.value.agentId === agent.id }"
+          :class="{ picked: store.agentContext.value === agent.id }"
           :title="agentDetailTitle(agent)"
           @click="pick(agent)"
           @keydown.enter="pick(agent)"
@@ -386,7 +423,8 @@ function agentDetailTitle(agent: AgentView): string {
 
 <style scoped>
 .rail {
-  width: 236px;
+  /* P0-7:宽度受控于 App.vue 的 railW(--rail-w 下传);折叠态 specificity 更高仍走 64px */
+  width: var(--rail-w, 236px);
   flex: none;
   display: flex;
   flex-direction: column;
@@ -555,6 +593,13 @@ function agentDetailTitle(agent: AgentView): string {
   border-color: var(--accent-line);
 }
 
+/* 任务卡拖入时的放置高亮(P0-2) */
+.ws.drop-target {
+  background: var(--accent-dim);
+  border-color: var(--accent);
+  box-shadow: 0 0 0 2px var(--accent-dim);
+}
+
 .rail.collapsed .ws,
 .rail.collapsed .agent {
   justify-content: center;
@@ -656,6 +701,7 @@ function agentDetailTitle(agent: AgentView): string {
   display: flex;
   align-items: center;
   justify-content: space-between;
+  flex-wrap: wrap;
   font-size: 11px;
   gap: 4px;
 }
@@ -715,5 +761,12 @@ function agentDetailTitle(agent: AgentView): string {
   font-size: 11px;
   color: var(--warn);
   text-align: center;
+}
+</style>
+
+<style>
+/* 拖动任一分隔条时(Resizer 挂 body.resizing)关闭侧栏宽度过渡,消除拖拽跟随迟滞 */
+body.resizing .rail {
+  transition: none;
 }
 </style>

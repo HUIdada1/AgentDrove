@@ -25,6 +25,8 @@ export {
   resolveZcodeCliPaths,
   resolveZcodePersonalConfigPath,
   parseZcodePersonalModels,
+  resolveZcodeReasoningLevels,
+  pickReasoningLevel,
   buildTaskZcodeProviderConfig,
   type ZcodeLocator,
   type ParsedZcodeModel,

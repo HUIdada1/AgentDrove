@@ -88,6 +88,28 @@ describe('CodexDriver 参数装配', () => {
     )
     expect(warnings.some((t) => t.includes('maxTurns'))).toBe(true)
   })
+
+  it('思考档位(P0-4):reasoningEffort 直通映射 --config model_reasoning_effort=<effort>,缺省不带', () => {
+    const { driver } = makeDriver()
+    const effortOf = (effort?: 'minimal' | 'low' | 'medium' | 'high'): string[] | undefined => {
+      const args = driver.buildArgs(baseInput(), 'gpt-5.1-codex', codexProfile, undefined, effort)
+      if (!args.includes('--config')) return undefined
+      return args.slice(args.indexOf('--config'), args.indexOf('--config') + 2)
+    }
+    expect(effortOf()).toBeUndefined()
+    expect(effortOf('low')).toEqual(['--config', 'model_reasoning_effort=low'])
+    expect(effortOf('high')).toEqual(['--config', 'model_reasoning_effort=high'])
+    expect(effortOf('minimal')).toEqual(['--config', 'model_reasoning_effort=minimal'])
+    // prompt 恒为最后一个位置参数,--config 不改变收尾形态
+    const withEffort = driver.buildArgs(
+      baseInput(),
+      'gpt-5.1-codex',
+      codexProfile,
+      undefined,
+      'medium',
+    )
+    expect(withEffort[withEffort.length - 1]).toBe('写个快排')
+  })
 })
 
 describe('CodexDriver 执行路径', () => {

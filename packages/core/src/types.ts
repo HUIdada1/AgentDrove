@@ -76,6 +76,13 @@ export type TaskState =
 /** zcode --mode 档位;无头缺省是 yolo,派发必须显式传,绝不依赖客户端默认值 */
 export type TaskMode = 'build' | 'edit' | 'plan' | 'yolo'
 
+/**
+ * 思考档位(P0-4):DTO 通用四档,驱动侧各自映射到 CLI 实际参数
+ * (zcode 按 optionSpecs.reasoningLevel.values 取位,codex 映射 model_reasoning_effort);
+ * 任务记录只存请求档位,实际生效档位以事件流 warning/info 为准。
+ */
+export type ReasoningEffort = 'minimal' | 'low' | 'medium' | 'high'
+
 export type TaskOrigin =
   | 'panel' // 主面板发布框
   | 'hotkey' // 全局热键迷你条
@@ -132,6 +139,11 @@ export type TaskEvent =
     }
   | { kind: 'artifact'; path: string; change: 'added' | 'modified' | 'deleted' }
   | { kind: 'warning'; text: string }
+  /**
+   * 系统说明事件(P0-4):记录驱动侧实际生效的运行参数(如思考档位),
+   * 详情侧以事件流实际值为准展示,避免 UI 撒谎;reasoningLevel 供结构化取值。
+   */
+  | { kind: 'info'; text: string; reasoningLevel?: string }
 
 export type TaskEventKind = TaskEvent['kind']
 
@@ -161,6 +173,33 @@ export interface FollowupQueueItem {
   prompt: string
   skills?: string[]
   createdAt: number
+  /** 排队时随项记录的本轮覆盖参数(P0-6);缺省沿用父任务 */
+  modelId?: ModelId
+  mode?: TaskMode
+  toolPolicy?: ToolPolicy
+  reasoningEffort?: ReasoningEffort
+}
+
+/**
+ * 续聊本轮参数(P0-6):缺省字段沿用父任务,完全向后兼容;
+ * 排队时(queueIfRunning)整组覆盖随 FollowupQueueItem 落内存队列。
+ */
+export interface ContinueOptions {
+  queueIfRunning?: boolean
+  skills?: string[]
+  /** 本轮覆盖:模型;缺省沿用 parent.modelId */
+  modelId?: ModelId
+  mode?: TaskMode
+  toolPolicy?: ToolPolicy
+  reasoningEffort?: ReasoningEffort
+}
+
+/** 追问队列自动接续推送(P0-6):父任务完成后排队消息落地为新任务 */
+export interface FollowupContinuedEvent {
+  /** 接续来源(父任务) */
+  fromTaskId: string
+  /** 接续落地的新任务 */
+  toTaskId: string
 }
 
 export interface TaskRecord {
@@ -183,6 +222,8 @@ export interface TaskRecord {
   skills?: string[]
   toolPolicy?: ToolPolicy
   mode: TaskMode
+  /** 请求的思考档位(P0-4);实际生效档位以事件流 warning/info 为准,避免 UI 撒谎 */
+  reasoningEffort?: ReasoningEffort
   origin: TaskOrigin
   createdAt: number
   startedAt?: number
