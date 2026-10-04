@@ -1,5 +1,10 @@
 # Changelog
 
+## v0.4.5 (2026-10-04)
+
+4579a82 feat(core+main+renderer): zcode 内置 Provider 配置自动定位注入 + 任务详情弹窗化与详情栏锁起
+ac95175 chore(release): v0.4.4 版本同步与 CHANGELOG
+
 ## v0.4.4 (2026-10-03)
 
 21f87d9 fix(core+main+renderer): 双板块深度审查修复——带附件派发必炸/探活并行/CSV转义等16项
