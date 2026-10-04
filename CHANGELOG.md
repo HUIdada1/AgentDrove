@@ -1,5 +1,10 @@
 # Changelog
 
+## v0.4.6 (2026-10-04)
+
+9e7253c feat(core+main+renderer): 内置技能选择与追问排队队列 + 斜杠命令/引导中心
+9ea077b chore(release): v0.4.5 版本同步与 CHANGELOG
+
 ## v0.4.5 (2026-10-04)
 
 4579a82 feat(core+main+renderer): zcode 内置 Provider 配置自动定位注入 + 任务详情弹窗化与详情栏锁起
