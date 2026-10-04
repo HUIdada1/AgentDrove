@@ -1,7 +1,11 @@
 import { normalize } from 'node:path'
 import { describe, expect, it } from 'vitest'
 import iconv from 'iconv-lite'
-import { ZcodeDriver, type ZcodeLocator } from '../src/drivers/zcode.js'
+import {
+  ZcodeDriver,
+  resolveZcodeBuiltinConfig,
+  type ZcodeLocator,
+} from '../src/drivers/zcode.js'
 import { extractSessionId, LineDecoder, satisfiesRange } from '../src/index.js'
 import type { TaskInput } from '../src/index.js'
 import { FakeFileSystem, ScriptedRunner, zcodeProfile } from './helpers.js'
@@ -285,3 +289,97 @@ describe('文本与版本工具', () => {
     expect(satisfiesRange('1.2.3', '=1.2.3')).toBe(true)
   })
 })
+
+describe('ZCode Built-in Provider Config 自动定位与环境变量注入', () => {
+  const cliPath = 'E:/ZCode/resources/glm/zcode.cjs'
+
+  it('显式路径存在时优先采用', () => {
+    const fsx = new FakeFileSystem()
+    const custom = 'D:/custom/zcode-builtin.json'
+    fsx.addWritable(custom)
+    expect(resolveZcodeBuiltinConfig(cliPath, fsx, custom)).toBe(custom)
+  })
+
+  it('打包态标准路径:优先匹配 resources/config/provider/zcode-builtin.json', () => {
+    const fsx = new FakeFileSystem()
+    const bundled = 'E:/ZCode/resources/config/provider/zcode-builtin.json'
+    fsx.addWritable(bundled)
+    const resolved = resolveZcodeBuiltinConfig(cliPath, fsx)
+    expect(resolved && normalize(resolved)).toBe(normalize(bundled))
+  })
+
+  it('命中同级 provider/zcode-builtin.json', () => {
+    const fsx = new FakeFileSystem()
+    const sameDir = 'E:/ZCode/resources/glm/provider/zcode-builtin.json'
+    fsx.addWritable(sameDir)
+    const resolved = resolveZcodeBuiltinConfig(cliPath, fsx)
+    expect(resolved && normalize(resolved)).toBe(normalize(sameDir))
+  })
+
+  it('所有路径都不存在时返回 undefined', () => {
+    const fsx = new FakeFileSystem()
+    expect(resolveZcodeBuiltinConfig(cliPath, fsx)).toBeUndefined()
+  })
+
+  it('驱动自动将定位到的配置注入到 spawn 环境变量 ZCODE_BUILTIN_PROVIDER_CONFIG_FILE', async () => {
+    const fsx = new FakeFileSystem()
+    fsx.addWritable('C:/tmp/ws')
+    fsx.addWritable(locator.cliPath)
+    const bundledConfig = 'E:/ZCode/resources/config/provider/zcode-builtin.json'
+    fsx.addWritable(bundledConfig)
+
+    const runner = new ScriptedRunner()
+    runner.enqueue((req, io) => {
+      expect(req.env?.ZCODE_BUILTIN_PROVIDER_CONFIG_FILE && normalize(req.env.ZCODE_BUILTIN_PROVIDER_CONFIG_FILE)).toBe(normalize(bundledConfig))
+      expect(req.env?.ELECTRON_RUN_AS_NODE).toBe('1')
+      io.stdout('ok\n')
+      io.exit(0)
+    })
+
+    const driver = new ZcodeDriver(runner, fsx, {
+      nodeBin: 'node',
+      cliPath: locator.cliPath,
+      nodeEnv: { ELECTRON_RUN_AS_NODE: '1' },
+    })
+
+    await driver.run({
+      agent: zcodeProfile,
+      modelId: 'client-follow',
+      input: baseInput(),
+      emit: () => {},
+      signal: new AbortController().signal,
+    })
+
+    expect(runner.requests).toHaveLength(1)
+  })
+
+  it('若外部已显式指定环境变量则不覆盖', async () => {
+    const fsx = new FakeFileSystem()
+    fsx.addWritable('C:/tmp/ws')
+    fsx.addWritable(locator.cliPath)
+    const existing = 'X:/my-custom/zcode-builtin.json'
+
+    const runner = new ScriptedRunner()
+    runner.enqueue((req, io) => {
+      expect(req.env?.ZCODE_BUILTIN_PROVIDER_CONFIG_FILE).toBe(existing)
+      io.exit(0)
+    })
+
+    const driver = new ZcodeDriver(runner, fsx, {
+      nodeBin: 'node',
+      cliPath: locator.cliPath,
+      nodeEnv: { ZCODE_BUILTIN_PROVIDER_CONFIG_FILE: existing },
+    })
+
+    await driver.run({
+      agent: zcodeProfile,
+      modelId: 'client-follow',
+      input: baseInput(),
+      emit: () => {},
+      signal: new AbortController().signal,
+    })
+
+    expect(runner.requests).toHaveLength(1)
+  })
+})
+

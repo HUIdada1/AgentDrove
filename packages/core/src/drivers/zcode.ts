@@ -1,4 +1,4 @@
-import { join } from 'node:path'
+import { dirname, join } from 'node:path'
 import type {
   AgentDriver,
   DetectedAgent,
@@ -20,6 +20,40 @@ export interface ZcodeLocator {
    * 必须带 ELECTRON_RUN_AS_NODE=1 才按 node 执行,否则会拉起第二个 GUI 实例。
    */
   nodeEnv?: Record<string, string>
+  /**
+   * ZCode 内置 provider 配置文件路径(zcode-builtin.json)。
+   * 若不指定,驱动将基于 cliPath 自动在周边目录定位并注入 ZCODE_BUILTIN_PROVIDER_CONFIG_FILE。
+   */
+  builtinProviderConfigPath?: string
+}
+
+/**
+ * 自动定位 ZCode 内置 provider 配置文件(zcode-builtin.json):
+ * 官方 CLI 在无头 --prompt 执行时会强校验内置 provider 配置,若未通过环境变量指定,
+ * 打包态因相对路径层级错位容易报 "无法定位 CLI ZCode Built-in Provider Config"。
+ * 本函数自动在周边目录探查并返回有效文件路径。
+ */
+export function resolveZcodeBuiltinConfig(
+  cliPath: string,
+  fsx: Pick<FileSystem, 'exists'>,
+  explicitPath?: string,
+): string | undefined {
+  if (explicitPath && fsx.exists(explicitPath)) return explicitPath
+
+  const cliDir = dirname(cliPath)
+  const candidates = [
+    // 1. 打包态标准结构: <root>/resources/glm/zcode.cjs -> <root>/resources/config/provider/zcode-builtin.json
+    join(cliDir, '..', 'config', 'provider', 'zcode-builtin.json'),
+    // 2. cli 同级 provider 目录: <cliDir>/provider/zcode-builtin.json
+    join(cliDir, 'provider', 'zcode-builtin.json'),
+    // 3. 根目录下的 config: <root>/config/provider/zcode-builtin.json
+    join(cliDir, '..', '..', 'config', 'provider', 'zcode-builtin.json'),
+  ]
+
+  for (const candidate of candidates) {
+    if (fsx.exists(candidate)) return candidate
+  }
+  return undefined
 }
 
 const PROBE_TIMEOUT_MS = 10_000
@@ -115,7 +149,7 @@ export class ZcodeDriver implements AgentDriver {
       command: this.locator.nodeBin,
       args,
       cwd: input.cwd,
-      env: this.locator.nodeEnv,
+      env: this.getEffectiveEnv(),
       onStdout: (chunk) => {
         for (const line of stdoutDecoder.push(chunk)) handleLine(line)
       },
@@ -191,7 +225,7 @@ export class ZcodeDriver implements AgentDriver {
           command: this.locator.nodeBin,
           args: [cliEntry, '--version'],
           cwd: process.cwd(),
-          env: this.locator.nodeEnv,
+          env: this.getEffectiveEnv(),
           onStdout: (chunk) => chunks.push(chunk),
           onStderr: () => {},
         },
@@ -211,11 +245,32 @@ export class ZcodeDriver implements AgentDriver {
         command: this.locator.nodeBin,
         args,
         cwd: process.cwd(),
-        env: this.locator.nodeEnv,
+        env: this.getEffectiveEnv(),
         onStdout,
         onStderr: () => {},
       },
       timeoutMs,
     )
+  }
+
+  /**
+   * 构造 spawn 使用的环境变量:
+   * 1. 保留 locator.nodeEnv (含 ELECTRON_RUN_AS_NODE=1 等);
+   * 2. 若未显式传入 ZCODE_BUILTIN_PROVIDER_CONFIG_FILE,自动探查并注入内置 provider 配置路径,
+   *    彻底解决官方 CLI 在脱离 Electron 主进程独立执行时报 "无法定位 CLI ZCode Built-in Provider Config" 的问题。
+   */
+  private getEffectiveEnv(): Record<string, string> | undefined {
+    const builtinConfig = resolveZcodeBuiltinConfig(
+      this.locator.cliPath,
+      this.fsx,
+      this.locator.builtinProviderConfigPath ?? this.locator.nodeEnv?.ZCODE_BUILTIN_PROVIDER_CONFIG_FILE,
+    )
+    if (!builtinConfig && !this.locator.nodeEnv) return undefined
+
+    const env: Record<string, string> = { ...this.locator.nodeEnv }
+    if (builtinConfig && !env.ZCODE_BUILTIN_PROVIDER_CONFIG_FILE) {
+      env.ZCODE_BUILTIN_PROVIDER_CONFIG_FILE = builtinConfig
+    }
+    return env
   }
 }

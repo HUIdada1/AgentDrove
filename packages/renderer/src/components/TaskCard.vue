@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import { computed } from 'vue'
+import { useAppStore } from '../stores/app'
 import type { TaskRecord } from '@agent-drove/shared'
 import { CLIENT_FOLLOW_MODEL, STATE_TEXT } from '../labels'
 
@@ -12,6 +13,8 @@ const props = defineProps<{
 }>()
 
 defineEmits<{ click: []; check: [] }>()
+
+const store = useAppStore()
 
 const ORIGIN_MARK: Partial<Record<TaskRecord['origin'], string>> = {
   panel: '面板',
@@ -52,6 +55,14 @@ const time = computed(() => {
       <span v-if="ORIGIN_MARK[task.origin]" class="origin">{{ ORIGIN_MARK[task.origin] }}</span>
       <span v-if="task.attempt > 1" class="origin">attempt {{ task.attempt }}</span>
       <span class="spacer" />
+      <button
+        type="button"
+        class="card-detail-btn"
+        title="弹窗查看任务详情与操作"
+        @click.stop="store.openDetailModal(task.id)"
+      >
+        详情
+      </button>
       <label class="pick" @click.stop>
         <input type="checkbox" :checked="checked" @change="$emit('check')" />
       </label>
@@ -211,5 +222,22 @@ const time = computed(() => {
 
 .pick input {
   accent-color: var(--accent);
+}
+
+.card-detail-btn {
+  font-size: 10px;
+  color: var(--muted);
+  background: var(--glass-bg);
+  border: 1px solid var(--line);
+  border-radius: 4px;
+  padding: 1px 6px;
+  cursor: pointer;
+  transition: all var(--fast) var(--ease);
+}
+
+.card-detail-btn:hover {
+  color: var(--accent-strong);
+  border-color: var(--accent-line);
+  background: var(--accent-dim);
 }
 </style>

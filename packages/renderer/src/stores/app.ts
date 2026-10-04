@@ -24,6 +24,34 @@ const workspaces = ref<WorkspaceRow[]>([])
 const updateStatus = ref<UpdateStatus>({ phase: 'idle' })
 const view = ref<'panel' | 'settings'>('panel')
 const railCollapsed = ref(false)
+/** 详情栏收起/锁起状态:默认 true(收起锁起,会话流视野最大化),持久化偏好 */
+const detailCollapsed = ref(
+  typeof localStorage !== 'undefined'
+    ? localStorage.getItem('agentdrove.layout.detailCollapsed') !== 'false'
+    : true,
+)
+watch(detailCollapsed, (val) => {
+  if (typeof localStorage !== 'undefined') {
+    localStorage.setItem('agentdrove.layout.detailCollapsed', String(val))
+  }
+})
+
+/** 详情弹窗显隐状态 */
+const detailModalOpen = ref(false)
+
+function openDetailModal(taskId?: string): void {
+  if (taskId) selectedTaskId.value = taskId
+  detailModalOpen.value = true
+}
+
+function closeDetailModal(): void {
+  detailModalOpen.value = false
+}
+
+function toggleDetailCollapsed(): void {
+  detailCollapsed.value = !detailCollapsed.value
+}
+
 const selectedTaskId = ref<string | null>(null)
 const selection = ref<Set<string>>(new Set())
 const filter = ref({ search: '', agentId: '', state: '' })
@@ -67,6 +95,11 @@ export function useAppStore() {
     updateStatus,
     view,
     railCollapsed,
+    detailCollapsed,
+    detailModalOpen,
+    openDetailModal,
+    closeDetailModal,
+    toggleDetailCollapsed,
     selectedTaskId,
     selection,
     filter,

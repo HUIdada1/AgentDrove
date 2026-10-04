@@ -6,6 +6,7 @@ import {
   MODEL_CLIENT_FOLLOW,
   Orchestrator,
   Registry,
+  resolveZcodeBuiltinConfig,
   ZcodeDriver,
   type AgentProfile,
   type EventSink,
@@ -83,9 +84,12 @@ async function main(): Promise<number> {
   const cliPath = args.zcodeCli ?? process.env.AGENTDROVE_ZCODE_CLI ?? DEFAULT_ZCODE_CLI
   const fsx = new NodeFileSystem()
   const runner = new NodeProcessRunner()
+  const builtinConfig = resolveZcodeBuiltinConfig(cliPath, fsx)
   const driver = new ZcodeDriver(runner, fsx, {
     nodeBin: process.execPath,
     cliPath,
+    builtinProviderConfigPath: builtinConfig,
+    nodeEnv: builtinConfig ? { ZCODE_BUILTIN_PROVIDER_CONFIG_FILE: builtinConfig } : undefined,
   })
 
   const installRoot = cliPath.replace(/[\\/]resources[\\/]glm[\\/]zcode\.cjs$/i, '')

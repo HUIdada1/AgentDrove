@@ -1,7 +1,7 @@
 import { app, BrowserWindow, dialog, Menu, shell } from 'electron'
 import { spawn, spawnSync } from 'node:child_process'
 import { fileURLToPath, pathToFileURL } from 'node:url'
-import { existsSync, mkdirSync } from 'node:fs'
+import { copyFileSync, existsSync, mkdirSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import {
   ArtifactScanner,
@@ -16,6 +16,7 @@ import {
   QoderDriver,
   Registry,
   resolvePaths,
+  resolveZcodeBuiltinConfig,
   localDayOf,
   Throttle,
   TraeDriver,
@@ -137,12 +138,18 @@ async function bootstrap(): Promise<void> {
   const registry = new Registry()
   const drivers = new Map<string, AgentDriver>()
   const zcodeCli = process.env.AGENTDROVE_ZCODE_CLI ?? 'E:\\ZCode\\resources\\glm\\zcode.cjs'
+  const zcodeBuiltinConfig = ensureZcodeBuiltinConfig(zcodeCli, fs)
   const zcodeDriver = new ZcodeDriver(runner, fs, {
     nodeBin: resolveNodeBin(),
     cliPath: zcodeCli,
+    builtinProviderConfigPath: zcodeBuiltinConfig,
     // 打包态若回落到 Electron 运行时,必须 ELECTRON_RUN_AS_NODE 才按 node 执行,
-    // 否则探测与派发都会拉起第二个 GUI 实例;系统 node 下该变量无副作用
-    nodeEnv: { ELECTRON_RUN_AS_NODE: '1' },
+    // 否则探测与派发都会拉起第二个 GUI 实例;系统 node 下该变量无副作用;
+    // 显式带上 ZCODE_BUILTIN_PROVIDER_CONFIG_FILE 确保官方 CLI 能正确定位内置 Provider
+    nodeEnv: {
+      ELECTRON_RUN_AS_NODE: '1',
+      ...(zcodeBuiltinConfig ? { ZCODE_BUILTIN_PROVIDER_CONFIG_FILE: zcodeBuiltinConfig } : {}),
+    },
   })
   const qoderDriver = new QoderDriver(runner, fs)
   const traeDriver = new TraeDriver(runner, fs)
@@ -611,3 +618,31 @@ function resolveNodeBin(): string {
       : ''
   return first || process.execPath
 }
+
+/**
+ * 确保 ZCode 内置 provider 配置文件可用:
+ * 1. 自动寻找 zcode-builtin.json 的位置(如 resources/config/provider/zcode-builtin.json);
+ * 2. 若 cli 同级的 provider/zcode-builtin.json 不存在,尝试做物理兜底复制(解决裸跑官方 CLI 寻找 provider/zcode-builtin.json 失败);
+ * 3. 返回解析到的配置绝对路径供驱动注入环境变量 ZCODE_BUILTIN_PROVIDER_CONFIG_FILE。
+ */
+function ensureZcodeBuiltinConfig(zcodeCli: string, fsx: NodeFileSystem): string | undefined {
+  const resolved = resolveZcodeBuiltinConfig(zcodeCli, fsx)
+  if (!resolved) return undefined
+
+  try {
+    const cliDir = dirname(zcodeCli)
+    const targetDir = join(cliDir, 'provider')
+    const targetFile = join(targetDir, 'zcode-builtin.json')
+    if (resolved !== targetFile && !existsSync(targetFile)) {
+      if (!existsSync(targetDir)) {
+        mkdirSync(targetDir, { recursive: true })
+      }
+      copyFileSync(resolved, targetFile)
+    }
+  } catch {
+    // 目录只读或权限受限时静默忽略,环境变量已足以生效
+  }
+
+  return resolved
+}
+

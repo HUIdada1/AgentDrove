@@ -6,6 +6,7 @@ import Composer from './components/Composer.vue'
 import TaskList from './components/TaskList.vue'
 import SessionColumn from './components/SessionColumn.vue'
 import TaskDetail from './components/TaskDetail.vue'
+import TaskDetailModal from './components/TaskDetailModal.vue'
 import SettingsPage from './components/SettingsPage.vue'
 import MiniBar from './components/MiniBar.vue'
 import FxLayers from './components/FxLayers.vue'
@@ -41,13 +42,14 @@ function persistLayout(): void {
   localStorage.setItem('agentdrove.layout.detailW', String(detailW.value))
 }
 
-// 列定义:auto(侧栏)+ 3 条 10px 分隔 + 任务列 + 会话流(1fr)+ 详情列。
-// 可拖列用 minmax(280px, Npx):窗口缩到最小时固定列会自动收缩到 280 兜底,永不撑爆网格;
-// 分隔列即栏间距,原 grid gap 一并去除,视觉间隔不变
-const gridCols = computed(
-  () =>
-    `auto 10px minmax(${TASK_W.min}px, ${taskW.value}px) 10px minmax(0, 1fr) 10px minmax(${DETAIL_W.min}px, ${detailW.value}px)`,
-)
+// 列定义:auto(侧栏)+ 分隔 + 任务列 + 分隔 + 会话流(1fr)[+ 分隔 + 详情列(若未锁起收起)]
+const gridCols = computed(() => {
+  const base = `auto 10px minmax(${TASK_W.min}px, ${taskW.value}px) 10px minmax(0, 1fr)`
+  if (store.detailCollapsed.value) {
+    return base
+  }
+  return `${base} 10px minmax(${DETAIL_W.min}px, ${detailW.value}px)`
+})
 </script>
 
 <template>
@@ -56,7 +58,7 @@ const gridCols = computed(
   <template v-else>
     <!-- 自绘标题栏:左 Logo+应用名,右窗口控制;迷你条窗口自带交互,不挂 -->
     <TitleBar />
-    <!-- 四栏:可收缩 Agent 侧栏 / 任务列表 / 会话流 / 详情;恒渲染,设置以弹窗叠加其上 -->
+    <!-- 栏位布局:可收缩 Agent 侧栏 / 任务列表 / 会话流 / 可锁起详情;详情锁起时会话流占满全宽 -->
     <div class="shell view" :style="{ gridTemplateColumns: gridCols }">
       <AgentRail />
       <Resizer
@@ -72,12 +74,16 @@ const gridCols = computed(
         @end="persistLayout"
       />
       <SessionColumn />
-      <Resizer
-        @resize="detailW = clampW(detailW + $event, DETAIL_W.min, DETAIL_W.max)"
-        @end="persistLayout"
-      />
-      <TaskDetail />
+      <template v-if="!store.detailCollapsed.value">
+        <Resizer
+          @resize="detailW = clampW(detailW - $event, DETAIL_W.min, DETAIL_W.max)"
+          @end="persistLayout"
+        />
+        <TaskDetail />
+      </template>
     </div>
+    <!-- 独立弹窗模式:用户点开弹窗随时查看详情与进行全功能操作 -->
+    <TaskDetailModal />
     <SettingsPage v-if="store.view.value === 'settings'" @close="store.view.value = 'panel'" />
   </template>
 </template>

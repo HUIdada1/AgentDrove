@@ -155,11 +155,32 @@ function timeOf(at: number): string {
   <section class="session glass">
     <template v-if="task">
       <header class="head">
-        <div class="who">
-          <span class="agent">{{ agentLabel }}</span>
-          <span class="badge" :class="`s-${task.state}`">{{ STATE_TEXT[task.state] }}</span>
+        <div class="head-main">
+          <div class="who">
+            <span class="agent">{{ agentLabel }}</span>
+            <span class="badge" :class="`s-${task.state}`">{{ STATE_TEXT[task.state] }}</span>
+            <span class="task-id num" :title="task.id">#{{ task.id.slice(0, 8) }}</span>
+          </div>
+          <span class="prompt" :title="task.prompt">{{ task.prompt }}</span>
         </div>
-        <span class="prompt" :title="task.prompt">{{ task.prompt }}</span>
+        <div class="head-actions">
+          <GlassButton
+            variant="ghost"
+            size="sm"
+            title="点击弹窗查看完整任务详情与操作"
+            @click="store.openDetailModal()"
+          >
+            📋 详情
+          </GlassButton>
+          <GlassButton
+            variant="ghost"
+            size="sm"
+            :title="store.detailCollapsed.value ? '在右侧展开并固定详情栏' : '锁起详情栏,留出最大会话空间'"
+            @click="store.toggleDetailCollapsed()"
+          >
+            {{ store.detailCollapsed.value ? '◨ 展开侧栏' : '🔒 锁起侧栏' }}
+          </GlassButton>
+        </div>
       </header>
 
       <div ref="scrollEl" class="stream" @scroll="onScroll">
@@ -245,11 +266,32 @@ function timeOf(at: number): string {
 
 .head {
   display: flex;
-  flex-direction: column;
-  gap: 4px;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
   padding-bottom: 10px;
   border-bottom: 1px solid var(--line);
   margin-bottom: 10px;
+}
+
+.head-main {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  min-width: 0;
+  flex: 1;
+}
+
+.head-actions {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex: none;
+}
+
+.task-id {
+  font-size: 11px;
+  color: var(--faint);
 }
 
 .who {

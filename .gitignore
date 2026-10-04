@@ -16,3 +16,6 @@ packages/*/release/
 bundles/
 *.bak-*
 packages/main/AgentDrove/
+
+# 根目录本地安装包产物(仅分发,不入库)
+/*.exe

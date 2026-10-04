@@ -19,7 +19,11 @@ export * from './failover.js'
 export * from './launcher.js'
 export * from './healthCheck.js'
 export { MockDriver } from './drivers/mock.js'
-export { ZcodeDriver, type ZcodeLocator } from './drivers/zcode.js'
+export {
+  ZcodeDriver,
+  resolveZcodeBuiltinConfig,
+  type ZcodeLocator,
+} from './drivers/zcode.js'
 export { QoderDriver } from './drivers/qoder.js'
 export { TraeDriver } from './drivers/trae.js'
 export { CodexDriver } from './drivers/codex.js'
