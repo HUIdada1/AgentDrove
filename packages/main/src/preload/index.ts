@@ -35,8 +35,17 @@ const api: AgentDroveApi = {
   tasksSubmit: (dto) => ipcRenderer.invoke('tasks:submit', dto),
   tasksSubmitBatch: (dtos) => ipcRenderer.invoke('tasks:submit-batch', dtos),
   tasksRetry: (taskId) => ipcRenderer.invoke('tasks:retry', taskId),
-  tasksContinue: (taskId, prompt) => ipcRenderer.invoke('tasks:continue', taskId, prompt),
-  tasksCancel: (taskId) => ipcRenderer.invoke('tasks:cancel', taskId),
+  tasksContinue: (taskId, prompt, options) =>
+    ipcRenderer.invoke('tasks:continue', taskId, prompt, options),
+  tasksEnqueueFollowup: (taskId, prompt, skills) =>
+    ipcRenderer.invoke('tasks:enqueue-followup', taskId, prompt, skills),
+  tasksGetFollowups: (taskId) => ipcRenderer.invoke('tasks:get-followups', taskId),
+  tasksRemoveFollowup: (taskId, followupId) =>
+    ipcRenderer.invoke('tasks:remove-followup', taskId, followupId),
+  tasksClearFollowups: (taskId) => ipcRenderer.invoke('tasks:clear-followups', taskId),
+  tasksRename: (taskId, title) => ipcRenderer.invoke('tasks:rename', taskId, title),
+  tasksCancel: (taskId, clearFollowups) =>
+    ipcRenderer.invoke('tasks:cancel', taskId, clearFollowups),
   tasksMarkFailed: (taskId, reason) => ipcRenderer.invoke('tasks:mark-failed', taskId, reason),
   tasksBatchCancel: (taskIds) => ipcRenderer.invoke('tasks:batch-cancel', taskIds),
   tasksBatchDelete: (taskIds) => ipcRenderer.invoke('tasks:batch-delete', taskIds),

@@ -123,9 +123,14 @@ export class FixedClock implements Clock {
 
 export class FakeFileSystem implements FileSystem {
   private writable = new Set<string>()
+  private files = new Map<string, string>()
 
-  addWritable(path: string): void {
+
+  addWritable(path: string, content?: string): void {
     this.writable.add(norm(path))
+    if (content !== undefined) {
+      this.files.set(norm(path), content)
+    }
   }
 
   exists(path: string): boolean {
@@ -157,14 +162,32 @@ export class FakeFileSystem implements FileSystem {
   }
 
   copy(src: string, dest: string): void {
-    if (this.writable.has(norm(src))) this.writable.add(norm(dest))
+    if (this.writable.has(norm(src))) {
+      this.writable.add(norm(dest))
+      const content = this.files.get(norm(src))
+      if (content !== undefined) this.files.set(norm(dest), content)
+    }
   }
 
   remove(path: string): void {
     const target = norm(path)
     for (const p of [...this.writable]) {
-      if (p === target || p.startsWith(target + '\\')) this.writable.delete(p)
+      if (p === target || p.startsWith(target + '\\')) {
+        this.writable.delete(p)
+        this.files.delete(p)
+      }
     }
+  }
+
+  readTextFile(path: string): string {
+    const content = this.files.get(norm(path))
+    if (content === undefined) throw new Error(`File not found: ${path}`)
+    return content
+  }
+
+  writeTextFile(path: string, content: string): void {
+    this.addWritable(path)
+    this.files.set(norm(path), content)
   }
 }
 

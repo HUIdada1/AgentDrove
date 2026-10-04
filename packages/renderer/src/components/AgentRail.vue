@@ -169,6 +169,19 @@ function healthClass(agent: AgentView): string {
       </GlassButton>
     </div>
 
+    <!-- 醒目的新建对话大按钮 -->
+    <div class="new-chat-section" :class="{ collapsed: store.railCollapsed.value }">
+      <button
+        class="new-chat-btn"
+        :title="store.railCollapsed.value ? '新建对话' : '开启新的 Agent 对话'"
+        type="button"
+        @click="store.newChat()"
+      >
+        <span class="icon">＋</span>
+        <span v-if="!store.railCollapsed.value" class="text">新建对话</span>
+      </button>
+    </div>
+
     <div class="scroll">
       <div v-if="notice" class="notice" @click="notice = ''">{{ notice }}</div>
       <div class="section-title" v-if="!store.railCollapsed.value">
@@ -320,6 +333,55 @@ function healthClass(agent: AgentView): string {
 .brand-row button.fold {
   font-size: 14px;
   padding: 2px 6px;
+}
+
+.new-chat-section {
+  padding: 2px;
+  margin-bottom: 4px;
+}
+
+.new-chat-section.collapsed {
+  display: flex;
+  justify-content: center;
+}
+
+.new-chat-btn {
+  width: 100%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  padding: 8px 12px;
+  border-radius: var(--radius-md);
+  background: var(--accent);
+  color: #0c131d;
+  font-weight: 700;
+  font-size: 13px;
+  border: none;
+  cursor: pointer;
+  transition: all var(--fast) var(--ease-spring);
+  box-shadow: 0 4px 14px var(--accent-dim);
+}
+
+.new-chat-section.collapsed .new-chat-btn {
+  width: 38px;
+  height: 38px;
+  padding: 0;
+  border-radius: 50%;
+}
+
+.new-chat-btn:hover {
+  transform: translateY(-1px);
+  filter: brightness(1.08);
+  box-shadow: 0 6px 18px var(--accent-line);
+}
+
+.new-chat-btn:active {
+  transform: scale(0.97);
+}
+
+.new-chat-btn .icon {
+  font-size: 15px;
 }
 
 .scroll {

@@ -175,11 +175,44 @@ export function registerIpcHandlers(ctx: AppContext): void {
     })
   })
 
-  ipcMain.handle('tasks:continue', (_e, taskId: string, prompt: string): TaskRecord => {
-    return ctx.orchestrator.continueConversation(taskId, prompt)
+  ipcMain.handle(
+    'tasks:continue',
+    (
+      _e,
+      taskId: string,
+      prompt: string,
+      options?: { queueIfRunning?: boolean; skills?: string[] },
+    ) => {
+      return ctx.orchestrator.continueConversation(taskId, prompt, options)
+    },
+  )
+
+  ipcMain.handle(
+    'tasks:enqueue-followup',
+    (_e, taskId: string, prompt: string, skills?: string[]) => {
+      return ctx.orchestrator.enqueueFollowup(taskId, prompt, skills)
+    },
+  )
+
+  ipcMain.handle('tasks:get-followups', (_e, taskId: string) => {
+    return ctx.orchestrator.getFollowups(taskId)
   })
 
-  ipcMain.handle('tasks:cancel', (_e, taskId: string) => ctx.orchestrator.cancel(taskId))
+  ipcMain.handle('tasks:remove-followup', (_e, taskId: string, followupId: string) => {
+    return ctx.orchestrator.removeFollowup(taskId, followupId)
+  })
+
+  ipcMain.handle('tasks:clear-followups', (_e, taskId: string) => {
+    ctx.orchestrator.clearFollowups(taskId)
+  })
+
+  ipcMain.handle('tasks:rename', (_e, taskId: string, title: string) => {
+    return ctx.orchestrator.rename(taskId, title)
+  })
+
+  ipcMain.handle('tasks:cancel', (_e, taskId: string, clearFollowups?: boolean) => {
+    return ctx.orchestrator.cancel(taskId, clearFollowups)
+  })
 
   ipcMain.handle('tasks:mark-failed', (_e, taskId: string, reason?: string) => {
     const ok = ctx.orchestrator.markFailed(taskId, reason)
@@ -561,8 +594,8 @@ function sameFileContent(a: string, b: string): boolean {
 function diffSnapshots(
   origin: Map<string, { mtimeMs: number; size: number }>,
   current: Map<string, { mtimeMs: number; size: number }>,
-): Array<{ path: string; change: string }> {
-  const changes: Array<{ path: string; change: string }> = []
+): ArtifactChange[] {
+  const changes: ArtifactChange[] = []
   for (const [path, entry] of current) {
     const before = origin.get(path)
     if (!before) changes.push({ path, change: 'added' })

@@ -5,8 +5,10 @@ import {
   existsSync,
   mkdirSync,
   readdirSync,
+  readFileSync,
   rmSync,
   statSync,
+  writeFileSync,
 } from 'node:fs'
 import type { FileStat, FileSystem } from '@agent-drove/core'
 
@@ -48,4 +50,13 @@ export class NodeFileSystem implements FileSystem {
   remove(path: string): void {
     rmSync(path, { recursive: true, force: true })
   }
+
+  readTextFile(path: string): string {
+    return readFileSync(path, 'utf8')
+  }
+
+  writeTextFile(path: string, content: string): void {
+    writeFileSync(path, content, 'utf8')
+  }
 }
+

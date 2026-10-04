@@ -2,7 +2,7 @@
 import { computed, onUnmounted, ref, watch } from 'vue'
 import { useAppStore } from '../stores/app'
 import GlassButton from '../ui/GlassButton.vue'
-import { CLIENT_FOLLOW_MODEL, STATE_TEXT } from '../labels'
+import { CLIENT_FOLLOW_MODEL, STATE_TEXT, formatModelDisplay } from '../labels'
 import type { MergeResult, TaskRecord, WorkspaceRow } from '@agent-drove/shared'
 
 const props = withDefaults(
@@ -21,6 +21,9 @@ const copied = ref(false)
 
 const agentLabel = computed(
   () => store.agents.value.find((a) => a.id === task.value?.agentId)?.label ?? task.value?.agentId ?? '',
+)
+const displayModel = computed(() =>
+  task.value ? formatModelDisplay(task.value.modelId, task.value.agentId, store.agents.value) : '',
 )
 const otherAgents = computed(() =>
   store.agents.value.filter((a) => a.id !== task.value?.agentId && a.enabled && a.capabilities.headless),
@@ -185,7 +188,7 @@ function fmt(ts?: number): string {
             <span class="badge" :class="`s-${task.state}`">{{ STATE_TEXT[task.state] }}</span>
           </dd>
         </div>
-        <div><dt>模型</dt><dd>{{ task.modelId === CLIENT_FOLLOW_MODEL ? '跟随客户端' : task.modelId }}</dd></div>
+        <div><dt>模型</dt><dd>{{ displayModel }}</dd></div>
         <div><dt>档位</dt><dd>{{ task.mode }}</dd></div>
         <div><dt>创建时间</dt><dd class="num">{{ fmt(task.createdAt) }}</dd></div>
         <div>

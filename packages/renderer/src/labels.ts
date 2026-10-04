@@ -32,3 +32,29 @@ export const STATE_FILTER_OPTIONS: Array<{ value: string; label: string }> = [
   { value: '', label: '全部状态' },
   ...(Object.keys(STATE_TEXT) as TaskState[]).map((value) => ({ value, label: STATE_TEXT[value] })),
 ]
+
+/**
+ * 格式化任务所使用的模型名称:
+ * 1. 若为 client-follow 哨兵,显示 "跟随客户端";
+ * 2. 若从 agents 列表中查到对应的预设,显示友好 label (如 "默认-临时 · deepseek-v4.1-flash" 或 "GPT-5.1 Codex");
+ * 3. 若为复合形式 "<providerId>/<modelId>",去除前面的 providerId 前缀显示 modelId;
+ * 4. 其它情况如实显示 modelId。
+ */
+export function formatModelDisplay(
+  modelId: string | undefined,
+  agentId?: string,
+  agents?: Array<{ id: string; models?: Array<{ id: string; label: string }> }>,
+): string {
+  if (!modelId || modelId === CLIENT_FOLLOW_MODEL) return '跟随客户端'
+  if (agentId && agents) {
+    const agent = agents.find((a) => a.id === agentId)
+    const preset = agent?.models?.find((m) => m.id === modelId)
+    if (preset?.label) return preset.label
+  }
+  if (modelId.includes('/')) {
+    const parts = modelId.split('/')
+    return parts.slice(1).join('/')
+  }
+  return modelId
+}
+

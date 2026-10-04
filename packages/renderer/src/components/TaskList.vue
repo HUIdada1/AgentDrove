@@ -26,7 +26,12 @@ const visible = computed(() =>
   store.tasks.value.filter((t) => {
     if (store.filter.value.agentId && t.agentId !== store.filter.value.agentId) return false
     if (store.filter.value.state && t.state !== store.filter.value.state) return false
-    if (store.filter.value.search && !t.prompt.includes(store.filter.value.search)) return false
+    if (store.filter.value.search) {
+      const q = store.filter.value.search.toLowerCase()
+      const matchPrompt = t.prompt.toLowerCase().includes(q)
+      const matchTitle = t.title ? t.title.toLowerCase().includes(q) : false
+      if (!matchPrompt && !matchTitle) return false
+    }
     // 侧栏选中工作区 → 只看该项目下的任务(日常工作区未绑定目录时按 projectId 分组,不受 cwd 影响)
     if (store.selectedProjectId.value && t.projectId !== store.selectedProjectId.value) return false
     return true

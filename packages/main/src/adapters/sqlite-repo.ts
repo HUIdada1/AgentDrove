@@ -91,6 +91,13 @@ const MIGRATIONS: ((db: SqliteDb) => void)[] = [
       CREATE INDEX idx_tasks_project ON tasks(project_id, created_at);
     `)
   },
+  // v5: 对话标题与技能列表支持 (Agent 增强)
+  (db) => {
+    db.exec(`
+      ALTER TABLE tasks ADD COLUMN title TEXT;
+      ALTER TABLE tasks ADD COLUMN skills_json TEXT;
+    `)
+  },
 ]
 
 export class SqliteStore
@@ -140,11 +147,11 @@ export class SqliteStore
     this.db
       .prepare(
         `INSERT OR REPLACE INTO tasks
-         (id, agent_id, model_id, prompt, cwd, project_id, state, session_id, resume_latest, parent_id, error,
-          attachments_json, tool_policy_json, mode, origin, created_at, started_at, finished_at,
+         (id, agent_id, model_id, title, prompt, cwd, project_id, state, session_id, resume_latest, parent_id, error,
+          attachments_json, skills_json, tool_policy_json, mode, origin, created_at, started_at, finished_at,
           retry_of, attempt)
-         VALUES (@id, @agentId, @modelId, @prompt, @cwd, @projectId, @state, @sessionId, @resumeLatest, @parentId, @error,
-          @attachmentsJson, @toolPolicyJson, @mode, @origin, @createdAt, @startedAt, @finishedAt,
+         VALUES (@id, @agentId, @modelId, @title, @prompt, @cwd, @projectId, @state, @sessionId, @resumeLatest, @parentId, @error,
+          @attachmentsJson, @skillsJson, @toolPolicyJson, @mode, @origin, @createdAt, @startedAt, @finishedAt,
           @retryOf, @attempt)`,
       )
       .run(rowFromTask(task))
@@ -498,6 +505,7 @@ interface TaskRow {
   id: string
   agent_id: string
   model_id: string
+  title: string | null
   prompt: string
   cwd: string
   project_id: string | null
@@ -507,6 +515,7 @@ interface TaskRow {
   parent_id: string | null
   error: string | null
   attachments_json: string | null
+  skills_json: string | null
   tool_policy_json: string | null
   mode: TaskRecord['mode']
   origin: TaskRecord['origin']
@@ -572,6 +581,7 @@ function rowFromTask(task: TaskRecord) {
     id: task.id,
     agentId: task.agentId,
     modelId: task.modelId,
+    title: task.title ?? null,
     prompt: task.prompt,
     cwd: task.cwd,
     projectId: task.projectId ?? null,
@@ -581,6 +591,7 @@ function rowFromTask(task: TaskRecord) {
     parentId: task.parentId ?? null,
     error: task.error ?? null,
     attachmentsJson: JSON.stringify(task.attachments ?? []),
+    skillsJson: task.skills ? JSON.stringify(task.skills) : null,
     toolPolicyJson: task.toolPolicy ? JSON.stringify(task.toolPolicy) : null,
     mode: task.mode,
     origin: task.origin,
@@ -597,6 +608,7 @@ function taskFromRow(row: TaskRow): TaskRecord {
     id: row.id,
     agentId: row.agent_id,
     modelId: row.model_id,
+    title: row.title ?? undefined,
     prompt: row.prompt,
     cwd: row.cwd,
     projectId: row.project_id ?? undefined,
@@ -608,6 +620,7 @@ function taskFromRow(row: TaskRow): TaskRecord {
     attachments: row.attachments_json
       ? (JSON.parse(row.attachments_json) as TaskRecord['attachments'])
       : [],
+    skills: row.skills_json ? (JSON.parse(row.skills_json) as string[]) : undefined,
     toolPolicy: row.tool_policy_json
       ? (JSON.parse(row.tool_policy_json) as TaskRecord['toolPolicy'])
       : undefined,

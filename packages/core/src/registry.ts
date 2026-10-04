@@ -36,10 +36,8 @@ export class Registry {
       throw new Error(`agent already registered: ${raw.id}`)
     }
     const profile: AgentProfile = { ...raw, plan: normalizePlan(raw.plan, raw.label) }
-    // 模型跟随客户端的档案没有可选模型,默认模型即哨兵,豁免目录校验
-    const followsClient =
-      profile.capabilities.modelSwitch === 'none' &&
-      profile.defaultModel === MODEL_CLIENT_FOLLOW
+    // 模型跟随客户端或默认模型设为哨兵的档案,豁免目录强制校验
+    const followsClient = profile.defaultModel === MODEL_CLIENT_FOLLOW
     if (!followsClient && !this.hasModelIn(profile, profile.defaultModel)) {
       throw new Error(
         `defaultModel "${profile.defaultModel}" not in models of "${profile.id}"`,
@@ -76,6 +74,7 @@ export class Registry {
   }
 
   private hasModelIn(profile: AgentProfile, modelId: ModelId): boolean {
+    if (modelId === MODEL_CLIENT_FOLLOW) return true
     const covered = profile.plan.modelIds
     if (covered.length > 0) return covered.includes(modelId)
     return profile.models.some((m) => m.id === modelId)
@@ -88,7 +87,7 @@ export class Registry {
   resolveModel(agentId: AgentId, modelId?: ModelId): ModelId {
     const profile = this.get(agentId)
     if (profile.capabilities.modelSwitch === 'none') return MODEL_CLIENT_FOLLOW
-    if (modelId === undefined) return profile.defaultModel
+    if (modelId === undefined || modelId === MODEL_CLIENT_FOLLOW) return profile.defaultModel
     if (!this.hasModelIn(profile, modelId)) {
       throw new Error(
         `model "${modelId}" not available on agent "${agentId}"`,

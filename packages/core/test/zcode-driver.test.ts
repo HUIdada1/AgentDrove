@@ -4,6 +4,10 @@ import iconv from 'iconv-lite'
 import {
   ZcodeDriver,
   resolveZcodeBuiltinConfig,
+  resolveZcodeCliPaths,
+  resolveZcodePersonalConfigPath,
+  parseZcodePersonalModels,
+  buildTaskZcodeProviderConfig,
   type ZcodeLocator,
 } from '../src/drivers/zcode.js'
 import { extractSessionId, LineDecoder, satisfiesRange } from '../src/index.js'
@@ -371,6 +375,154 @@ describe('ZCode Built-in Provider Config 自动定位与环境变量注入', () 
       nodeEnv: { ZCODE_BUILTIN_PROVIDER_CONFIG_FILE: existing },
     })
 
+    await driver.run({
+      agent: zcodeProfile,
+      modelId: 'client-follow',
+      input: baseInput(),
+      emit: () => {},
+      signal: new AbortController().signal,
+    })
+
+    expect(runner.requests).toHaveLength(1)
+  })
+})
+
+describe('ZCode personal 模型解析与任务级临时副本注入', () => {
+  const samplePersonalJson = JSON.stringify({
+    schemaVersion: 1,
+    config: {
+      providerOrder: ['p-1', 'p-2'],
+      providerConfigRules: {
+        providerRules: [
+          {
+            providerId: 'p-1',
+            providerName: '默认服务商',
+            config: {
+              modelOrder: ['m-fast', 'm-pro', 'm-disabled'],
+              personalModelIds: ['m-fast', 'm-extra'],
+            },
+          },
+          {
+            providerId: 'p-2',
+            providerName: '备用服务商',
+            config: {
+              modelOrder: ['m-backup'],
+            },
+          },
+        ],
+      },
+      modelConfigRules: {
+        providerModelRules: [
+          {
+            providerId: 'p-1',
+            modelId: 'm-fast',
+            config: {
+              optionSpecs: {
+                reasoningLevel: {
+                  values: ['low', 'high', 'max'],
+                },
+              },
+            },
+          },
+          {
+            providerId: 'p-1',
+            modelId: 'm-disabled',
+            config: {
+              enabled: false,
+            },
+          },
+        ],
+      },
+    },
+  })
+
+  it('parseZcodePersonalModels: 正确提取模型目录并过滤 disabled 模型', () => {
+    const models = parseZcodePersonalModels(samplePersonalJson)
+    expect(models).toHaveLength(4)
+    expect(models[0]).toEqual({
+      id: 'p-1/m-fast',
+      label: '默认服务商 · m-fast',
+      providerId: 'p-1',
+      modelId: 'm-fast',
+      providerName: '默认服务商',
+      reasoningLevels: ['low', 'high', 'max'],
+    })
+    expect(models[1].id).toBe('p-1/m-pro')
+    expect(models[2].id).toBe('p-1/m-extra')
+    expect(models[3].id).toBe('p-2/m-backup')
+    // m-disabled 被过滤
+    expect(models.some((m) => m.id === 'p-1/m-disabled')).toBe(false)
+  })
+
+  it('buildTaskZcodeProviderConfig: 双保险置顶与 defaultModelSelection options 设置', () => {
+    const modified = buildTaskZcodeProviderConfig(samplePersonalJson, 'p-2/m-backup')
+    const parsed = JSON.parse(modified)
+    // 1. defaultModelSelection options
+    expect(parsed.config.defaultModelSelection).toEqual({
+      providerId: 'p-2',
+      modelId: 'm-backup',
+      options: { reasoningLevel: 'max' },
+    })
+    // 2. providerOrder 置顶
+    expect(parsed.config.providerOrder[0]).toBe('p-2')
+    // 3. 该 provider 的 modelOrder 置顶
+    const p2 = parsed.config.providerConfigRules.providerRules.find((p: any) => p.providerId === 'p-2')
+    expect(p2.config.modelOrder[0]).toBe('m-backup')
+  })
+
+  it('driver.run 带指定 modelId 时: 注入临时配置并在运行后清理', async () => {
+    const fsx = new FakeFileSystem()
+    fsx.addWritable('C:/tmp/ws')
+    fsx.addWritable(locator.cliPath)
+
+    const personalConfigPath = 'C:/Users/test/.zcode/v2/provider_config.json'
+    fsx.addWritable(personalConfigPath, samplePersonalJson)
+
+    let capturedConfigFile: string | undefined
+    const runner = new ScriptedRunner()
+    runner.enqueue((req, io) => {
+      capturedConfigFile = req.env?.ZCODE_PERSONAL_PROVIDER_CONFIG_FILE
+      expect(capturedConfigFile).toBeDefined()
+      expect(capturedConfigFile).not.toBe(personalConfigPath)
+      // 临时文件在运行期间应存在且内容已被注入修改
+      expect(fsx.exists(capturedConfigFile!)).toBe(true)
+      const content = JSON.parse(fsx.readTextFile(capturedConfigFile!))
+      expect(content.config.defaultModelSelection.modelId).toBe('m-backup')
+      io.exit(0)
+    })
+
+    const driver = new ZcodeDriver(runner, fsx, {
+      nodeBin: 'node',
+      cliPath: locator.cliPath,
+      personalProviderConfigPath: personalConfigPath,
+    })
+
+    const result = await driver.run({
+      agent: zcodeProfile,
+      modelId: 'p-2/m-backup',
+      input: baseInput(),
+      emit: () => {},
+      signal: new AbortController().signal,
+    })
+
+    expect(result.code).toBe(0)
+    // finally 块中必须自动删除临时文件
+    expect(capturedConfigFile).toBeDefined()
+    expect(fsx.exists(capturedConfigFile!)).toBe(false)
+  })
+
+  it('driver.run 为 client-follow 时: 不生成临时配置文件', async () => {
+    const fsx = new FakeFileSystem()
+    fsx.addWritable('C:/tmp/ws')
+    fsx.addWritable(locator.cliPath)
+
+    const runner = new ScriptedRunner()
+    runner.enqueue((req, io) => {
+      expect(req.env?.ZCODE_PERSONAL_PROVIDER_CONFIG_FILE).toBeUndefined()
+      io.exit(0)
+    })
+
+    const driver = new ZcodeDriver(runner, fsx, locator)
     await driver.run({
       agent: zcodeProfile,
       modelId: 'client-follow',

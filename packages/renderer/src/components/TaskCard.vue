@@ -2,7 +2,7 @@
 import { computed } from 'vue'
 import { useAppStore } from '../stores/app'
 import type { TaskRecord } from '@agent-drove/shared'
-import { CLIENT_FOLLOW_MODEL, STATE_TEXT } from '../labels'
+import { CLIENT_FOLLOW_MODEL, STATE_TEXT, formatModelDisplay } from '../labels'
 
 const props = defineProps<{
   task: TaskRecord
@@ -25,7 +25,7 @@ const ORIGIN_MARK: Partial<Record<TaskRecord['origin'], string>> = {
   failover: '降级',
 }
 
-const summary = computed(() => props.task.prompt.replace(/\s+/g, ' ').slice(0, 80))
+const summary = computed(() => (props.task.title || props.task.prompt).replace(/\s+/g, ' ').slice(0, 80))
 const duration = computed(() => {
   if (!props.task.startedAt) return ''
   const end = props.task.finishedAt ?? Date.now()
@@ -38,18 +38,27 @@ const time = computed(() => {
   const d = new Date(props.task.createdAt)
   return `${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}`
 })
+const displayModel = computed(() =>
+  formatModelDisplay(props.task.modelId, props.task.agentId, store.agents.value),
+)
 </script>
 
 <template>
   <article class="card spot" :class="[`s-${task.state}`, { selected }]" @click="$emit('click')">
     <div class="top">
       <span class="agent">{{ agentLabel ?? task.agentId }}</span>
-      <span class="model">{{ task.modelId === CLIENT_FOLLOW_MODEL ? '跟随客户端' : task.modelId }}</span>
+      <span class="model">{{ displayModel }}</span>
       <span class="badge">{{ STATE_TEXT[task.state] }}</span>
+      <span v-if="task.skills?.length" class="card-skills">
+        <span v-for="s in task.skills.slice(0, 3)" :key="s" class="s-dot" :title="s">{{ s.slice(0, 1) }}</span>
+      </span>
       <span v-if="duration" class="num dur">{{ duration }}</span>
       <span class="num time">{{ time }}</span>
     </div>
-    <div class="body">{{ summary }}</div>
+    <div class="body">
+      <span v-if="task.title" class="custom-title-tag">标</span>
+      {{ summary }}
+    </div>
     <div v-if="task.error" class="err">{{ task.error.slice(0, 90) }}</div>
     <div class="foot">
       <span v-if="ORIGIN_MARK[task.origin]" class="origin">{{ ORIGIN_MARK[task.origin] }}</span>
@@ -239,5 +248,30 @@ const time = computed(() => {
   color: var(--accent-strong);
   border-color: var(--accent-line);
   background: var(--accent-dim);
+}
+
+.card-skills {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+}
+
+.s-dot {
+  font-size: 9px;
+  padding: 1px 4px;
+  border-radius: 3px;
+  background: var(--chip-bg);
+  color: var(--accent-strong);
+  font-family: var(--mono);
+}
+
+.custom-title-tag {
+  font-size: 10px;
+  padding: 0 4px;
+  border-radius: 3px;
+  background: var(--accent-dim);
+  color: var(--accent-strong);
+  margin-right: 4px;
+  font-weight: 600;
 }
 </style>

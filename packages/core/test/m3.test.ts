@@ -267,3 +267,61 @@ describe('Registry 重扫重建', () => {
     expect(registry.get(zcodeProfile.id).version).toBe('0.16.10')
   })
 })
+
+describe('任务运行中追问排队与自动接续 (Followup Queue)', () => {
+  it('running 父任务支持排队追问，完成时自动接续派发新任务', async () => {
+    const registry = new Registry()
+    registry.register(zcodeProfile)
+    const repo = new MemoryTaskRepository()
+    const orchestrator = new Orchestrator(registry, {
+      repo,
+      sink: new PassthroughSink(repo),
+      defaultCwd: 'C:/tmp/ws',
+    })
+    orchestrator.registerDriver(new MockDriver('zcode', { delayMs: 80, sessionId: 'sess-q1' }))
+    const first = orchestrator.submit({ agentId: 'zcode', prompt: '第一步' })
+    await waitFor(() => first.state === 'running')
+
+    const followup = orchestrator.continueConversation(first.id, '第二步追问', {
+      queueIfRunning: true,
+    }) as any
+    expect(followup.id).toBeDefined()
+    expect(followup.prompt).toBe('第二步追问')
+    expect(orchestrator.getFollowups(first.id)).toHaveLength(1)
+
+    await waitFor(() => first.state === 'completed')
+
+    await waitFor(() => {
+      const all = orchestrator.list()
+      return all.some((t) => t.parentId === first.id && t.prompt === '第二步追问')
+    })
+    const second = orchestrator.list().find((t) => t.parentId === first.id)!
+    expect(second.sessionId).toBe('sess-q1')
+    expect(orchestrator.getFollowups(first.id)).toHaveLength(0)
+  })
+
+  it('支持主动移除排队消息与清空排队', async () => {
+    const registry = new Registry()
+    registry.register(zcodeProfile)
+    const repo = new MemoryTaskRepository()
+    const orchestrator = new Orchestrator(registry, {
+      repo,
+      sink: new PassthroughSink(repo),
+      defaultCwd: 'C:/tmp/ws',
+    })
+    orchestrator.registerDriver(new MockDriver('zcode', { delayMs: 200 }))
+    const first = orchestrator.submit({ agentId: 'zcode', prompt: '任务A' })
+    await waitFor(() => first.state === 'running')
+
+    const item1 = orchestrator.enqueueFollowup(first.id, '追问1')
+    const item2 = orchestrator.enqueueFollowup(first.id, '追问2')
+    expect(orchestrator.getFollowups(first.id)).toHaveLength(2)
+
+    expect(orchestrator.removeFollowup(first.id, item1.id)).toBe(true)
+    expect(orchestrator.getFollowups(first.id)).toHaveLength(1)
+    expect(orchestrator.getFollowups(first.id)[0]!.id).toBe(item2.id)
+
+    orchestrator.clearFollowups(first.id)
+    expect(orchestrator.getFollowups(first.id)).toHaveLength(0)
+  })
+})

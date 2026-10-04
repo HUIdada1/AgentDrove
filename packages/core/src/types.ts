@@ -134,10 +134,19 @@ export interface Project {
   createdAt: number
 }
 
+export interface FollowupQueueItem {
+  id: string
+  parentTaskId: string
+  prompt: string
+  skills?: string[]
+  createdAt: number
+}
+
 export interface TaskRecord {
   id: string
   agentId: AgentId
   modelId: ModelId
+  title?: string
   prompt: string
   cwd: string
   /** 派发时所属的项目工作区;历史任务/未选工作区为 undefined */
@@ -150,6 +159,7 @@ export interface TaskRecord {
   parentId?: string
   error?: string
   attachments: TaskAttachment[]
+  skills?: string[]
   toolPolicy?: ToolPolicy
   mode: TaskMode
   origin: TaskOrigin

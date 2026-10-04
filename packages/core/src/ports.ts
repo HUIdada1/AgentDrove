@@ -79,4 +79,9 @@ export interface FileSystem {
   copy(src: string, dest: string): void
   /** 递归删除文件或目录 */
   remove(path: string): void
+  /** 读取纯文本文件(UTF-8) */
+  readTextFile(path: string): string
+  /** 写入纯文本文件(UTF-8) */
+  writeTextFile(path: string, content: string): void
 }
+

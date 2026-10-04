@@ -4,8 +4,10 @@ import { useAppStore } from '../stores/app'
 import GlassButton from '../ui/GlassButton.vue'
 import GlassInput from '../ui/GlassInput.vue'
 import GlassSelect from '../ui/GlassSelect.vue'
+import SkillSelector from './SkillSelector.vue'
+import SlashCommandPopup, { type SlashCommand } from './SlashCommandPopup.vue'
 import { CLIENT_FOLLOW_MODEL, MODE_OPTIONS } from '../labels'
-import type { SubmitTaskDto } from '@agent-drove/shared'
+import { skillsToDenyList, type SubmitTaskDto } from '@agent-drove/shared'
 
 const store = useAppStore()
 const prompt = ref('')
@@ -45,12 +47,26 @@ const resolvedModelId = computed(() =>
   selectedAgent.value && !modelLocked.value && modelId.value ? modelId.value : undefined,
 )
 
-// 切客户端回填模型:优先档案默认模型,其次该客户端首个可选模型,避免下拉框选中值不在选项里而显示空白
+// 切客户端或模型列表异步到达时回填模型:优先档案默认模型,其次首个可选模型,避免空白
+function syncPreferredModel() {
+  const options = modelOptions.value
+  if (options.length === 0) return
+  if (!modelId.value || !options.some((o) => o.value === modelId.value)) {
+    const preferred = selectedAgent.value?.defaultModel
+    modelId.value =
+      preferred && options.some((o) => o.value === preferred) ? preferred : (options[0]?.value ?? '')
+  }
+}
+
 watch(agentId, () => {
   const options = modelOptions.value
   const preferred = selectedAgent.value?.defaultModel
   modelId.value =
     preferred && options.some((o) => o.value === preferred) ? preferred : (options[0]?.value ?? '')
+})
+
+watch(modelOptions, () => {
+  syncPreferredModel()
 })
 
 // 默认档位来自设置(settings 异步到达后生效);yolo 不在发布框可选档位内,回落到 build
@@ -133,13 +149,36 @@ async function pickWorkspace(): Promise<void> {
   }
 }
 
-/** 高级选项转 toolPolicy:非法/非正的 max-turns 忽略,绝不把 NaN 透传给主进程 */
+const showSlashPopup = ref(false)
+const slashQuery = ref('')
+const slashPopupRef = ref<{ onKeydown: (e: KeyboardEvent) => boolean } | null>(null)
+
+function handlePromptChange(val: string): void {
+  prompt.value = val
+  if (val.startsWith('/')) {
+    slashQuery.value = val
+    showSlashPopup.value = true
+  } else {
+    showSlashPopup.value = false
+  }
+}
+
+function applySlashCommand(cmd: SlashCommand): void {
+  prompt.value = cmd.template
+  if (cmd.recommendedMode) {
+    mode.value = cmd.recommendedMode
+  }
+  showSlashPopup.value = false
+}
+
+/** 高级选项转 toolPolicy:结合当前开启的技能计算 denyList */
 function resolveToolPolicy(): SubmitTaskDto['toolPolicy'] {
-  // 局部名不得与外层 ref 同名:同名 const 在自身初始化器里处于 TDZ,运行时必抛
-  const denied = denyList.value
+  const deniedFromSkills = skillsToDenyList(store.activeSkills.value)
+  const deniedFromInput = denyList.value
     .split(',')
     .map((t) => t.trim())
     .filter(Boolean)
+  const denied = [...new Set([...deniedFromSkills, ...deniedFromInput])]
   const turns = Number(maxTurns.value)
   const cap = maxTurns.value && Number.isFinite(turns) && turns > 0 ? turns : null
   if (denied.length === 0 && cap === null) return undefined
@@ -163,6 +202,7 @@ async function submit(): Promise<void> {
       projectId,
       ...(resolvedModelId.value ? { modelId: resolvedModelId.value } : {}),
       mode: mode.value,
+      skills: store.activeSkills.value,
       // 必须拷成纯对象数组:attachments.value 是响应式代理(Proxy),直接过 IPC
       // 结构化克隆必抛 "An object could not be cloned"(与设置页保存同源问题)
       attachments:
@@ -192,6 +232,9 @@ async function submit(): Promise<void> {
 }
 
 function onKeydown(event: KeyboardEvent): void {
+  if (showSlashPopup.value && slashPopupRef.value?.onKeydown(event)) {
+    return
+  }
   // 中文输入法组词态的 Enter(isComposing/229)是选词确认,不是提交意图
   if (event.isComposing || event.keyCode === 229) return
   if (event.key === 'Enter' && !event.shiftKey) {
@@ -203,17 +246,33 @@ function onKeydown(event: KeyboardEvent): void {
 
 <template>
   <section class="composer glass" @dragover.prevent @drop.prevent="onDrop">
-    <GlassInput
-      ref="promptBox"
-      v-model="prompt"
-      multiline
-      :rows="3"
-      send-label="派发"
-      :send-disabled="submitting || !prompt.trim()"
-      :placeholder="batchMode ? '每行一条任务,批量入队…(Enter 提交 / Shift+Enter 换行)' : '把任务派发给客户端…(Enter 提交 / Shift+Enter 换行)'"
-      @keydown="onKeydown"
-      @send="submit"
-    />
+    <!-- 技能快速选择栏 -->
+    <div class="composer-skills">
+      <SkillSelector compact />
+    </div>
+
+    <div class="input-pos">
+      <SlashCommandPopup
+        v-if="showSlashPopup"
+        ref="slashPopupRef"
+        :query="slashQuery"
+        @select="applySlashCommand"
+        @close="showSlashPopup = false"
+      />
+
+      <GlassInput
+        ref="promptBox"
+        :model-value="prompt"
+        multiline
+        :rows="3"
+        send-label="派发"
+        :send-disabled="submitting || !prompt.trim()"
+        :placeholder="batchMode ? '每行一条任务,批量入队…(Enter 提交 / Shift+Enter 换行)' : '下达 Agent 任务,键入 / 呼出快捷技能…(Enter 提交 / Shift+Enter 换行)'"
+        @update:model-value="handlePromptChange"
+        @keydown="onKeydown"
+        @send="submit"
+      />
+    </div>
 
     <div class="toolbar">
       <GlassSelect
@@ -402,5 +461,13 @@ function onKeydown(event: KeyboardEvent): void {
 .notice {
   color: var(--err);
   font-size: 12px;
+}
+
+.composer-skills {
+  margin-bottom: 6px;
+}
+
+.input-pos {
+  position: relative;
 }
 </style>

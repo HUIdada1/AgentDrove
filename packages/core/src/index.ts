@@ -22,7 +22,12 @@ export { MockDriver } from './drivers/mock.js'
 export {
   ZcodeDriver,
   resolveZcodeBuiltinConfig,
+  resolveZcodeCliPaths,
+  resolveZcodePersonalConfigPath,
+  parseZcodePersonalModels,
+  buildTaskZcodeProviderConfig,
   type ZcodeLocator,
+  type ParsedZcodeModel,
 } from './drivers/zcode.js'
 export { QoderDriver } from './drivers/qoder.js'
 export { TraeDriver } from './drivers/trae.js'

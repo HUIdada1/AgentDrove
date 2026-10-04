@@ -2,6 +2,7 @@ import { computed, ref, shallowRef, watch } from 'vue'
 import type {
   AgentView,
   AppConfig,
+  FollowupQueueItem,
   Project,
   StoredEvent,
   TaskRecord,
@@ -56,6 +57,74 @@ const selectedTaskId = ref<string | null>(null)
 const selection = ref<Set<string>>(new Set())
 const filter = ref({ search: '', agentId: '', state: '' })
 const liveEvents = shallowRef(new Map<string, StoredEvent[]>())
+
+/** 当前激活的技能清单(默认启用终端、代码编辑、代码检索、网络搜索) */
+const activeSkills = ref<string[]>(['terminal', 'file_editor', 'code_search', 'web_search'])
+
+/** 当前选中任务的排队追问队列 */
+const activeFollowups = ref<FollowupQueueItem[]>([])
+
+function toggleSkill(skillId: string): void {
+  const current = new Set(activeSkills.value)
+  if (current.has(skillId)) current.delete(skillId)
+  else current.add(skillId)
+  activeSkills.value = [...current]
+}
+
+function setSkills(skills: string[]): void {
+  activeSkills.value = [...skills]
+}
+
+async function refreshFollowups(taskId: string): Promise<void> {
+  if (!taskId || !window.api) {
+    activeFollowups.value = []
+    return
+  }
+  try {
+    const list = await window.api.tasksGetFollowups(taskId)
+    if (selectedTaskId.value === taskId) {
+      activeFollowups.value = list
+    }
+  } catch {
+    activeFollowups.value = []
+  }
+}
+
+async function removeFollowup(taskId: string, followupId: string): Promise<void> {
+  if (!window.api) return
+  await window.api.tasksRemoveFollowup(taskId, followupId)
+  await refreshFollowups(taskId)
+}
+
+async function clearFollowups(taskId: string): Promise<void> {
+  if (!window.api) return
+  await window.api.tasksClearFollowups(taskId)
+  await refreshFollowups(taskId)
+}
+
+async function renameTask(taskId: string, title: string): Promise<void> {
+  if (!window.api || !title.trim()) return
+  await window.api.tasksRename(taskId, title.trim())
+  await refreshTasks()
+}
+
+function newChat(): void {
+  selectedTaskId.value = null
+  activeFollowups.value = []
+}
+
+async function stopTask(taskId: string): Promise<void> {
+  if (!window.api || !taskId) return
+  await window.api.tasksCancel(taskId)
+  await refreshTasks()
+  await refreshFollowups(taskId)
+}
+
+watch(selectedTaskId, (id) => {
+  if (id) void refreshFollowups(id)
+  else activeFollowups.value = []
+})
+
 /** 侧栏选中的工作区:选中后发布框绑定该目录,任务列表只看该项目;null=全部 */
 const selectedProjectId = ref<string | null>(
   typeof localStorage !== 'undefined' ? localStorage.getItem('agentdrove.workspace') : null,
@@ -104,6 +173,16 @@ export function useAppStore() {
     selection,
     filter,
     liveEvents,
+    activeSkills,
+    activeFollowups,
+    toggleSkill,
+    setSkills,
+    refreshFollowups,
+    removeFollowup,
+    clearFollowups,
+    renameTask,
+    newChat,
+    stopTask,
     selectedProjectId,
     selectedProject,
     refreshAgents,

@@ -7,6 +7,7 @@ import type {
   AgentProfile,
   AppConfig,
   DriverUsage,
+  FollowupQueueItem,
   HealthReport,
   LaunchChannel,
   ModelPreset,
@@ -21,6 +22,7 @@ export type {
   AgentProfile,
   AppConfig,
   DriverUsage,
+  FollowupQueueItem,
   HealthReport,
   LaunchChannel,
   ModelPreset,
@@ -30,6 +32,144 @@ export type {
   TaskRecord,
   WorkspaceRow,
 }
+
+export interface SkillDefinition {
+  id: string
+  label: string
+  icon: string
+  description: string
+  disallowedTools?: string[]
+}
+
+export const BUILTIN_SKILLS: SkillDefinition[] = [
+  {
+    id: 'terminal',
+    label: '终端执行',
+    icon: '💻',
+    description: '允许在系统受控环境中执行命令行与脚本',
+    disallowedTools: ['execute_command', 'run_command', 'bash', 'terminal', 'cmd'],
+  },
+  {
+    id: 'file_editor',
+    label: '代码编辑',
+    icon: '📝',
+    description: '允许创建、修改和重构工作区内的代码与文件',
+    disallowedTools: ['edit_file', 'write_file', 'replace_file_content', 'write_to_file'],
+  },
+  {
+    id: 'code_search',
+    label: '代码检索',
+    icon: '🔍',
+    description: '检索符号定义、文件树与全局模式定位',
+    disallowedTools: ['grep_search', 'file_search', 'search_code', 'find_by_name'],
+  },
+  {
+    id: 'web_search',
+    label: '网络搜索',
+    icon: '🌐',
+    description: '检索在线官方文档、技术资料与解决方案',
+    disallowedTools: ['web_search', 'read_url_content', 'browser'],
+  },
+  {
+    id: 'test_runner',
+    label: '测试套件',
+    icon: '🧪',
+    description: '自动运行单元测试与校验执行结果',
+    disallowedTools: ['run_test', 'test_runner'],
+  },
+  {
+    id: 'git_review',
+    label: '审查守护',
+    icon: '🛡️',
+    description: '代码质量审查、差异比对与静态规则分析',
+    disallowedTools: [],
+  },
+]
+
+export function skillsToDenyList(activeSkillIds: string[]): string[] {
+  const activeSet = new Set(activeSkillIds)
+  const denied: string[] = []
+  for (const skill of BUILTIN_SKILLS) {
+    if (!activeSet.has(skill.id) && skill.disallowedTools) {
+      denied.push(...skill.disallowedTools)
+    }
+  }
+  return [...new Set(denied)]
+}
+
+export interface ScenarioTemplate {
+  id: string
+  category: 'feature' | 'debug' | 'refactor' | 'test' | 'review' | 'architecture'
+  title: string
+  desc: string
+  icon: string
+  prompt: string
+  mode: TaskRecord['mode']
+  recommendedSkills: string[]
+}
+
+export const SCENARIO_TEMPLATES: ScenarioTemplate[] = [
+  {
+    id: 'sc-feat',
+    category: 'feature',
+    title: '功能实现',
+    desc: '基于现有架构新增业务模块与类型支持，遵循 KISS 原则',
+    icon: '🚀',
+    prompt: '请根据业务需求在当前项目中实现以下功能，要求结构清晰、补充必要类型并处理好边界情况：',
+    mode: 'build',
+    recommendedSkills: ['file_editor', 'code_search', 'terminal'],
+  },
+  {
+    id: 'sc-debug',
+    category: 'debug',
+    title: '排错与修复',
+    desc: '深度分析错误堆栈，定位根本原因并输出热修复方案',
+    icon: '🐛',
+    prompt: '请分析当前遇到的异常或报错堆栈，基于第一性原理定位根本原因并输出修复补丁：',
+    mode: 'edit',
+    recommendedSkills: ['file_editor', 'code_search', 'test_runner'],
+  },
+  {
+    id: 'sc-refactor',
+    category: 'refactor',
+    title: '代码重构',
+    desc: '消除重复冗余，优化组件层级与状态流转',
+    icon: '⚡',
+    prompt: '请重构以下模块的代码结构，提高可读性与可维护性，避免过度工程化：',
+    mode: 'edit',
+    recommendedSkills: ['file_editor', 'code_search'],
+  },
+  {
+    id: 'sc-test',
+    category: 'test',
+    title: '测试覆盖',
+    desc: '为关键链路编写单元测试与集成测试，覆盖异常边界',
+    icon: '🧪',
+    prompt: '请为当前核心业务逻辑编写完备的自动化测试用例，覆盖正常分支与错误边界：',
+    mode: 'build',
+    recommendedSkills: ['file_editor', 'test_runner', 'terminal'],
+  },
+  {
+    id: 'sc-review',
+    category: 'review',
+    title: '质量审查',
+    desc: '全面审查代码质量、潜在死锁、未处理异步与安全隐患',
+    icon: '🛡️',
+    prompt: '请对当前工作区近期的代码修改进行全量审查，指出潜在风险、内存泄漏与可优化点：',
+    mode: 'plan',
+    recommendedSkills: ['code_search', 'git_review'],
+  },
+  {
+    id: 'sc-plan',
+    category: 'architecture',
+    title: '架构规划',
+    desc: '构思系统方案，分解为具体里程碑与落地步骤',
+    icon: '📋',
+    prompt: '请为即将开展的项目重构制定分步实施计划，按“构思方案 → 分解为具体任务”展开：',
+    mode: 'plan',
+    recommendedSkills: ['code_search'],
+  },
+]
 
 export interface AgentView {
   id: string
@@ -54,12 +194,14 @@ export interface AgentView {
 export interface SubmitTaskDto {
   agentId: string
   prompt: string
+  title?: string
   cwd?: string
   /** 侧栏选中的项目工作区:cwd 留空时回落项目目录(日常工作区未绑定则落默认目录) */
   projectId?: string
   modelId?: string
   mode?: TaskRecord['mode']
   attachments?: TaskRecord['attachments']
+  skills?: string[]
   toolPolicy?: TaskRecord['toolPolicy']
   /** 续聊目标会话 */
   sessionId?: string
@@ -167,8 +309,17 @@ export interface AgentDroveApi extends PushEvents {
   tasksSubmit(dto: SubmitTaskDto): Promise<TaskRecord>
   tasksSubmitBatch(dtos: SubmitTaskDto[]): Promise<TaskRecord[]>
   tasksRetry(taskId: string): Promise<TaskRecord>
-  tasksContinue(taskId: string, prompt: string): Promise<TaskRecord>
-  tasksCancel(taskId: string): Promise<boolean>
+  tasksContinue(
+    taskId: string,
+    prompt: string,
+    options?: { queueIfRunning?: boolean; skills?: string[] },
+  ): Promise<TaskRecord | FollowupQueueItem>
+  tasksEnqueueFollowup(taskId: string, prompt: string, skills?: string[]): Promise<FollowupQueueItem>
+  tasksGetFollowups(taskId: string): Promise<FollowupQueueItem[]>
+  tasksRemoveFollowup(taskId: string, followupId: string): Promise<boolean>
+  tasksClearFollowups(taskId: string): Promise<void>
+  tasksRename(taskId: string, title: string): Promise<void>
+  tasksCancel(taskId: string, clearFollowups?: boolean): Promise<boolean>
   tasksMarkFailed(taskId: string, reason?: string): Promise<boolean>
   tasksBatchCancel(taskIds: string[]): Promise<number>
   tasksBatchDelete(taskIds: string[]): Promise<number>

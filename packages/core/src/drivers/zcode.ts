@@ -1,3 +1,4 @@
+import { homedir, tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 import type {
   AgentDriver,
@@ -6,7 +7,8 @@ import type {
   RunResult,
 } from '../driver.js'
 import { DEFAULT_RUN_TIMEOUT_MS } from '../driver.js'
-import type { AgentProfile, ModelId, TaskInput } from '../types.js'
+import type { AgentProfile, ModelId, ModelPreset, TaskInput } from '../types.js'
+import { MODEL_CLIENT_FOLLOW } from '../types.js'
 import type { Clock, FileSystem, ProcessRunner } from '../ports.js'
 import { systemClock } from '../ports.js'
 import { LineDecoder, decodeBuffer, extractSessionId } from '../text.js'
@@ -25,6 +27,11 @@ export interface ZcodeLocator {
    * 若不指定,驱动将基于 cliPath 自动在周边目录定位并注入 ZCODE_BUILTIN_PROVIDER_CONFIG_FILE。
    */
   builtinProviderConfigPath?: string
+  /**
+   * ZCode 用户 provider 配置文件路径(provider_config.json)。
+   * 若不指定,将通过 resolveZcodePersonalConfigPath() 自动探查。
+   */
+  personalProviderConfigPath?: string
 }
 
 /**
@@ -56,8 +63,224 @@ export function resolveZcodeBuiltinConfig(
   return undefined
 }
 
+/**
+ * 跨 Windows 平台智能探查 ZCode CLI 路径:
+ * 优先环境变量与传入值,随后检索当前用户 AppData、ProgramFiles 以及常见安装盘符。
+ */
+export function resolveZcodeCliPaths(explicit?: string): string[] {
+  const list: string[] = []
+  if (explicit) list.push(explicit)
+  if (process.env.AGENTDROVE_ZCODE_CLI) list.push(process.env.AGENTDROVE_ZCODE_CLI)
+
+  const localAppData = process.env.LOCALAPPDATA
+  if (localAppData) {
+    list.push(join(localAppData, 'Programs', 'ZCode', 'resources', 'glm', 'zcode.cjs'))
+  }
+  const progFiles = process.env.ProgramFiles
+  if (progFiles) {
+    list.push(join(progFiles, 'ZCode', 'resources', 'glm', 'zcode.cjs'))
+  }
+  const progFilesX86 = process.env['ProgramFiles(x86)']
+  if (progFilesX86) {
+    list.push(join(progFilesX86, 'ZCode', 'resources', 'glm', 'zcode.cjs'))
+  }
+
+  list.push('D:\\ZCode\\resources\\glm\\zcode.cjs')
+  list.push('E:\\ZCode\\resources\\glm\\zcode.cjs')
+  list.push('C:\\ZCode\\resources\\glm\\zcode.cjs')
+
+  return [...new Set(list)]
+}
+
+/**
+ * 获取用户 personal provider_config.json 路径:
+ * 优先显式指定与 ZCODE_PERSONAL_PROVIDER_CONFIG_FILE 环境变量,缺省落 ~/.zcode/v2/provider_config.json。
+ */
+export function resolveZcodePersonalConfigPath(explicit?: string): string {
+  if (explicit) return explicit
+  const fromEnv = process.env.ZCODE_PERSONAL_PROVIDER_CONFIG_FILE?.trim()
+  if (fromEnv) return fromEnv
+  return join(homedir(), '.zcode', 'v2', 'provider_config.json')
+}
+
+export interface ParsedZcodeModel extends ModelPreset {
+  providerId: string
+  modelId: string
+  providerName: string
+  reasoningLevels?: string[]
+}
+
+/**
+ * 解析用户 provider_config.json 提取模型目录:
+ * 1. 按 providerOrder 确定服务商优先级;
+ * 2. 依次提取服务商下的 modelOrder 与 personalModelIds 并去重;
+ * 3. 过滤显式 disabled (enabled === false) 的模型规则;
+ * 4. 生成规范的 id ("<providerId>/<modelId>") 与 label ("<providerName> · <modelId>")。
+ */
+export function parseZcodePersonalModels(configJson: string): ParsedZcodeModel[] {
+  let data: any
+  try {
+    data = JSON.parse(configJson)
+  } catch {
+    return []
+  }
+  const config = data?.config
+  if (!config) return []
+
+  const providerRules: any[] = config.providerConfigRules?.providerRules ?? []
+  const providerOrder: string[] = config.providerOrder ?? []
+  const modelRules: any[] = config.modelConfigRules?.providerModelRules ?? []
+
+  const providerMap = new Map<string, any>()
+  for (const p of providerRules) {
+    if (p?.providerId) providerMap.set(p.providerId, p)
+  }
+
+  const orderedProviders: any[] = []
+  for (const pid of providerOrder) {
+    const p = providerMap.get(pid)
+    if (p) {
+      orderedProviders.push(p)
+      providerMap.delete(pid)
+    }
+  }
+  for (const p of providerMap.values()) {
+    orderedProviders.push(p)
+  }
+
+  const modelRuleMap = new Map<string, Map<string, any>>()
+  for (const r of modelRules) {
+    if (!r?.providerId || !r?.modelId) continue
+    if (!modelRuleMap.has(r.providerId)) {
+      modelRuleMap.set(r.providerId, new Map())
+    }
+    modelRuleMap.get(r.providerId)!.set(r.modelId, r)
+  }
+
+  const results: ParsedZcodeModel[] = []
+  const seenIds = new Set<string>()
+
+  for (const provider of orderedProviders) {
+    const pid = provider.providerId
+    const pName = provider.providerName || pid
+    const pConfig = provider.config ?? {}
+    const rawList: string[] = [
+      ...(pConfig.modelOrder ?? []),
+      ...(pConfig.personalModelIds ?? []),
+    ]
+    const uniqueModels = [...new Set(rawList.filter(Boolean))]
+
+    for (const mId of uniqueModels) {
+      const rule = modelRuleMap.get(pid)?.get(mId)
+      if (rule?.config?.enabled === false) continue
+
+      const fullId = `${pid}/${mId}`
+      if (seenIds.has(fullId)) continue
+      seenIds.add(fullId)
+
+      const reasoningLevels = rule?.config?.optionSpecs?.reasoningLevel?.values
+      results.push({
+        id: fullId,
+        label: `${pName} · ${mId}`,
+        providerId: pid,
+        modelId: mId,
+        providerName: pName,
+        reasoningLevels: Array.isArray(reasoningLevels) ? reasoningLevels : undefined,
+      })
+    }
+  }
+  return results
+}
+
+/**
+ * 构造任务级临时 provider 配置(双保险注入):
+ * 1. 注入 config.defaultModelSelection: { providerId, modelId, options: { reasoningLevel } };
+ * 2. 双保险 fallback:将指定 providerId 置顶到 providerOrder;
+ * 3. 双保险 fallback:将指定 modelId 置顶到该 provider 的 modelOrder 与 personalModelIds。
+ */
+export function buildTaskZcodeProviderConfig(
+  baseConfigJson: string,
+  targetCompoundModelId: string,
+  builtinConfigJson?: string,
+): string {
+  const slashIdx = targetCompoundModelId.indexOf('/')
+  if (slashIdx === -1) return baseConfigJson
+  const targetProviderId = targetCompoundModelId.slice(0, slashIdx)
+  const targetModel = targetCompoundModelId.slice(slashIdx + 1)
+
+  let data: any
+  try {
+    data = JSON.parse(baseConfigJson)
+  } catch {
+    return baseConfigJson
+  }
+  if (!data.config) data.config = {}
+
+  let reasoningLevel: string | undefined
+  const providerModelRules: any[] = data.config.modelConfigRules?.providerModelRules ?? []
+  const matchedRule = providerModelRules.find(
+    (r) => r.providerId === targetProviderId && r.modelId === targetModel,
+  )
+  const directLevels = matchedRule?.config?.optionSpecs?.reasoningLevel?.values
+  if (Array.isArray(directLevels) && directLevels.length > 0) {
+    reasoningLevel = directLevels.at(-1)
+  }
+
+  if (!reasoningLevel && builtinConfigJson) {
+    try {
+      const builtinData = JSON.parse(builtinConfigJson)
+      const builtinRules: any[] = builtinData?.config?.modelConfigRules?.modelRules ?? []
+      for (const br of builtinRules) {
+        if (br.modelMatch && new RegExp(`^${br.modelMatch}$`, 'i').test(targetModel)) {
+          const brLevels = br.config?.optionSpecs?.reasoningLevel?.values
+          if (Array.isArray(brLevels) && brLevels.length > 0) {
+            reasoningLevel = brLevels.at(-1)
+          }
+        }
+      }
+    } catch {}
+  }
+
+  if (!reasoningLevel) {
+    reasoningLevel = 'max'
+  }
+
+  data.config.defaultModelSelection = {
+    providerId: targetProviderId,
+    modelId: targetModel,
+    options: { reasoningLevel },
+  }
+
+  if (Array.isArray(data.config.providerOrder)) {
+    data.config.providerOrder = [
+      targetProviderId,
+      ...data.config.providerOrder.filter((id: string) => id !== targetProviderId),
+    ]
+  }
+
+  const providerRules: any[] = data.config.providerConfigRules?.providerRules ?? []
+  const targetProvider = providerRules.find((p) => p.providerId === targetProviderId)
+  if (targetProvider?.config) {
+    if (Array.isArray(targetProvider.config.modelOrder)) {
+      targetProvider.config.modelOrder = [
+        targetModel,
+        ...targetProvider.config.modelOrder.filter((m: string) => m !== targetModel),
+      ]
+    }
+    if (Array.isArray(targetProvider.config.personalModelIds)) {
+      targetProvider.config.personalModelIds = [
+        targetModel,
+        ...targetProvider.config.personalModelIds.filter((m: string) => m !== targetModel),
+      ]
+    }
+  }
+
+  return JSON.stringify(data, null, 2)
+}
+
 const PROBE_TIMEOUT_MS = 10_000
 const DOCTOR_TIMEOUT_MS = 30_000
+
 
 /**
  * ZCode 官方 CLI 驱动(zcode.cjs,实测 0.16.9):
@@ -136,6 +359,51 @@ export class ZcodeDriver implements AgentDriver {
     let timedOut = false
     let sessionId: string | undefined
 
+    let tempConfigFile: string | undefined
+    let effectiveEnv = this.getEffectiveEnv()
+    if (options.modelId && options.modelId !== MODEL_CLIENT_FOLLOW && options.modelId.includes('/')) {
+      try {
+        const personalConfigPath = resolveZcodePersonalConfigPath(
+          this.locator.personalProviderConfigPath ?? effectiveEnv?.ZCODE_PERSONAL_PROVIDER_CONFIG_FILE,
+        )
+        if (this.fsx.exists(personalConfigPath)) {
+          const rawPersonal = this.fsx.readTextFile(personalConfigPath)
+          let rawBuiltin: string | undefined
+          const builtinPath = effectiveEnv?.ZCODE_BUILTIN_PROVIDER_CONFIG_FILE
+          if (builtinPath && this.fsx.exists(builtinPath)) {
+            try {
+              rawBuiltin = this.fsx.readTextFile(builtinPath)
+            } catch {
+              // 忽略内置配置读取异常
+            }
+          }
+          const modifiedConfig = buildTaskZcodeProviderConfig(
+            rawPersonal,
+            options.modelId,
+            rawBuiltin,
+          )
+          const tmpName = `zcode-provider-${Date.now()}-${Math.random().toString(36).slice(2, 8)}.json`
+          const tmpPath = join(tmpdir(), tmpName)
+          this.fsx.writeTextFile(tmpPath, modifiedConfig)
+          tempConfigFile = tmpPath
+          effectiveEnv = {
+            ...effectiveEnv,
+            ZCODE_PERSONAL_PROVIDER_CONFIG_FILE: tmpPath,
+          }
+        } else {
+          emit({
+            kind: 'warning',
+            text: `ZCode personal 配置未找到(${personalConfigPath}),按客户端当前默认运行`,
+          })
+        }
+      } catch (error) {
+        emit({
+          kind: 'warning',
+          text: `创建任务级模型配置副本失败,按客户端当前默认运行: ${error instanceof Error ? error.message : String(error)}`,
+        })
+      }
+    }
+
     // 会话锚点随行提取,不保留全量 stdout
     const scanSession = (line: string): void => {
       if (!sessionId && /session/i.test(line)) sessionId = extractSessionId(line)
@@ -149,7 +417,7 @@ export class ZcodeDriver implements AgentDriver {
       command: this.locator.nodeBin,
       args,
       cwd: input.cwd,
-      env: this.getEffectiveEnv(),
+      env: effectiveEnv,
       onStdout: (chunk) => {
         for (const line of stdoutDecoder.push(chunk)) handleLine(line)
       },
@@ -184,6 +452,13 @@ export class ZcodeDriver implements AgentDriver {
     } finally {
       clearTimeout(watchdog)
       signal.removeEventListener('abort', onAbort)
+      if (tempConfigFile) {
+        try {
+          this.fsx.remove(tempConfigFile)
+        } catch {
+          // 忽略临时文件清理异常
+        }
+      }
     }
   }
 

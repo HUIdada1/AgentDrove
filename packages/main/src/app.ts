@@ -22,6 +22,9 @@ import {
   TraeDriver,
   WorkspaceManager,
   ZcodeDriver,
+  resolveZcodeCliPaths,
+  resolveZcodePersonalConfigPath,
+  parseZcodePersonalModels,
   MODEL_CLIENT_FOLLOW,
   DEFAULT_DAILY_TASK_CAP,
   DEFAULT_MAX_CONCURRENCY,
@@ -29,6 +32,7 @@ import {
   type AgentProfile,
   type Clock,
   type DetectedAgent,
+  type ModelSwitchKind,
   type OrchestratorDeps,
 } from '@agent-drove/core'
 import type { UpdateStatus } from '@agent-drove/shared'
@@ -137,12 +141,15 @@ async function bootstrap(): Promise<void> {
   // ---- 客户端驱动与注册表:探测延后到窗口就绪后后台跑,注册表先以空态参与装配 ----
   const registry = new Registry()
   const drivers = new Map<string, AgentDriver>()
-  const zcodeCli = process.env.AGENTDROVE_ZCODE_CLI ?? 'E:\\ZCode\\resources\\glm\\zcode.cjs'
+  const zcodeCandidates = resolveZcodeCliPaths(process.env.AGENTDROVE_ZCODE_CLI)
+  const zcodeCli = zcodeCandidates.find((p) => fs.exists(p)) ?? zcodeCandidates[0]
   const zcodeBuiltinConfig = ensureZcodeBuiltinConfig(zcodeCli, fs)
+  const zcodePersonalConfig = resolveZcodePersonalConfigPath()
   const zcodeDriver = new ZcodeDriver(runner, fs, {
     nodeBin: resolveNodeBin(),
     cliPath: zcodeCli,
     builtinProviderConfigPath: zcodeBuiltinConfig,
+    personalProviderConfigPath: fs.exists(zcodePersonalConfig) ? zcodePersonalConfig : undefined,
     // 打包态若回落到 Electron 运行时,必须 ELECTRON_RUN_AS_NODE 才按 node 执行,
     // 否则探测与派发都会拉起第二个 GUI 实例;系统 node 下该变量无副作用;
     // 显式带上 ZCODE_BUILTIN_PROVIDER_CONFIG_FILE 确保官方 CLI 能正确定位内置 Provider
@@ -325,7 +332,7 @@ async function bootstrap(): Promise<void> {
     saveConfig: (next) => saveYamlConfig(paths.config, next),
     update,
     rescanAgents: () =>
-      detectAndRegisterAgents({ store, registry, logger, zcodeCli, zcodeDriver, traeDriver, qoderDriver, codexDriver }),
+      detectAndRegisterAgents({ store, registry, logger, zcodeCandidates, zcodeCli, zcodeDriver, traeDriver, qoderDriver, codexDriver, fs }),
     applyHotkey,
     logger,
     getMainWindow: () => mainWindow,
@@ -343,7 +350,7 @@ async function bootstrap(): Promise<void> {
 
   // ---- 客户端探测后台化(探测结果 + agents 表恢复启用状态)----
   // 完成后广播渲染层重拉客户端,并重建托盘"打开客户端"菜单(创建托盘时注册表还是空的)
-  void detectAndRegisterAgents({ store, registry, logger, zcodeCli, zcodeDriver, traeDriver, qoderDriver, codexDriver })
+  void detectAndRegisterAgents({ store, registry, logger, zcodeCandidates, zcodeCli, zcodeDriver, traeDriver, qoderDriver, codexDriver, fs })
     .then(() => {
       notifyRenderer('agents:changed')
       rebuildTrayMenu()
@@ -386,12 +393,85 @@ const HERE = import.meta.dirname ?? dirname(fileURLToPath(import.meta.url))
 const TASK_RETENTION_MS = 90 * 24 * 3600_000
 const JOURNAL_RETENTION_MS = 180 * 24 * 3600_000
 
-/** Codex CLI 模型档位目录(0.2x 口径);模型跟随登录套餐,失败档位运行期由 CLI 报错兜底 */
+/** Codex CLI 模型档位目录(含跟随客户端) */
 const CODEX_MODELS = [
+  { id: MODEL_CLIENT_FOLLOW, label: '跟随客户端' },
   { id: 'gpt-5.1-codex', label: 'GPT-5.1 Codex' },
   { id: 'gpt-5.1-codex-max', label: 'GPT-5.1 Codex Max' },
   { id: 'gpt-5.1-codex-mini', label: 'GPT-5.1 Codex Mini' },
 ]
+
+/** Qoder CLI 常见模型档位目录(含跟随客户端) */
+const QODER_MODELS = [
+  { id: MODEL_CLIENT_FOLLOW, label: '跟随客户端' },
+  { id: 'qwen3.7-max', label: 'Qwen 3.7 Max' },
+  { id: 'qwen3.7-plus', label: 'Qwen 3.7 Plus' },
+  { id: 'deepseek-v3', label: 'DeepSeek-V3' },
+  { id: 'deepseek-r1', label: 'DeepSeek-R1' },
+]
+
+function resolveTraeRoots(): string[] {
+  const list: string[] = []
+  if (process.env.AGENTDROVE_TRAE_ROOTS) {
+    list.push(...process.env.AGENTDROVE_TRAE_ROOTS.split(';').filter(Boolean))
+  }
+  const localAppData = process.env.LOCALAPPDATA
+  if (localAppData) {
+    list.push(join(localAppData, 'Programs', 'Trae'))
+    list.push(join(localAppData, 'Programs', 'Trae_guoji'))
+  }
+  const progFiles = process.env.ProgramFiles
+  if (progFiles) {
+    list.push(join(progFiles, 'Trae'))
+    list.push(join(progFiles, 'Trae_guoji'))
+  }
+  const progFilesX86 = process.env['ProgramFiles(x86)']
+  if (progFilesX86) {
+    list.push(join(progFilesX86, 'Trae'))
+    list.push(join(progFilesX86, 'Trae_guoji'))
+  }
+  list.push('E:\\Trae_guoji', 'E:\\Trae', 'D:\\Trae_guoji', 'D:\\Trae', 'C:\\Trae')
+  return [...new Set(list)]
+}
+
+function resolveQoderCandidates(): string[] {
+  const list: string[] = []
+  if (process.env.AGENTDROVE_QODER_CLI) {
+    list.push(process.env.AGENTDROVE_QODER_CLI)
+  }
+  list.push('qoderclicn')
+  const localAppData = process.env.LOCALAPPDATA
+  if (localAppData) {
+    list.push(join(localAppData, 'Programs', 'Qoder', 'bin', 'qoderclicn.exe'))
+    list.push(join(localAppData, 'Programs', 'Qoder', 'qoderclicn.exe'))
+    list.push(join(localAppData, 'Programs', 'qoder', 'bin', 'qoderclicn.exe'))
+  }
+  const progFiles = process.env.ProgramFiles
+  if (progFiles) {
+    list.push(join(progFiles, 'Qoder', 'bin', 'qoderclicn.exe'))
+    list.push(join(progFiles, 'Qoder', 'qoderclicn.exe'))
+  }
+  return [...new Set(list)]
+}
+
+function resolveCodexCandidates(): string[] {
+  const list: string[] = []
+  if (process.env.AGENTDROVE_CODEX_CLI) {
+    list.push(process.env.AGENTDROVE_CODEX_CLI)
+  }
+  list.push('codex')
+  const appData = process.env.APPDATA
+  if (appData) {
+    list.push(join(appData, 'npm', 'codex.cmd'))
+  }
+  const localAppData = process.env.LOCALAPPDATA
+  if (localAppData) {
+    list.push(join(localAppData, 'Programs', 'codex', 'bin', 'codex.cmd'))
+    list.push(join(localAppData, 'Programs', 'codex', 'codex.cmd'))
+  }
+  return [...new Set(list)]
+}
+
 
 interface AgentPlanOptions {
   planName: string
@@ -399,6 +479,8 @@ interface AgentPlanOptions {
   models: Array<{ id: string; label: string }>
   followClient: boolean
   attachments: boolean
+  modelSwitch?: ModelSwitchKind
+  defaultModel?: string
 }
 
 /** 启动与设置页"重新扫描"共用的客户端探测登记:启停状态以 agents 表落库为准,重扫幂等 */
@@ -406,14 +488,15 @@ async function detectAndRegisterAgents(deps: {
   store: SqliteStore
   registry: Registry
   logger: Logger
-  /** ZcodeDriver 的 cliPath,zcodeRoot 由它派生,保持与驱动配置同源 */
+  zcodeCandidates: string[]
   zcodeCli: string
   zcodeDriver: ZcodeDriver
   traeDriver: TraeDriver
   qoderDriver: QoderDriver
   codexDriver: CodexDriver
+  fs: NodeFileSystem
 }): Promise<void> {
-  const { store, registry, logger, zcodeCli, zcodeDriver, traeDriver, qoderDriver, codexDriver } = deps
+  const { store, registry, logger, zcodeCandidates, zcodeCli, zcodeDriver, traeDriver, qoderDriver, codexDriver, fs } = deps
   const savedAgents = new Map(store.allAgents().map((row) => [row.id, row]))
   // 本轮探测命中的 id;收尾据此注销"装过但现在没了"的客户端
   const detectedIds = new Set<string>()
@@ -441,57 +524,89 @@ async function detectAndRegisterAgents(deps: {
     }
   }
 
-  const zcodeRoot = zcodeCli.replace(/[\\/]resources[\\/]glm[\\/]zcode\.cjs$/i, '')
-  const zcodeDetected = await detectSafely('zcode', () => zcodeDriver.detect([zcodeRoot, zcodeCli]))
-  if (zcodeDetected) {
-    registerDetected(zcodeDetected, {
-      planName: 'GLM Coding Plan',
-      quota: 'daily',
-      models: [],
-      followClient: true,
-      attachments: true,
-    })
+  const zcodeEntries: string[] = []
+  for (const c of zcodeCandidates) {
+    const root = c.replace(/[\\/]resources[\\/]glm[\\/]zcode\.cjs$/i, '')
+    zcodeEntries.push(root, c)
   }
-  const traeRoots = (process.env.AGENTDROVE_TRAE_ROOTS ?? 'E:\\Trae_guoji;E:\\Trae')
-    .split(';')
-    .filter(Boolean)
+  const zcodeDetected = await detectSafely('zcode', () => zcodeDriver.detect(zcodeEntries))
+  if (zcodeDetected) {
+    let parsedModels: Array<{ id: string; label: string }> = []
+    const personalPath = resolveZcodePersonalConfigPath()
+    if (fs.exists(personalPath)) {
+      try {
+        const raw = fs.readTextFile(personalPath)
+        parsedModels = parseZcodePersonalModels(raw)
+      } catch (err) {
+        logger.warn('解析 ZCode personal provider 配置文件失败', {
+          error: err instanceof Error ? err.message : String(err),
+        })
+      }
+    }
+
+    if (parsedModels.length > 0) {
+      registerDetected(zcodeDetected, {
+        planName: 'GLM Coding Plan',
+        quota: 'daily',
+        models: [
+          { id: MODEL_CLIENT_FOLLOW, label: '跟随客户端' },
+          ...parsedModels,
+        ],
+        followClient: false,
+        modelSwitch: 'config-file',
+        defaultModel: MODEL_CLIENT_FOLLOW,
+        attachments: true,
+      })
+    } else {
+      registerDetected(zcodeDetected, {
+        planName: 'GLM Coding Plan',
+        quota: 'daily',
+        models: [],
+        followClient: true,
+        attachments: true,
+      })
+    }
+  }
+  const traeRoots = resolveTraeRoots()
   const traeDetected = await detectSafely('trae', () => traeDriver.detect(traeRoots))
   if (traeDetected) {
     registerDetected(traeDetected, {
       planName: 'Trae 官方套餐',
       quota: 'subscription',
-      models: [],
+      models: [{ id: MODEL_CLIENT_FOLLOW, label: '跟随客户端' }],
       followClient: true,
+      modelSwitch: 'none',
+      defaultModel: MODEL_CLIENT_FOLLOW,
       attachments: true,
     })
   }
-  if (await commandExists('qoderclicn')) {
-    const qoderDetected = await detectSafely('qoder', () => qoderDriver.detect(['qoderclicn']))
-    if (qoderDetected) {
-      registerDetected(qoderDetected, {
-        planName: 'Qoder Credits',
-        quota: 'credits',
-        // V5 复测回填前给占位模型目录;注册表校验要求 defaultModel ∈ models
-        models: [{ id: 'qoder-default', label: '默认模型' }],
-        followClient: false,
-        attachments: false,
-      })
-    }
+
+  const qoderCandidates = resolveQoderCandidates()
+  const qoderDetected = await detectSafely('qoder', () => qoderDriver.detect(qoderCandidates))
+  if (qoderDetected) {
+    registerDetected(qoderDetected, {
+      planName: 'Qoder Credits',
+      quota: 'credits',
+      models: QODER_MODELS,
+      followClient: false,
+      modelSwitch: 'cli-arg',
+      defaultModel: MODEL_CLIENT_FOLLOW,
+      attachments: false,
+    })
   }
-  if (await commandExists('codex')) {
-    const codexDetected = await detectSafely('codex', () =>
-      codexDriver.detect([process.env.AGENTDROVE_CODEX_CLI ?? 'codex'].filter(Boolean)),
-    )
-    if (codexDetected) {
-      registerDetected(codexDetected, {
-        planName: 'ChatGPT 套餐',
-        quota: 'subscription',
-        // 模型档位由 resolveModelArg 透传 --model;client-follow 时恒空
-        models: CODEX_MODELS,
-        followClient: false,
-        attachments: false,
-      })
-    }
+
+  const codexCandidates = resolveCodexCandidates()
+  const codexDetected = await detectSafely('codex', () => codexDriver.detect(codexCandidates))
+  if (codexDetected) {
+    registerDetected(codexDetected, {
+      planName: 'ChatGPT 套餐',
+      quota: 'subscription',
+      models: CODEX_MODELS,
+      followClient: false,
+      modelSwitch: 'cli-arg',
+      defaultModel: MODEL_CLIENT_FOLLOW,
+      attachments: false,
+    })
   }
 
   // 旧登记但本轮未探到的客户端(卸载/目录迁移)注销出注册表,UI 即不再展示;
@@ -519,13 +634,13 @@ function buildProfile(
     version: detected.version,
     logoPath: detected.logoPath,
     models: options.models,
-    defaultModel: options.followClient
+    defaultModel: options.defaultModel ?? (options.followClient
       ? MODEL_CLIENT_FOLLOW
-      : options.models[0]?.id ?? MODEL_CLIENT_FOLLOW,
+      : options.models[0]?.id ?? MODEL_CLIENT_FOLLOW),
     capabilities: {
       headless: detected.id !== 'trae',
       sessionResume: detected.id !== 'trae',
-      modelSwitch: options.followClient ? 'none' : 'cli-arg',
+      modelSwitch: options.modelSwitch ?? (options.followClient ? 'none' : 'cli-arg'),
       attachments: options.attachments,
     },
     plan: {
