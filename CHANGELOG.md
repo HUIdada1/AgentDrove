@@ -1,5 +1,10 @@
 # Changelog
 
+## v0.4.8 (2026-10-04)
+
+5a522c6 fix(core+main+renderer): 追问接续失败容错/JSON读取兜底/exit→close/CJS import.meta.url 垫片 + 组件打磨
+05ac043 chore(release): v0.4.7 版本同步与 CHANGELOG
+
 ## v0.4.7 (2026-10-04)
 
 5c874ac feat(core+main+renderer): 用量账本结构化(缓存命中率/点数/剩余配额)+ IPC 克隆安全防御 + 用量仪表
