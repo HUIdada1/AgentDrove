@@ -7,6 +7,7 @@ import GlassButton from '../ui/GlassButton.vue'
 import GlassInput from '../ui/GlassInput.vue'
 import GlassSelect from '../ui/GlassSelect.vue'
 import GlassToggle from '../ui/GlassToggle.vue'
+import GlassMeter from '../ui/GlassMeter.vue'
 import { MODE_OPTIONS } from '../labels'
 
 const store = useAppStore()
@@ -329,8 +330,15 @@ async function runExport(kind: 'data' | 'report'): Promise<void> {
             重启安装
           </GlassButton>
         </div>
-        <div v-if="store.updateStatus.value.phase === 'downloading'" class="prog">
-          <div :style="{ width: `${Math.round((store.updateStatus.value.progress ?? 0) * 100)}%` }" />
+        <div v-if="store.updateStatus.value.phase === 'downloading'" class="prog-meter-wrap">
+          <GlassMeter
+            :value="Math.round((store.updateStatus.value.progress ?? 0) * 100)"
+            :max="100"
+            :show-percent="true"
+            :show-spinner="true"
+            status-text="正在下载更新包…"
+            size="md"
+          />
         </div>
         <p class="muted">更新包从 GitHub Releases 下载,下载完成后重启安装。</p>
       </section>

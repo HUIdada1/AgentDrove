@@ -1,6 +1,7 @@
 import { BrowserWindow, dialog, ipcMain, shell } from 'electron'
 import { basename, dirname, join } from 'node:path'
 import { randomUUID } from 'node:crypto'
+import { homedir } from 'node:os'
 import {
   closeSync,
   copyFileSync,
@@ -25,6 +26,7 @@ import {
   type ArtifactChange,
   localDayOf,
   mergeConfig,
+  type AgentProfile,
   type AppConfig,
   type TaskRecord,
   type WorkspaceRow,
@@ -35,6 +37,109 @@ import { tailLogs } from '../logger.js'
 /** 事件单页最大条数:防止渲染层传超大 limit 一次性压垮 IPC */
 const EVENTS_PAGE_MAX_LIMIT = 1000
 
+function computeAgentQuotaAndUsage(
+  ctx: AppContext,
+  profile: AgentProfile,
+  day: string,
+  todayStartMs: number,
+) {
+  const usedToday = ctx.store.countOf(profile.id, day)
+  const stats = ctx.store.agentUsageStats(profile.id, todayStartMs)
+
+  // 若为 zcode，尝试读取本地权威 ~/.zcode/cli/db/db.sqlite
+  if (profile.id === 'zcode') {
+    try {
+      const zdbPath = join(homedir(), '.zcode', 'cli', 'db', 'db.sqlite')
+      if (existsSync(zdbPath)) {
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        const req = (globalThis as any).require
+        const { DatabaseSync } = req ? req('node:sqlite') ?? {} : {}
+        if (DatabaseSync) {
+          const zdb = new DatabaseSync(zdbPath, { readOnly: true })
+          try {
+            // eslint-disable-next-line @typescript-eslint/no-explicit-any
+            const row: any = zdb
+              .prepare(
+                `SELECT SUM(input_tokens) as inTok, SUM(output_tokens) as outTok, SUM(cache_read_input_tokens) as cacheTok
+                 FROM model_usage
+                 WHERE started_at >= ?`,
+              )
+              .get(todayStartMs)
+            if (row && (row.inTok || row.outTok)) {
+              const inTok = Number(row.inTok) || 0
+              const outTok = Number(row.outTok) || 0
+              const cacheTok = Number(row.cacheTok) || 0
+              stats.usedTokens = Math.max(stats.usedTokens, inTok + outTok + cacheTok)
+              stats.cachedTokens = Math.max(stats.cachedTokens, cacheTok)
+              const totalIn = inTok + cacheTok
+              if (totalIn > 0) {
+                stats.cacheHitRate = Number(((cacheTok / totalIn) * 100).toFixed(1))
+              }
+              stats.usedCredits = Math.max(
+                stats.usedCredits,
+                Number(((inTok + outTok + cacheTok) / 1000).toFixed(2)),
+              )
+            }
+          } finally {
+            zdb.close()
+          }
+        }
+      }
+    } catch {
+      // 优雅忽略
+    }
+  }
+
+  const plan = profile.plan
+  let totalCredits = plan.totalCredits
+  let totalTokens = plan.totalTokens
+
+  if (!totalTokens) {
+    totalTokens = plan.quotaKind === 'daily' ? 150_000_000 : plan.dailyTaskCap * 100_000
+  }
+  if (!totalCredits) {
+    totalCredits = plan.quotaKind === 'credits' ? 1000 : Math.round(totalTokens / 1000)
+  }
+
+  const remainingTokens = Math.max(0, totalTokens - stats.usedTokens)
+  const remainingCredits = Math.max(0, Number((totalCredits - stats.usedCredits).toFixed(2)))
+
+  let remainingPercent: number
+  if (plan.quotaKind === 'credits') {
+    remainingPercent =
+      totalCredits > 0
+        ? Math.max(0, Math.min(100, Math.round((remainingCredits / totalCredits) * 100)))
+        : 100
+  } else if (plan.quotaKind === 'daily') {
+    remainingPercent =
+      totalTokens > 0
+        ? Math.max(0, Math.min(100, Number(((remainingTokens / totalTokens) * 100).toFixed(1))))
+        : 100
+  } else {
+    const taskPercent =
+      plan.dailyTaskCap > 0
+        ? Math.max(0, Math.round(((plan.dailyTaskCap - usedToday) / plan.dailyTaskCap) * 100))
+        : 100
+    remainingPercent =
+      totalTokens > 0
+        ? Math.max(0, Math.min(100, Math.round((remainingTokens / totalTokens) * 100)))
+        : taskPercent
+  }
+
+  return {
+    usedToday,
+    usedTokensToday: stats.usedTokens,
+    usedCreditsToday: stats.usedCredits,
+    cachedTokensToday: stats.cachedTokens,
+    cacheHitRateToday: stats.cacheHitRate,
+    remainingCredits,
+    remainingTokens,
+    remainingPercent,
+    totalCredits,
+    totalTokens,
+  }
+}
+
 /** 按契约注册全部 IPC 通道;handler 只做参数适配,业务规则都在 core */
 export function registerIpcHandlers(ctx: AppContext): void {
   // 按调用取当天(本地时区):跨零点后注册时缓存的旧日期会让今日用量归零
@@ -44,27 +149,38 @@ export function registerIpcHandlers(ctx: AppContext): void {
   // 列表组装口径只维护一份:agents:list 与 agents:rescan 共用
   const buildAgentViews = async (): Promise<AgentView[]> => {
     const day = today()
+    const now = new Date()
+    const todayStartMs = new Date(now.getFullYear(), now.getMonth(), now.getDate()).getTime()
     const profiles = ctx.registry.list()
     // 探活并行:串行时每个无缓存客户端都要等 doctor 跑完,四个客户端启动首拉要拖 5~15s
     const healths = await Promise.all(
       profiles.map((profile) => ctx.health.check(profile.id).catch(() => undefined)),
     )
-    return profiles.map((profile, index) => ({
-      id: profile.id,
-      label: profile.label,
-      driver: profile.driver,
-      entry: profile.entry,
-      cliEntry: profile.cliEntry,
-      version: profile.version,
-      logoPath: profile.logoPath,
-      models: ctx.registry.modelPresets(profile.id),
-      defaultModel: profile.defaultModel,
-      capabilities: profile.capabilities,
-      plan: profile.plan,
-      enabled: profile.enabled,
-      health: healths[index],
-      usedToday: ctx.store.countOf(profile.id, day),
-    }))
+    return profiles.map((profile, index) => {
+      const quota = computeAgentQuotaAndUsage(ctx, profile, day, todayStartMs)
+      return {
+        id: profile.id,
+        label: profile.label,
+        driver: profile.driver,
+        entry: profile.entry,
+        cliEntry: profile.cliEntry,
+        version: profile.version,
+        logoPath: profile.logoPath,
+        models: ctx.registry.modelPresets(profile.id),
+        defaultModel: profile.defaultModel,
+        capabilities: profile.capabilities,
+        plan: profile.plan,
+        enabled: profile.enabled,
+        health: healths[index],
+        usedToday: quota.usedToday,
+        remainingCredits: quota.remainingCredits,
+        remainingTokens: quota.remainingTokens,
+        remainingPercent: quota.remainingPercent,
+        usedTokensToday: quota.usedTokensToday,
+        usedCreditsToday: quota.usedCreditsToday,
+        cacheHitRateToday: quota.cacheHitRateToday,
+      }
+    })
   }
 
   ipcMain.handle('agents:list', (): Promise<AgentView[]> => buildAgentViews())
@@ -283,8 +399,11 @@ export function registerIpcHandlers(ctx: AppContext): void {
 
   ipcMain.handle('usage:get', (): UsageView[] => {
     const day = today()
+    const now = new Date()
+    const todayStartMs = new Date(now.getFullYear(), now.getMonth(), now.getDate()).getTime()
     return ctx.registry.list().map((profile) => {
       const usage = ctx.store.usageOf(profile.id, day)
+      const quota = computeAgentQuotaAndUsage(ctx, profile, day, todayStartMs)
       return {
         agentId: profile.id,
         label: profile.label,
@@ -292,6 +411,15 @@ export function registerIpcHandlers(ctx: AppContext): void {
         taskCount: usage.taskCount,
         estimated: usage.estimated,
         dailyTaskCap: profile.plan.dailyTaskCap,
+        usedTokensToday: quota.usedTokensToday,
+        usedCreditsToday: quota.usedCreditsToday,
+        cachedTokensToday: quota.cachedTokensToday,
+        cacheHitRateToday: quota.cacheHitRateToday,
+        remainingCredits: quota.remainingCredits,
+        remainingTokens: quota.remainingTokens,
+        remainingPercent: quota.remainingPercent,
+        totalCredits: quota.totalCredits,
+        totalTokens: quota.totalTokens,
       }
     })
   })

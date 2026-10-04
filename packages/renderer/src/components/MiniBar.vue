@@ -119,7 +119,8 @@ function onKeydown(event: KeyboardEvent): void {
 
 .who {
   align-self: center;
-  max-width: 128px;
+  min-width: 100px;
+  max-width: 150px;
 }
 
 .field {

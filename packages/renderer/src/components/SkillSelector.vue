@@ -98,13 +98,13 @@ function isSkillActive(skill: SkillDefinition): boolean {
 .preset-btn {
   display: inline-flex;
   align-items: center;
-  gap: 3px;
-  padding: 2px 7px;
+  gap: 4px;
+  padding: 4px 9px;
   border-radius: var(--radius-sm);
   background: var(--chip-bg);
   border: 1px solid var(--line);
   color: var(--muted);
-  font-size: 11px;
+  font-size: 11.5px;
   cursor: pointer;
   transition: all var(--fast) var(--ease);
 }
@@ -118,28 +118,28 @@ function isSkillActive(skill: SkillDefinition): boolean {
 .skills-list {
   display: flex;
   align-items: center;
-  gap: 5px;
+  gap: 6px;
   flex-wrap: wrap;
 }
 
 .skill-chip {
   display: inline-flex;
   align-items: center;
-  gap: 4px;
-  padding: 2px 8px;
+  gap: 5px;
+  padding: 4px 10px;
   border-radius: 999px;
   background: var(--chip-bg);
   border: 1px solid var(--line);
   color: var(--muted);
-  font-size: 11px;
+  font-size: 11.5px;
   cursor: pointer;
   transition: all var(--fast) var(--ease);
   user-select: none;
 }
 
 .skill-chip .dot {
-  width: 5px;
-  height: 5px;
+  width: 6px;
+  height: 6px;
   border-radius: 50%;
   background: var(--faint);
   transition: all var(--fast) var(--ease);

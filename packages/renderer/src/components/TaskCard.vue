@@ -41,14 +41,32 @@ const time = computed(() => {
 const displayModel = computed(() =>
   formatModelDisplay(props.task.modelId, props.task.agentId, store.agents.value),
 )
+
+function formatTokens(n?: number): string {
+  if (!n) return '0'
+  if (n >= 1_000_000) return `${(n / 1_000_000).toFixed(1)}M`
+  if (n >= 1_000) return `${(n / 1_000).toFixed(1)}k`
+  return String(n)
+}
+
+const totalTokens = computed(() => {
+  if (!props.task.usage) return 0
+  return (
+    (props.task.usage.inputTokens || 0) +
+    (props.task.usage.outputTokens || 0) +
+    (props.task.usage.cachedTokens || 0)
+  )
+})
 </script>
 
 <template>
   <article class="card spot" :class="[`s-${task.state}`, { selected }]" @click="$emit('click')">
     <div class="top">
       <span class="agent">{{ agentLabel ?? task.agentId }}</span>
-      <span class="model">{{ displayModel }}</span>
-      <span class="badge">{{ STATE_TEXT[task.state] }}</span>
+      <span class="badge" :class="{ 'is-running': task.state === 'running' }">
+        <span v-if="task.state === 'running'" class="card-spin" aria-hidden="true" />
+        {{ STATE_TEXT[task.state] }}
+      </span>
       <span v-if="task.skills?.length" class="card-skills">
         <span v-for="s in task.skills.slice(0, 3)" :key="s" class="s-dot" :title="s">{{ s.slice(0, 1) }}</span>
       </span>
@@ -60,6 +78,15 @@ const displayModel = computed(() =>
       {{ summary }}
     </div>
     <div v-if="task.error" class="err">{{ task.error.slice(0, 90) }}</div>
+
+    <!-- 真实消耗与缓存命中率 -->
+    <div v-if="task.usage" class="card-usage num">
+      <span class="usage-item" title="对话消耗点数">💎 {{ task.usage.credits }} 点</span>
+      <span class="usage-item" title="总消耗 Tokens">🔤 {{ formatTokens(totalTokens) }}</span>
+      <span v-if="task.usage.cacheHitRate" class="usage-cache" title="Prompt 缓存命中率">
+        ⚡ 缓存 {{ task.usage.cacheHitRate }}%
+      </span>
+    </div>
     <div class="foot">
       <span v-if="ORIGIN_MARK[task.origin]" class="origin">{{ ORIGIN_MARK[task.origin] }}</span>
       <span v-if="task.attempt > 1" class="origin">attempt {{ task.attempt }}</span>
@@ -87,7 +114,7 @@ const displayModel = computed(() =>
   backdrop-filter: var(--glass-blur);
   border: 1px solid var(--glass-edge);
   box-shadow: inset 0 1px 0 var(--glass-specular);
-  padding: 9px 12px;
+  padding: 12px 14px;
   cursor: pointer;
   transition: transform var(--fast) var(--ease), border-color var(--fast) var(--ease),
     background var(--fast) var(--ease);
@@ -162,15 +189,35 @@ const displayModel = computed(() =>
 .badge {
   margin-left: auto;
   font-size: 11px;
-  padding: 1px 9px;
+  padding: 2px 9px;
   border-radius: 999px;
   background: var(--chip-bg);
   color: var(--muted);
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+}
+
+.card-spin {
+  width: 10px;
+  height: 10px;
+  flex: none;
+  border-radius: 50%;
+  border: 1.5px solid var(--accent-line);
+  border-top-color: var(--accent-strong);
+  animation: cardSpin 0.8s linear infinite;
+}
+
+@keyframes cardSpin {
+  to {
+    transform: rotate(360deg);
+  }
 }
 
 .s-running .badge {
   background: var(--accent-dim);
   color: var(--accent-strong);
+  border: 1px solid var(--accent-line);
   animation: breathe 1.6s ease-in-out infinite;
 }
 
@@ -273,5 +320,32 @@ const displayModel = computed(() =>
   color: var(--accent-strong);
   margin-right: 4px;
   font-weight: 600;
+}
+
+.card-usage {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-top: 6px;
+  font-size: 11px;
+  color: var(--muted);
+  flex-wrap: wrap;
+}
+
+.usage-item {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+}
+
+.usage-cache {
+  font-weight: 700;
+  font-size: 10px;
+  color: #10b981;
+  background: color-mix(in srgb, #10b981 12%, transparent);
+  border: 1px solid color-mix(in srgb, #10b981 25%, transparent);
+  padding: 0 4px;
+  border-radius: 4px;
+  line-height: 1.4;
 }
 </style>

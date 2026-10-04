@@ -553,14 +553,28 @@ export class Orchestrator {
           signal: controller.signal,
           timeoutMs: this.deps.defaultTimeoutMs,
         })
-        if (controller.signal.aborted) return // 取消已由 cancel() 落状态
+        if (controller.signal.aborted) return
         if (result.sessionId && !task.sessionId) {
           task.sessionId = result.sessionId
-          this.deps.repo.putTask(task)
         }
         if (result.usage) {
-          emit({ kind: 'usage', ...result.usage })
+          const inTok = result.usage.inputTokens ?? 0
+          const outTok = result.usage.outputTokens ?? 0
+          const cachedTok = result.usage.cachedTokens ?? 0
+          const totalInput = inTok + cachedTok
+          const cacheHitRate = totalInput > 0 ? Number(((cachedTok / totalInput) * 100).toFixed(1)) : 0
+          const credits = result.usage.credits ?? Number(((inTok + outTok + cachedTok) / 1000).toFixed(2))
+          task.usage = {
+            inputTokens: inTok,
+            outputTokens: outTok,
+            cachedTokens: cachedTok,
+            credits,
+            cacheHitRate,
+            cost: result.usage.cost,
+          }
+          emit({ kind: 'usage', ...task.usage })
         }
+        this.deps.repo.putTask(task)
         if (result.code === 0) {
           this.transition(task, 'completed')
           this.processFollowupQueue(task)

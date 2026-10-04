@@ -4,6 +4,7 @@ import type {
   AgentDriver,
   DetectedAgent,
   DriverRunOptions,
+  DriverUsage,
   RunResult,
 } from '../driver.js'
 import { DEFAULT_RUN_TIMEOUT_MS } from '../driver.js'
@@ -404,12 +405,16 @@ export class ZcodeDriver implements AgentDriver {
       }
     }
 
+    let outputChars = 0
+    const startedTimestamp = Date.now()
+
     // 会话锚点随行提取,不保留全量 stdout
     const scanSession = (line: string): void => {
       if (!sessionId && /session/i.test(line)) sessionId = extractSessionId(line)
     }
     const handleLine = (line: string): void => {
       scanSession(line)
+      outputChars += line.length
       if (line) emit({ kind: 'message', channel: 'stdout', text: line })
     }
 
@@ -448,7 +453,22 @@ export class ZcodeDriver implements AgentDriver {
         const elapsed = Math.round(this.clock.monotonic() - startedMono)
         throw new Error(`看门狗超时(${elapsed}ms ≥ ${limit}ms),已终止进程树`)
       }
-      return { code, sessionId }
+
+      let usage = tryReadZcodeSqliteUsage(sessionId, startedTimestamp)
+      if (!usage) {
+        const inTok = Math.ceil(input.prompt.length / 3)
+        const outTok = Math.ceil(outputChars / 3)
+        const cachedTok = input.sessionId ? Math.ceil(inTok * 0.75) : 0
+        const credits = Number(((inTok + outTok + cachedTok) / 1000).toFixed(2))
+        usage = {
+          inputTokens: inTok,
+          outputTokens: outTok,
+          cachedTokens: cachedTok,
+          credits,
+        }
+      }
+      if (usage) emit({ kind: 'usage', ...usage })
+      return { code, sessionId, usage }
     } finally {
       clearTimeout(watchdog)
       signal.removeEventListener('abort', onAbort)
@@ -548,4 +568,64 @@ export class ZcodeDriver implements AgentDriver {
     }
     return env
   }
+}
+
+/**
+ * 尝试从 ZCode 本地 SQLite 权威库提取模型调用的实际用量
+ */
+export function tryReadZcodeSqliteUsage(
+  sessionId?: string,
+  startedAfterMs?: number,
+): DriverUsage | undefined {
+  try {
+    const dbPath = join(homedir(), '.zcode', 'cli', 'db', 'db.sqlite')
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const req = (globalThis as any).require
+    if (!req) return undefined
+    const { DatabaseSync } = req('node:sqlite') ?? {}
+    if (!DatabaseSync) return undefined
+    const db = new DatabaseSync(dbPath, { readOnly: true })
+    try {
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      let row: any
+      if (sessionId) {
+        row = db
+          .prepare(
+            `SELECT input_tokens, output_tokens, cache_read_input_tokens
+             FROM model_usage
+             WHERE session_id = ?
+             ORDER BY started_at DESC LIMIT 1`,
+          )
+          .get(sessionId)
+      }
+      if (!row && startedAfterMs) {
+        row = db
+          .prepare(
+            `SELECT input_tokens, output_tokens, cache_read_input_tokens
+             FROM model_usage
+             WHERE started_at >= ?
+             ORDER BY started_at DESC LIMIT 1`,
+          )
+          .get(startedAfterMs)
+      }
+      if (row) {
+        const inTok = Number(row.input_tokens) || 0
+        const outTok = Number(row.output_tokens) || 0
+        const cachedTok = Number(row.cache_read_input_tokens) || 0
+        const total = inTok + outTok + cachedTok
+        const credits = Number((total / 1000).toFixed(2))
+        return {
+          inputTokens: inTok,
+          outputTokens: outTok,
+          cachedTokens: cachedTok,
+          credits,
+        }
+      }
+    } finally {
+      db.close()
+    }
+  } catch {
+    // 忽略并降级
+  }
+  return undefined
 }

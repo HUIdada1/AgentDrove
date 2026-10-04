@@ -15,6 +15,7 @@ import type {
   Project,
   StoredEvent,
   TaskRecord,
+  TaskUsage,
   WorkspaceRow,
 } from '@agent-drove/core'
 
@@ -30,6 +31,7 @@ export type {
   Project,
   StoredEvent,
   TaskRecord,
+  TaskUsage,
   WorkspaceRow,
 }
 
@@ -189,6 +191,18 @@ export interface AgentView {
   health?: HealthReport
   /** 今日已计任务数 */
   usedToday: number
+  /** 剩余点数 (Credits) */
+  remainingCredits?: number
+  /** 剩余 Token 数 */
+  remainingTokens?: number
+  /** 剩余百分比 (0-100) */
+  remainingPercent?: number
+  /** 今日消耗 Token 数 */
+  usedTokensToday?: number
+  /** 今日消耗点数 */
+  usedCreditsToday?: number
+  /** 今日平均缓存命中率 (0-100) */
+  cacheHitRateToday?: number
 }
 
 export interface SubmitTaskDto {
@@ -237,6 +251,24 @@ export interface UsageView {
   taskCount: number
   estimated: number
   dailyTaskCap: number
+  /** 今日已用 Token 数 */
+  usedTokensToday: number
+  /** 今日已用点数 */
+  usedCreditsToday: number
+  /** 今日命中缓存 Token 数 */
+  cachedTokensToday: number
+  /** 今日平均缓存命中率 (0-100) */
+  cacheHitRateToday: number
+  /** 剩余点数 */
+  remainingCredits?: number
+  /** 剩余 Tokens */
+  remainingTokens?: number
+  /** 剩余百分比 */
+  remainingPercent?: number
+  /** 总额度点数 */
+  totalCredits?: number
+  /** 总额度 Tokens */
+  totalTokens?: number
 }
 
 export interface MergeResult {

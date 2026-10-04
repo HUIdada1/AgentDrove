@@ -2,6 +2,7 @@ import type {
   AgentDriver,
   DetectedAgent,
   DriverRunOptions,
+  DriverUsage,
   RunResult,
 } from '../driver.js'
 import { DEFAULT_RUN_TIMEOUT_MS } from '../driver.js'
@@ -76,9 +77,17 @@ export class QoderDriver implements AgentDriver {
     const stderrDecoder = new LineDecoder()
     let timedOut = false
     let sessionId: string | undefined
+    let usage: DriverUsage | undefined
 
     const scanSession = (line: string): void => {
       if (!sessionId && /session/i.test(line)) sessionId = extractSessionId(line)
+    }
+
+    const handleLine = (line: string): void => {
+      scanSession(line)
+      this.emitLine(line, emit, (u) => {
+        usage = u
+      })
     }
 
     const handle = this.runner.spawn({
@@ -87,10 +96,7 @@ export class QoderDriver implements AgentDriver {
       cwd: input.cwd,
       shell: this.needsShell(agent.entry),
       onStdout: (chunk) => {
-        for (const line of stdoutDecoder.push(chunk)) {
-          scanSession(line)
-          this.emitLine(line, emit)
-        }
+        for (const line of stdoutDecoder.push(chunk)) handleLine(line)
       },
       onStderr: (chunk) => {
         for (const line of stderrDecoder.push(chunk)) {
@@ -109,17 +115,15 @@ export class QoderDriver implements AgentDriver {
 
     try {
       const code = await handle.exited
-      for (const line of stdoutDecoder.flush()) {
-        scanSession(line)
-        this.emitLine(line, emit)
-      }
+      for (const line of stdoutDecoder.flush()) handleLine(line)
       for (const line of stderrDecoder.flush()) {
         if (line) emit({ kind: 'message', channel: 'stderr', text: line })
       }
       if (timedOut && !signal.aborted) {
         throw new Error('看门狗超时,已终止进程树')
       }
-      return { code, sessionId }
+      if (usage) emit({ kind: 'usage', ...usage })
+      return { code, sessionId, usage }
     } finally {
       clearTimeout(watchdog)
       signal.removeEventListener('abort', onAbort)
@@ -145,7 +149,11 @@ export class QoderDriver implements AgentDriver {
   }
 
   /** stream-json 行尽量结构化,解析不出就原样透传(6.2 规范 3) */
-  private emitLine(line: string, emit: DriverRunOptions['emit']): void {
+  private emitLine(
+    line: string,
+    emit: DriverRunOptions['emit'],
+    onUsage?: (usage: DriverUsage) => void,
+  ): void {
     if (!line) return
     try {
       const parsed = JSON.parse(line) as Record<string, unknown>
@@ -153,6 +161,20 @@ export class QoderDriver implements AgentDriver {
       if (text) {
         emit({ kind: 'message', channel: 'agent', text })
         return
+      }
+      const rawUsage = ((parsed.message as Record<string, unknown> | undefined)?.usage ??
+        parsed.usage) as Record<string, unknown> | undefined
+      if (rawUsage && typeof rawUsage === 'object') {
+        const inTok = numberOf(rawUsage.input_tokens) ?? 0
+        const outTok = numberOf(rawUsage.output_tokens) ?? 0
+        const cachedTok = numberOf(rawUsage.cache_read_input_tokens ?? rawUsage.cached_tokens) ?? 0
+        const credits = numberOf(rawUsage.credits) ?? Number(((inTok + outTok + cachedTok) / 1000).toFixed(2))
+        onUsage?.({
+          inputTokens: inTok,
+          outputTokens: outTok,
+          cachedTokens: cachedTok,
+          credits,
+        })
       }
       emit({ kind: 'message', channel: 'stdout', text: line })
     } catch {
@@ -232,4 +254,8 @@ export class QoderDriver implements AgentDriver {
       timeoutMs,
     )
   }
+}
+
+function numberOf(value: unknown): number | undefined {
+  return typeof value === 'number' && Number.isFinite(value) ? value : undefined
 }

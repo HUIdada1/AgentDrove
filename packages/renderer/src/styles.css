@@ -291,6 +291,17 @@ select {
   font-variant-numeric: tabular-nums;
 }
 
+/* 全局通用转圈与微光 (参考 AgentHub mpd-spin 与全局动画) */
+.g-spin {
+  animation: gSpinGlobal 0.85s linear infinite;
+}
+
+@keyframes gSpinGlobal {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
 /* 换视图(面板↔设置)时整体淡入 */
 .view {
   animation: view-in var(--fast) var(--ease);

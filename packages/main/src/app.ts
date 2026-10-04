@@ -481,6 +481,8 @@ interface AgentPlanOptions {
   attachments: boolean
   modelSwitch?: ModelSwitchKind
   defaultModel?: string
+  totalCredits?: number
+  totalTokens?: number
 }
 
 /** 启动与设置页"重新扫描"共用的客户端探测登记:启停状态以 agents 表落库为准,重扫幂等 */
@@ -556,6 +558,8 @@ async function detectAndRegisterAgents(deps: {
         modelSwitch: 'config-file',
         defaultModel: MODEL_CLIENT_FOLLOW,
         attachments: true,
+        totalTokens: 150_000_000,
+        totalCredits: 150_000,
       })
     } else {
       registerDetected(zcodeDetected, {
@@ -564,6 +568,8 @@ async function detectAndRegisterAgents(deps: {
         models: [],
         followClient: true,
         attachments: true,
+        totalTokens: 150_000_000,
+        totalCredits: 150_000,
       })
     }
   }
@@ -578,6 +584,8 @@ async function detectAndRegisterAgents(deps: {
       modelSwitch: 'none',
       defaultModel: MODEL_CLIENT_FOLLOW,
       attachments: true,
+      totalCredits: 500,
+      totalTokens: 5_000_000,
     })
   }
 
@@ -592,6 +600,8 @@ async function detectAndRegisterAgents(deps: {
       modelSwitch: 'cli-arg',
       defaultModel: MODEL_CLIENT_FOLLOW,
       attachments: false,
+      totalCredits: 1000,
+      totalTokens: 10_000_000,
     })
   }
 
@@ -606,6 +616,8 @@ async function detectAndRegisterAgents(deps: {
       modelSwitch: 'cli-arg',
       defaultModel: MODEL_CLIENT_FOLLOW,
       attachments: false,
+      totalTokens: 10_000_000,
+      totalCredits: 10_000,
     })
   }
 
@@ -650,6 +662,8 @@ function buildProfile(
       // 默认值以 core 注册表为唯一出处;register 时的 normalizePlan 还会再兜底一次
       dailyTaskCap: DEFAULT_DAILY_TASK_CAP,
       maxConcurrency: DEFAULT_MAX_CONCURRENCY,
+      totalCredits: options.totalCredits,
+      totalTokens: options.totalTokens,
     },
     enabled: savedEnabled ?? true,
   }

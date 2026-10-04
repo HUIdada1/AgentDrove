@@ -21,6 +21,9 @@ export interface DriverRunOptions {
 export interface DriverUsage {
   inputTokens?: number
   outputTokens?: number
+  cachedTokens?: number
+  credits?: number
+  cost?: number
 }
 
 /** 驱动看门狗缺省时长;编排层注入的 defaultTimeoutMs 优先于此值 */

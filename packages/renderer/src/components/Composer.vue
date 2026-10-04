@@ -91,11 +91,13 @@ onMounted(() => {
   window.addEventListener('focus-composer', focusPrompt)
 })
 
-// agents 异步到达后回填默认选中,否则下拉框显示为空
+// agents 异步到达或变更后回填默认选中,避免失效或下拉框显示为空
 watch(
   activeAgents,
   (list) => {
-    if (!agentId.value && list.length > 0) agentId.value = list[0]!.id
+    if ((!agentId.value || !list.some((a) => a.id === agentId.value)) && list.length > 0) {
+      agentId.value = list[0]!.id
+    }
   },
   { immediate: true },
 )
@@ -202,22 +204,22 @@ async function submit(): Promise<void> {
       projectId,
       ...(resolvedModelId.value ? { modelId: resolvedModelId.value } : {}),
       mode: mode.value,
-      skills: store.activeSkills.value,
-      // 必须拷成纯对象数组:attachments.value 是响应式代理(Proxy),直接过 IPC
-      // 结构化克隆必抛 "An object could not be cloned"(与设置页保存同源问题)
+      skills: [...store.activeSkills.value],
+      // 必须纯数据对象拷贝,避免 Vue 响应式代理引发 "An object could not be cloned"
       attachments:
         attachments.value.length > 0
-          ? attachments.value.map((a) => ({ ...a }))
+          ? attachments.value.map((a) => ({ path: a.path, kind: a.kind }))
           : undefined,
-      ...(toolPolicy ? { toolPolicy } : {}),
+      ...(toolPolicy ? { toolPolicy: { ...toolPolicy, denyList: [...toolPolicy.denyList] } } : {}),
     }))
+    const cleanDtos = JSON.parse(JSON.stringify(dtos)) as SubmitTaskDto[]
     // 派生工作区:git 源建 worktree,非 git 整拷降级(主进程完成)
     if (workspaceSource.value) {
       await window.api.tasksSubmitBatch(
-        dtos.map((dto) => ({ ...dto, workspaceSource: workspaceSource.value })),
+        cleanDtos.map((dto) => ({ ...dto, workspaceSource: workspaceSource.value })),
       )
     } else {
-      const tasks = await window.api.tasksSubmitBatch(dtos)
+      const tasks = await window.api.tasksSubmitBatch(cleanDtos)
       if (tasks.length > 0) store.selectedTaskId.value = tasks[0]?.id ?? null
     }
     prompt.value = ''
@@ -352,29 +354,32 @@ function onKeydown(event: KeyboardEvent): void {
 .composer {
   display: flex;
   flex-direction: column;
-  gap: 8px;
-  padding: 12px 14px 10px;
+  gap: 10px;
+  padding: 14px 16px 12px;
 }
 
 .toolbar {
   display: flex;
   align-items: center;
-  gap: 6px;
+  gap: 8px;
+  flex-wrap: wrap;
 }
 
 .who {
-  max-width: 130px;
+  min-width: 110px;
+  max-width: 160px;
 }
 
 .model {
-  max-width: 160px;
+  min-width: 130px;
+  max-width: 220px;
 }
 
 /* 工作区行:目录输入占主导 */
 .ws-row {
   display: flex;
   align-items: center;
-  gap: 6px;
+  gap: 8px;
 }
 
 .ws {

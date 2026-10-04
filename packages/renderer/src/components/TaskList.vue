@@ -160,12 +160,19 @@ function toggleSelectAll(): void {
 
 .filters {
   display: flex;
+  align-items: center;
   gap: 6px;
   padding-bottom: 10px;
 }
 
 .filters > :first-child {
   flex: 1;
+  min-width: 120px;
+}
+
+.filters :deep(.g-select-wrap) {
+  flex: none;
+  min-width: 98px;
 }
 
 .batch {

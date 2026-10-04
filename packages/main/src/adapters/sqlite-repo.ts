@@ -10,6 +10,7 @@ import type {
   StoredEvent,
   TaskRecord,
   TaskRepository,
+  TaskUsage,
   UsageLedger,
   WorkspaceRow,
   WorkspaceStore,
@@ -98,6 +99,10 @@ const MIGRATIONS: ((db: SqliteDb) => void)[] = [
       ALTER TABLE tasks ADD COLUMN skills_json TEXT;
     `)
   },
+  // v6: 任务消耗统计与缓存命中率
+  (db) => {
+    db.exec(`ALTER TABLE tasks ADD COLUMN usage_json TEXT;`)
+  },
 ]
 
 export class SqliteStore
@@ -149,10 +154,10 @@ export class SqliteStore
         `INSERT OR REPLACE INTO tasks
          (id, agent_id, model_id, title, prompt, cwd, project_id, state, session_id, resume_latest, parent_id, error,
           attachments_json, skills_json, tool_policy_json, mode, origin, created_at, started_at, finished_at,
-          retry_of, attempt)
+          retry_of, attempt, usage_json)
          VALUES (@id, @agentId, @modelId, @title, @prompt, @cwd, @projectId, @state, @sessionId, @resumeLatest, @parentId, @error,
           @attachmentsJson, @skillsJson, @toolPolicyJson, @mode, @origin, @createdAt, @startedAt, @finishedAt,
-          @retryOf, @attempt)`,
+          @retryOf, @attempt, @usageJson)`,
       )
       .run(rowFromTask(task))
   }
@@ -267,6 +272,47 @@ export class SqliteStore
       taskCount: row.task_count,
       estimated: row.estimated,
     }))
+  }
+
+  /**
+   * 聚合客户端指定时间以来的消耗与缓存命中率
+   */
+  agentUsageStats(agentId: string, sinceMs: number): {
+    usedTokens: number
+    usedCredits: number
+    cachedTokens: number
+    cacheHitRate: number
+  } {
+    const rows = this.db
+      .prepare(
+        `SELECT usage_json FROM tasks WHERE agent_id = ? AND created_at >= ? AND usage_json IS NOT NULL`,
+      )
+      .all(agentId, sinceMs) as Array<{ usage_json: string }>
+
+    let inputTokens = 0
+    let outputTokens = 0
+    let cachedTokens = 0
+    let credits = 0
+    for (const r of rows) {
+      try {
+        const u = JSON.parse(r.usage_json) as TaskUsage
+        inputTokens += u.inputTokens || 0
+        outputTokens += u.outputTokens || 0
+        cachedTokens += u.cachedTokens || 0
+        credits += u.credits || 0
+      } catch {
+        // 忽略损坏的单条用量
+      }
+    }
+    const totalTokens = inputTokens + outputTokens + cachedTokens
+    const totalInput = inputTokens + cachedTokens
+    const cacheHitRate = totalInput > 0 ? Number(((cachedTokens / totalInput) * 100).toFixed(1)) : 0
+    return {
+      usedTokens: totalTokens,
+      usedCredits: Number(credits.toFixed(2)),
+      cachedTokens,
+      cacheHitRate,
+    }
   }
 
   // ---- JournalStore ----
@@ -524,6 +570,7 @@ interface TaskRow {
   finished_at: number | null
   retry_of: string | null
   attempt: number
+  usage_json: string | null
 }
 
 interface EventRow {
@@ -600,6 +647,7 @@ function rowFromTask(task: TaskRecord) {
     finishedAt: task.finishedAt ?? null,
     retryOf: task.retryOf ?? null,
     attempt: task.attempt,
+    usageJson: task.usage ? JSON.stringify(task.usage) : null,
   }
 }
 
@@ -631,6 +679,7 @@ function taskFromRow(row: TaskRow): TaskRecord {
     finishedAt: row.finished_at ?? undefined,
     retryOf: row.retry_of ?? undefined,
     attempt: row.attempt,
+    usage: row.usage_json ? (JSON.parse(row.usage_json) as TaskUsage) : undefined,
   }
 }
 

@@ -152,6 +152,63 @@ function healthClass(agent: AgentView): string {
   if (!agent.health) return 'unknown'
   return agent.health.ok ? 'ok' : 'bad'
 }
+
+function hasRunningTask(agentId: string): boolean {
+  return store.tasks.value.some((t) => t.agentId === agentId && t.state === 'running')
+}
+
+function formatTokens(n?: number): string {
+  if (!n) return '0'
+  if (n >= 1_000_000) return `${(n / 1_000_000).toFixed(1)}M`
+  if (n >= 1_000) return `${(n / 1_000).toFixed(1)}k`
+  return String(n)
+}
+
+function quotaRemainingText(agent: AgentView): string {
+  if (agent.remainingCredits !== undefined && agent.plan.quotaKind === 'credits') {
+    return `余 ${agent.remainingCredits >= 1000 ? (agent.remainingCredits / 1000).toFixed(1) + 'k' : agent.remainingCredits} 点`
+  }
+  if (agent.remainingTokens !== undefined) {
+    return `余 ${formatTokens(agent.remainingTokens)} tok`
+  }
+  if (agent.remainingCredits !== undefined) {
+    return `余 ${agent.remainingCredits} 点`
+  }
+  return `余 ${Math.max(0, agent.plan.dailyTaskCap - usageOf(agent))} 次`
+}
+
+function quotaMeterValue(agent: AgentView): number {
+  if (agent.remainingPercent !== undefined) return agent.remainingPercent
+  return Math.max(0, Math.round(((agent.plan.dailyTaskCap - usageOf(agent)) / agent.plan.dailyTaskCap) * 100))
+}
+
+function agentDetailTitle(agent: AgentView): string {
+  const parts = [
+    `${agent.label}${agent.version ? ' ' + agent.version : ''}`,
+    `健康: ${agent.health?.ok ? '正常' : agent.health?.reason ?? '未探活'}`,
+    `套餐: ${agent.plan.name}`,
+    `今日已派任务: ${usageOf(agent)}/${agent.plan.dailyTaskCap}`,
+  ]
+  if (agent.remainingPercent !== undefined) {
+    parts.push(`额度余量: ${agent.remainingPercent}%`)
+  }
+  if (agent.remainingTokens !== undefined) {
+    parts.push(`剩余 Tokens: ${agent.remainingTokens.toLocaleString()}`)
+  }
+  if (agent.remainingCredits !== undefined) {
+    parts.push(`剩余点数: ${agent.remainingCredits} 点`)
+  }
+  if (agent.usedTokensToday) {
+    parts.push(`今日消耗: ${agent.usedTokensToday.toLocaleString()} tokens`)
+  }
+  if (agent.usedCreditsToday) {
+    parts.push(`消耗点数: ${agent.usedCreditsToday} 点`)
+  }
+  if (agent.cacheHitRateToday !== undefined) {
+    parts.push(`缓存命中率: ${agent.cacheHitRateToday}%`)
+  }
+  return parts.join('\n')
+}
 </script>
 
 <template>
@@ -251,7 +308,7 @@ function healthClass(agent: AgentView): string {
           role="button"
           tabindex="0"
           :class="{ picked: store.filter.value.agentId === agent.id }"
-          :title="`${agent.label}${agent.version ? ' ' + agent.version : ''}`"
+          :title="agentDetailTitle(agent)"
           @click="pick(agent)"
           @keydown.enter="pick(agent)"
           @keydown.space.prevent="pick(agent)"
@@ -262,9 +319,27 @@ function healthClass(agent: AgentView): string {
               <span class="name">{{ agent.label }}</span>
               <span class="dot" :class="healthClass(agent)" :title="agent.health?.reason ?? '未探活'" />
             </span>
-            <span class="plan">{{ agent.plan.name }}</span>
-            <GlassMeter :value="usageOf(agent)" :max="agent.plan.dailyTaskCap" />
-            <span class="count num">{{ usageOf(agent) }}/{{ agent.plan.dailyTaskCap }}</span>
+            <GlassMeter
+              :value="quotaMeterValue(agent)"
+              :max="100"
+              :show-percent="true"
+              :show-spinner="hasRunningTask(agent.id)"
+              :is-busy="hasRunningTask(agent.id)"
+              size="md"
+            />
+            <div class="quota-meta num">
+              <span class="quota-rem" :title="`余量: ${quotaMeterValue(agent)}%`">
+                {{ quotaRemainingText(agent) }}
+              </span>
+              <span v-if="agent.cacheHitRateToday" class="cache-badge" title="今日平均缓存命中率">
+                ⚡{{ agent.cacheHitRateToday }}%
+              </span>
+              <span v-if="hasRunningTask(agent.id)" class="running-tag">运行中</span>
+            </div>
+            <div v-if="agent.usedTokensToday" class="today-usage muted">
+              今日 {{ formatTokens(agent.usedTokensToday) }} tok
+              <span v-if="agent.usedCreditsToday"> (💎{{ agent.usedCreditsToday }}点)</span>
+            </div>
             <span class="ops">
               <GlassButton variant="ghost" size="sm" title="探活(绕过缓存)" @click.stop="recheck(agent)">重查</GlassButton>
               <GlassButton variant="ghost" size="sm" title="唤起客户端" @click.stop="launch(agent)">唤起</GlassButton>
@@ -447,9 +522,9 @@ function healthClass(agent: AgentView): string {
 .agent {
   display: flex;
   align-items: flex-start;
-  gap: 10px;
+  gap: 12px;
   width: 100%;
-  padding: 9px 10px;
+  padding: 12px 14px;
   border-radius: var(--radius-md);
   border: 1px solid transparent;
   background: transparent;
@@ -457,7 +532,7 @@ function healthClass(agent: AgentView): string {
   font: inherit;
   cursor: pointer;
   text-align: left;
-  transition: background var(--fast) var(--ease), border-color var(--fast) var(--ease);
+  transition: background var(--fast) var(--ease), border-color var(--fast) var(--ease), transform var(--fast) var(--ease);
 }
 
 .ws:focus-visible,
@@ -481,22 +556,39 @@ function healthClass(agent: AgentView): string {
 .rail.collapsed .ws,
 .rail.collapsed .agent {
   justify-content: center;
-  padding: 9px 6px;
+  padding: 10px 6px;
 }
 
 .glyph {
   flex: none;
-  width: 30px;
-  height: 30px;
-  border-radius: 10px;
+  width: 36px;
+  height: 36px;
+  border-radius: 11px;
   display: grid;
   place-items: center;
   font-weight: 600;
-  font-size: 13px;
+  font-size: 15px;
   color: var(--accent-strong);
   background: var(--accent-dim);
   border: 1px solid var(--accent-line);
-  box-shadow: inset 0 1px 0 var(--glass-specular);
+  box-shadow: inset 0 1px 0 var(--glass-specular), 0 2px 8px rgba(0, 0, 0, 0.12);
+}
+
+.running-tag {
+  margin-left: 6px;
+  font-size: 10px;
+  font-weight: 600;
+  color: var(--accent-strong);
+  background: var(--accent-dim);
+  padding: 1px 6px;
+  border-radius: 999px;
+  border: 1px solid var(--accent-line);
+  animation: runPulse 1.8s ease-in-out infinite;
+}
+
+@keyframes runPulse {
+  0%, 100% { opacity: 0.85; }
+  50% { opacity: 1; box-shadow: 0 0 6px var(--accent-dim); }
 }
 
 /* 折叠态加号:虚线边保留"添加"语义,其余质感来自 GlassButton plain */
@@ -556,6 +648,37 @@ function healthClass(agent: AgentView): string {
 
 .plan.unbound {
   color: var(--faint);
+}
+
+.quota-meta {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  font-size: 11px;
+  gap: 4px;
+}
+
+.quota-rem {
+  font-weight: 600;
+  color: var(--text);
+  letter-spacing: -0.01em;
+}
+
+.cache-badge {
+  font-size: 10px;
+  font-weight: 700;
+  color: #10b981;
+  background: color-mix(in srgb, #10b981 12%, transparent);
+  border: 1px solid color-mix(in srgb, #10b981 28%, transparent);
+  padding: 0 4px;
+  border-radius: 4px;
+  line-height: 1.4;
+}
+
+.today-usage {
+  font-size: 10px;
+  color: var(--muted);
+  line-height: 1.2;
 }
 
 .count {

@@ -2,6 +2,7 @@ import type {
   AgentDriver,
   DetectedAgent,
   DriverRunOptions,
+  DriverUsage,
   RunResult,
 } from '../driver.js'
 import { DEFAULT_RUN_TIMEOUT_MS } from '../driver.js'
@@ -77,7 +78,7 @@ export class CodexDriver implements AgentDriver {
     let timedOut = false
     let threadId: string | undefined
     let sessionId: string | undefined
-    let usage: { inputTokens?: number; outputTokens?: number } | undefined
+    let usage: DriverUsage | undefined
 
     // 会话锚点随行提取,不保留全量 stdout(长任务输出可达数十 MB)
     const scanSession = (line: string): void => {
@@ -126,7 +127,7 @@ export class CodexDriver implements AgentDriver {
       }
       if (usage) emit({ kind: 'usage', ...usage })
       // thread_id 是续聊链锚点;兜底走通用提取(未来版本字段名变化时不断链)
-      return { code, sessionId: threadId ?? sessionId }
+      return { code, sessionId: threadId ?? sessionId, usage }
     } finally {
       clearTimeout(watchdog)
       signal.removeEventListener('abort', onAbort)
@@ -197,7 +198,7 @@ export class CodexDriver implements AgentDriver {
     line: string,
     emit: DriverRunOptions['emit'],
     onThread: (threadId: string) => void,
-    onUsage: (usage: { inputTokens?: number; outputTokens?: number }) => void,
+    onUsage: (usage: DriverUsage) => void,
   ): void {
     if (!line) return
     let parsed: Record<string, unknown>
@@ -214,9 +215,17 @@ export class CodexDriver implements AgentDriver {
     }
     if (type === 'turn.completed') {
       const usage = parsed.usage as Record<string, unknown> | undefined
+      const inTok = numberOf(usage?.input_tokens ?? usage?.prompt_tokens)
+      const outTok = numberOf(usage?.output_tokens ?? usage?.completion_tokens)
+      const promptDetails = usage?.prompt_tokens_details as Record<string, unknown> | undefined
+      const cachedTok = numberOf(promptDetails?.cached_tokens ?? usage?.cached_tokens ?? usage?.cached_input_tokens) ?? 0
+      const total = (inTok ?? 0) + (outTok ?? 0) + cachedTok
+      const credits = Number((total / 1000).toFixed(2))
       onUsage({
-        inputTokens: numberOf(usage?.input_tokens),
-        outputTokens: numberOf(usage?.output_tokens),
+        inputTokens: inTok,
+        outputTokens: outTok,
+        cachedTokens: cachedTok,
+        credits,
       })
       return
     }

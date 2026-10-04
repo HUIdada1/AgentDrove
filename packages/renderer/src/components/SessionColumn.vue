@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, nextTick, onMounted, ref, watch } from 'vue'
+import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { useAppStore } from '../stores/app'
 import GlassButton from '../ui/GlassButton.vue'
 import GlassInput from '../ui/GlassInput.vue'
@@ -24,6 +24,38 @@ const showSlashPopup = ref(false)
 const slashPopupRef = ref<{ onKeydown: (e: KeyboardEvent) => boolean } | null>(null)
 let loadId = 0
 
+// 实时计时器 (参考 AgentHub MemProgressDialog)
+const nowTimestamp = ref(Date.now())
+let durationTimer: ReturnType<typeof setInterval> | null = null
+
+onMounted(() => {
+  durationTimer = setInterval(() => {
+    nowTimestamp.value = Date.now()
+  }, 1000)
+})
+
+onBeforeUnmount(() => {
+  if (durationTimer) clearInterval(durationTimer)
+})
+
+function parseProgress(text: string): { percent?: number; displayText: string } {
+  const match = text.match(/(\d+(?:\.\d+)?)\s*%/i)
+  if (match && match[1]) {
+    const val = Math.min(100, Math.max(0, Math.round(parseFloat(match[1]))))
+    return { percent: val, displayText: text }
+  }
+  const ratioMatch = text.match(/\[?(\d+)\s*\/\s*(\d+)\]?/)
+  if (ratioMatch && ratioMatch[1] && ratioMatch[2]) {
+    const d = parseInt(ratioMatch[1], 10)
+    const t = parseInt(ratioMatch[2], 10)
+    if (t > 0) {
+      const val = Math.min(100, Math.max(0, Math.round((d / t) * 100)))
+      return { percent: val, displayText: text }
+    }
+  }
+  return { displayText: text }
+}
+
 const task = computed(() => store.tasks.value.find((t) => t.id === store.selectedTaskId.value) ?? null)
 const agentLabel = computed(
   () => store.agents.value.find((a) => a.id === task.value?.agentId)?.label ?? task.value?.agentId ?? '',
@@ -33,6 +65,22 @@ const maxSeq = computed(() => (events.value.length > 0 ? events.value[events.val
 const atBottom = ref(true)
 
 const isRunning = computed(() => task.value?.state === 'running' || task.value?.state === 'queued')
+
+function formatTokens(n?: number): string {
+  if (!n) return '0'
+  if (n >= 1_000_000) return `${(n / 1_000_000).toFixed(1)}M`
+  if (n >= 1_000) return `${(n / 1_000).toFixed(1)}k`
+  return String(n)
+}
+
+const totalSessionTokens = computed(() => {
+  if (!task.value?.usage) return 0
+  return (
+    (task.value.usage.inputTokens || 0) +
+    (task.value.usage.outputTokens || 0) +
+    (task.value.usage.cachedTokens || 0)
+  )
+})
 
 // 下一步智能推荐动作
 const nextStepSuggestions = [
@@ -163,15 +211,16 @@ async function sendContinue(): Promise<void> {
   sending.value = true
   sendError.value = ''
   try {
+    const skills = [...store.activeSkills.value]
     if (isRunning.value) {
       // 运行中自动走排队队列,不报错!
-      await window.api.tasksEnqueueFollowup(task.value.id, text, store.activeSkills.value)
+      await window.api.tasksEnqueueFollowup(task.value.id, text, skills)
       continueText.value = ''
       showSlashPopup.value = false
       await store.refreshFollowups(task.value.id)
     } else {
       const res = await window.api.tasksContinue(task.value.id, text, {
-        skills: store.activeSkills.value,
+        skills,
         queueIfRunning: true,
       })
       continueText.value = ''
@@ -249,6 +298,15 @@ function timeOf(at: number): string {
             <!-- 激活技能小微章 -->
             <div v-if="task.skills && task.skills.length > 0" class="skills-badges">
               <span v-for="s in task.skills" :key="s" class="s-tag">{{ s }}</span>
+            </div>
+
+            <!-- 对话消耗指标小徽章 -->
+            <div v-if="task.usage" class="session-usage-badge num">
+              <span class="u-badge-item" title="对话消耗点数">💎 {{ task.usage.credits }} 点</span>
+              <span class="u-badge-item" title="总消耗 Tokens">🔤 {{ formatTokens(totalSessionTokens) }}</span>
+              <span v-if="task.usage.cacheHitRate" class="u-badge-item cache" title="Prompt 缓存命中率">
+                ⚡ 缓存 {{ task.usage.cacheHitRate }}%
+              </span>
             </div>
           </div>
 
@@ -353,14 +411,53 @@ function timeOf(at: number): string {
             </span>
           </div>
 
-          <div v-else-if="event.event.kind === 'progress'" class="node">
-            <span class="node-chip soft">{{ event.event.text }}<span class="num t">{{ timeOf(event.at) }}</span></span>
+          <div v-else-if="event.event.kind === 'progress'" class="node prog-node">
+            <div class="node-chip soft prog-chip">
+              <span class="node-spin" aria-hidden="true" />
+              <span class="prog-text">{{ parseProgress(event.event.text).displayText }}</span>
+              <span v-if="parseProgress(event.event.text).percent !== undefined" class="prog-pct num">
+                {{ parseProgress(event.event.text).percent }}%
+              </span>
+              <span class="num t">{{ timeOf(event.at) }}</span>
+            </div>
+            <div v-if="parseProgress(event.event.text).percent !== undefined" class="prog-track">
+              <i :style="{ width: `${parseProgress(event.event.text).percent}%` }" />
+            </div>
           </div>
 
-          <div v-else-if="event.event.kind === 'usage'" class="node">
-            <span class="node-chip soft num">
-              用量 {{ event.event.inputTokens ?? '?' }} in / {{ event.event.outputTokens ?? '?' }} out
-            </span>
+          <div v-else-if="event.event.kind === 'usage'" class="node usage-node">
+            <div class="usage-card glass">
+              <div class="usage-card-head">
+                <span class="usage-title">📊 本轮用量与消耗统计</span>
+                <span v-if="event.event.cacheHitRate !== undefined" class="usage-cache-badge">
+                  ⚡ 缓存命中 {{ event.event.cacheHitRate }}%
+                </span>
+              </div>
+              <div class="usage-grid num">
+                <div class="u-cell">
+                  <span class="u-label">输入 Tokens</span>
+                  <span class="u-val">{{ (event.event.inputTokens ?? 0).toLocaleString() }}</span>
+                </div>
+                <div class="u-cell">
+                  <span class="u-label">缓存读取 Tokens</span>
+                  <span class="u-val highlight">{{ (event.event.cachedTokens ?? 0).toLocaleString() }}</span>
+                </div>
+                <div class="u-cell">
+                  <span class="u-label">输出 Tokens</span>
+                  <span class="u-val">{{ (event.event.outputTokens ?? 0).toLocaleString() }}</span>
+                </div>
+                <div class="u-cell">
+                  <span class="u-label">消耗点数</span>
+                  <span class="u-val credits">💎 {{ event.event.credits ?? '0' }} 点</span>
+                </div>
+              </div>
+              <div v-if="event.event.cacheHitRate !== undefined" class="usage-cache-bar">
+                <div class="bar-track">
+                  <div class="bar-fill" :style="{ width: `${event.event.cacheHitRate}%` }" />
+                </div>
+                <span class="bar-text">Prompt Cache 缓存读取有效降低了计费与推理等待</span>
+              </div>
+            </div>
           </div>
 
           <div v-else-if="event.event.kind === 'artifact'" class="row">
@@ -385,6 +482,18 @@ function timeOf(at: number): string {
             </div>
           </div>
         </template>
+
+        <!-- 运行中的状态指示条 (参考 AgentHub MemProgressDialog) -->
+        <div v-if="isRunning" class="running-indicator">
+          <span class="run-spin" aria-hidden="true" />
+          <div class="run-info">
+            <span class="run-title">Agent 正在执行中…</span>
+            <span v-if="runningDurationText" class="run-time num">已耗时 {{ runningDurationText }}</span>
+          </div>
+          <button type="button" class="run-stop-btn" title="终止当前任务" @click="stopCurrentTask">
+            终止
+          </button>
+        </div>
 
         <!-- 任务完成后的下一步动作建议 -->
         <div v-if="task.state === 'completed'" class="suggestions-box">
@@ -769,5 +878,243 @@ function timeOf(at: number): string {
 
 @keyframes breathe {
   50% { opacity: 0.55; }
+}
+
+/* 进度节点样式：转圈 + 百分比 + 进度条 (参考 AgentHub mpd-spin / mem-progress) */
+.prog-node {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 4px;
+}
+
+.prog-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.node-spin {
+  width: 11px;
+  height: 11px;
+  flex: none;
+  border-radius: 50%;
+  border: 1.5px solid var(--accent-line);
+  border-top-color: var(--accent-strong);
+  animation: nodeSpin 0.85s linear infinite;
+}
+
+@keyframes nodeSpin {
+  to { transform: rotate(360deg); }
+}
+
+.prog-pct {
+  font-weight: 600;
+  color: var(--accent-strong);
+  font-family: var(--mono);
+}
+
+.prog-track {
+  width: 220px;
+  max-width: 80%;
+  height: 5px;
+  border-radius: 999px;
+  background: var(--field-bg);
+  border: 1px solid var(--line);
+  overflow: hidden;
+}
+
+.prog-track > i {
+  display: block;
+  height: 100%;
+  border-radius: inherit;
+  background: linear-gradient(90deg, var(--accent-strong), var(--accent));
+  transition: width var(--fast) var(--ease);
+}
+
+/* 运行态指示条 */
+.running-indicator {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 8px 14px;
+  background: var(--accent-dim);
+  border: 1px solid var(--accent-line);
+  border-radius: var(--radius-md);
+  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.15);
+  margin-top: 6px;
+  animation: runBarBreathe 2s ease-in-out infinite;
+}
+
+@keyframes runBarBreathe {
+  0%, 100% { opacity: 0.92; }
+  50% { opacity: 1; box-shadow: 0 0 12px var(--accent-dim); }
+}
+
+.run-spin {
+  width: 14px;
+  height: 14px;
+  flex: none;
+  border-radius: 50%;
+  border: 2px solid var(--accent-line);
+  border-top-color: var(--accent-strong);
+  animation: runSpin 0.85s linear infinite;
+}
+
+@keyframes runSpin {
+  to { transform: rotate(360deg); }
+}
+
+.run-info {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex: 1;
+}
+
+.run-title {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--accent-strong);
+}
+
+.run-time {
+  font-size: 11px;
+  color: var(--muted);
+  font-family: var(--mono);
+}
+
+.run-stop-btn {
+  background: color-mix(in srgb, var(--err) 18%, transparent);
+  border: 1px solid color-mix(in srgb, var(--err) 40%, transparent);
+  color: var(--err);
+  font-size: 11px;
+  font-weight: 500;
+  padding: 2px 8px;
+  border-radius: 6px;
+  cursor: pointer;
+  transition: all var(--fast) var(--ease);
+}
+
+.run-stop-btn:hover {
+  background: var(--err);
+  color: #fff;
+}
+
+/* 顶部 header 用量微章 */
+.session-usage-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  background: var(--glass-bg);
+  border: 1px solid var(--glass-edge);
+  border-radius: var(--radius-sm);
+  padding: 1px 6px;
+  font-size: 11px;
+  color: var(--muted);
+}
+
+.u-badge-item.cache {
+  color: #10b981;
+  font-weight: 600;
+}
+
+/* 消息流内用量统计卡片 */
+.usage-node {
+  margin: 12px 0;
+  display: flex;
+  justify-content: center;
+}
+
+.usage-card {
+  width: 100%;
+  max-width: 480px;
+  background: var(--glass-bg);
+  border: 1px solid var(--glass-edge);
+  border-radius: var(--radius-md);
+  padding: 12px 14px;
+  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.08);
+}
+
+.usage-card-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 10px;
+  padding-bottom: 6px;
+  border-bottom: 1px solid var(--line);
+}
+
+.usage-title {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--text);
+}
+
+.usage-cache-badge {
+  font-size: 11px;
+  font-weight: 700;
+  color: #10b981;
+  background: color-mix(in srgb, #10b981 12%, transparent);
+  border: 1px solid color-mix(in srgb, #10b981 30%, transparent);
+  padding: 1px 6px;
+  border-radius: 4px;
+}
+
+.usage-grid {
+  display: grid;
+  grid-template-columns: repeat(2, 1fr);
+  gap: 8px 12px;
+}
+
+.u-cell {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.u-label {
+  font-size: 10.5px;
+  color: var(--muted);
+}
+
+.u-val {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--text);
+}
+
+.u-val.highlight {
+  color: #10b981;
+}
+
+.u-val.credits {
+  color: var(--accent-strong);
+}
+
+.usage-cache-bar {
+  margin-top: 10px;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.usage-cache-bar .bar-track {
+  height: 4px;
+  background: var(--line);
+  border-radius: 999px;
+  overflow: hidden;
+}
+
+.usage-cache-bar .bar-fill {
+  height: 100%;
+  background: linear-gradient(90deg, #10b981, #06b6d4);
+  border-radius: 999px;
+  transition: width 300ms var(--ease);
+}
+
+.usage-cache-bar .bar-text {
+  font-size: 10px;
+  color: var(--faint);
 }
 </style>

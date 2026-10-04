@@ -16,6 +16,15 @@ function subscribe<T extends unknown[]>(
   return () => ipcRenderer.off(channel, handler)
 }
 
+function safeClone<T>(val: T): T {
+  if (val === undefined || val === null) return val
+  try {
+    return JSON.parse(JSON.stringify(val))
+  } catch {
+    return val
+  }
+}
+
 const api: AgentDroveApi = {
   agentsList: () => ipcRenderer.invoke('agents:list'),
   agentsSetEnabled: (agentId, enabled) =>
@@ -29,16 +38,16 @@ const api: AgentDroveApi = {
   projectsRemove: (projectId) => ipcRenderer.invoke('projects:remove', projectId),
   pickDirectory: () => ipcRenderer.invoke('dialog:pick-directory'),
 
-  tasksList: (filter) => ipcRenderer.invoke('tasks:list', filter),
+  tasksList: (filter) => ipcRenderer.invoke('tasks:list', safeClone(filter)),
   tasksGet: (taskId) => ipcRenderer.invoke('tasks:get', taskId),
-  tasksEventsPage: (query) => ipcRenderer.invoke('tasks:events-page', query),
-  tasksSubmit: (dto) => ipcRenderer.invoke('tasks:submit', dto),
-  tasksSubmitBatch: (dtos) => ipcRenderer.invoke('tasks:submit-batch', dtos),
+  tasksEventsPage: (query) => ipcRenderer.invoke('tasks:events-page', safeClone(query)),
+  tasksSubmit: (dto) => ipcRenderer.invoke('tasks:submit', safeClone(dto)),
+  tasksSubmitBatch: (dtos) => ipcRenderer.invoke('tasks:submit-batch', safeClone(dtos)),
   tasksRetry: (taskId) => ipcRenderer.invoke('tasks:retry', taskId),
   tasksContinue: (taskId, prompt, options) =>
-    ipcRenderer.invoke('tasks:continue', taskId, prompt, options),
+    ipcRenderer.invoke('tasks:continue', taskId, prompt, safeClone(options)),
   tasksEnqueueFollowup: (taskId, prompt, skills) =>
-    ipcRenderer.invoke('tasks:enqueue-followup', taskId, prompt, skills),
+    ipcRenderer.invoke('tasks:enqueue-followup', taskId, prompt, safeClone(skills)),
   tasksGetFollowups: (taskId) => ipcRenderer.invoke('tasks:get-followups', taskId),
   tasksRemoveFollowup: (taskId, followupId) =>
     ipcRenderer.invoke('tasks:remove-followup', taskId, followupId),
@@ -47,15 +56,15 @@ const api: AgentDroveApi = {
   tasksCancel: (taskId, clearFollowups) =>
     ipcRenderer.invoke('tasks:cancel', taskId, clearFollowups),
   tasksMarkFailed: (taskId, reason) => ipcRenderer.invoke('tasks:mark-failed', taskId, reason),
-  tasksBatchCancel: (taskIds) => ipcRenderer.invoke('tasks:batch-cancel', taskIds),
-  tasksBatchDelete: (taskIds) => ipcRenderer.invoke('tasks:batch-delete', taskIds),
+  tasksBatchCancel: (taskIds) => ipcRenderer.invoke('tasks:batch-cancel', safeClone(taskIds)),
+  tasksBatchDelete: (taskIds) => ipcRenderer.invoke('tasks:batch-delete', safeClone(taskIds)),
 
-  healthCheck: (agentId, options) => ipcRenderer.invoke('health:check', agentId, options),
+  healthCheck: (agentId, options) => ipcRenderer.invoke('health:check', agentId, safeClone(options)),
   launchApp: (agentId) => ipcRenderer.invoke('launch:app', agentId),
   usageGet: () => ipcRenderer.invoke('usage:get'),
 
   settingsGet: () => ipcRenderer.invoke('settings:get'),
-  settingsUpdate: (patch) => ipcRenderer.invoke('settings:update', patch),
+  settingsUpdate: (patch) => ipcRenderer.invoke('settings:update', safeClone(patch)),
   schedulerPause: (paused) => ipcRenderer.invoke('scheduler:pause', paused),
 
   logsTail: (limit) => ipcRenderer.invoke('logs:tail', limit),

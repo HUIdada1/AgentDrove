@@ -34,6 +34,10 @@ export interface PlanInfo {
   dailyTaskCap: number
   /** 每客户端并发上限(默认 1) */
   maxConcurrency: number
+  /** 套餐总点数(可选,如 1000 点) */
+  totalCredits?: number
+  /** 套餐 Token 配额(可选,如 150_000_000) */
+  totalTokens?: number
 }
 
 /** 模型跟随客户端时任务记录的哨兵值(zcode 无模型参数,见 R2 实测降级) */
@@ -104,11 +108,28 @@ export interface TaskInput {
   mode?: TaskMode
 }
 
+export interface TaskUsage {
+  inputTokens: number
+  outputTokens: number
+  cachedTokens: number
+  credits: number
+  cacheHitRate: number
+  cost?: number
+}
+
 export type TaskEvent =
   | { kind: 'state-changed'; from: TaskState; to: TaskState }
   | { kind: 'message'; channel: 'stdout' | 'stderr' | 'agent'; text: string }
   | { kind: 'progress'; text: string }
-  | { kind: 'usage'; inputTokens?: number; outputTokens?: number }
+  | {
+      kind: 'usage'
+      inputTokens?: number
+      outputTokens?: number
+      cachedTokens?: number
+      credits?: number
+      cacheHitRate?: number
+      cost?: number
+    }
   | { kind: 'artifact'; path: string; change: 'added' | 'modified' | 'deleted' }
   | { kind: 'warning'; text: string }
 
@@ -168,4 +189,6 @@ export interface TaskRecord {
   finishedAt?: number
   retryOf?: string
   attempt: number
+  /** 本次对话消耗统计与缓存命中率 */
+  usage?: TaskUsage
 }

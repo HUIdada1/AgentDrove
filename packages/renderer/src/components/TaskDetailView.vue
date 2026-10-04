@@ -185,7 +185,10 @@ function fmt(ts?: number): string {
         <div>
           <dt>状态</dt>
           <dd>
-            <span class="badge" :class="`s-${task.state}`">{{ STATE_TEXT[task.state] }}</span>
+            <span class="badge" :class="`s-${task.state}`">
+              <span v-if="task.state === 'running'" class="detail-spin" aria-hidden="true" />
+              {{ STATE_TEXT[task.state] }}
+            </span>
           </dd>
         </div>
         <div><dt>模型</dt><dd>{{ displayModel }}</dd></div>
@@ -213,6 +216,40 @@ function fmt(ts?: number): string {
         <div v-if="task.sessionId" class="wide"><dt>会话 ID</dt><dd class="mono">{{ task.sessionId }}</dd></div>
         <div v-if="task.error" class="wide"><dt>错误信息</dt><dd class="err">{{ task.error }}</dd></div>
       </dl>
+
+      <!-- 用量与缓存分析面板 -->
+      <section v-if="task.usage" class="usage-section glass">
+        <div class="usage-head">
+          <span class="usage-title">📊 对话消耗与缓存分析</span>
+          <span v-if="task.usage.cacheHitRate !== undefined" class="usage-badge">
+            ⚡ 缓存命中 {{ task.usage.cacheHitRate }}%
+          </span>
+        </div>
+        <div class="usage-grid num">
+          <div class="u-cell">
+            <span class="u-lbl">消耗点数</span>
+            <span class="u-v highlight-points">💎 {{ task.usage.credits }} 点</span>
+          </div>
+          <div class="u-cell">
+            <span class="u-lbl">缓存读取 Tokens</span>
+            <span class="u-v highlight-cache">{{ task.usage.cachedTokens.toLocaleString() }}</span>
+          </div>
+          <div class="u-cell">
+            <span class="u-lbl">输入 Tokens</span>
+            <span class="u-v">{{ task.usage.inputTokens.toLocaleString() }}</span>
+          </div>
+          <div class="u-cell">
+            <span class="u-lbl">输出 Tokens</span>
+            <span class="u-v">{{ task.usage.outputTokens.toLocaleString() }}</span>
+          </div>
+        </div>
+        <div v-if="task.usage.cacheHitRate !== undefined" class="cache-progress-row">
+          <div class="cache-track">
+            <div class="cache-bar" :style="{ width: `${task.usage.cacheHitRate}%` }" />
+          </div>
+          <span class="cache-note">缓存命中率越高，推理开销与首字延迟越低</span>
+        </div>
+      </section>
 
       <div v-if="notice" class="notice" @click="notice = ''">{{ notice }}</div>
 
@@ -351,16 +388,33 @@ function fmt(ts?: number): string {
 
 .badge {
   font-size: 11px;
-  padding: 1px 8px;
+  padding: 2px 9px;
   border-radius: 999px;
   background: var(--chip-bg);
   color: var(--muted);
-  display: inline-block;
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+}
+
+.detail-spin {
+  width: 10px;
+  height: 10px;
+  flex: none;
+  border-radius: 50%;
+  border: 1.5px solid var(--accent-line);
+  border-top-color: var(--accent-strong);
+  animation: dSpin 0.8s linear infinite;
+}
+
+@keyframes dSpin {
+  to { transform: rotate(360deg); }
 }
 
 .badge.s-running {
   background: var(--accent-dim);
   color: var(--accent-strong);
+  border: 1px solid var(--accent-line);
 }
 
 .badge.s-completed {
@@ -503,6 +557,93 @@ function fmt(ts?: number): string {
 .sub {
   margin: 0;
   font-size: 12px;
+  color: var(--faint);
+}
+
+.usage-section {
+  padding: 12px 14px;
+  border-radius: var(--radius-md);
+  border: 1px solid var(--glass-edge);
+  background: var(--field-bg);
+}
+
+.usage-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 10px;
+}
+
+.usage-title {
+  font-size: 12.5px;
+  font-weight: 600;
+  color: var(--text);
+}
+
+.usage-badge {
+  font-size: 11px;
+  font-weight: 700;
+  color: #10b981;
+  background: color-mix(in srgb, #10b981 12%, transparent);
+  border: 1px solid color-mix(in srgb, #10b981 30%, transparent);
+  padding: 1px 6px;
+  border-radius: 4px;
+}
+
+.usage-grid {
+  display: grid;
+  grid-template-columns: repeat(2, 1fr);
+  gap: 8px 12px;
+}
+
+.u-cell {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.u-lbl {
+  font-size: 10.5px;
+  color: var(--muted);
+}
+
+.u-v {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--text);
+}
+
+.u-v.highlight-points {
+  color: var(--accent-strong);
+}
+
+.u-v.highlight-cache {
+  color: #10b981;
+}
+
+.cache-progress-row {
+  margin-top: 10px;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.cache-track {
+  height: 5px;
+  background: var(--line);
+  border-radius: 999px;
+  overflow: hidden;
+}
+
+.cache-bar {
+  height: 100%;
+  background: linear-gradient(90deg, #10b981, #06b6d4);
+  border-radius: 999px;
+  transition: width 300ms var(--ease);
+}
+
+.cache-note {
+  font-size: 10px;
   color: var(--faint);
 }
 </style>
