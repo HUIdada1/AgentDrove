@@ -332,7 +332,7 @@ async function runExport(kind: 'data' | 'report'): Promise<void> {
         </div>
         <div v-if="store.updateStatus.value.phase === 'downloading'" class="prog-meter-wrap">
           <GlassMeter
-            :value="Math.round((store.updateStatus.value.progress ?? 0) * 100)"
+            :value="Math.round(store.updateStatus.value.progress ?? 0)"
             :max="100"
             :show-percent="true"
             :show-spinner="true"

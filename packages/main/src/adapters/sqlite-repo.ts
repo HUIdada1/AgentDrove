@@ -651,6 +651,15 @@ function rowFromTask(task: TaskRecord) {
   }
 }
 
+function safeJsonParse<T>(raw: string | null | undefined, fallback: T): T {
+  if (!raw) return fallback
+  try {
+    return JSON.parse(raw) as T
+  } catch {
+    return fallback
+  }
+}
+
 function taskFromRow(row: TaskRow): TaskRecord {
   return {
     id: row.id,
@@ -665,13 +674,9 @@ function taskFromRow(row: TaskRow): TaskRecord {
     resumeLatest: row.resume_latest === 1 ? true : undefined,
     parentId: row.parent_id ?? undefined,
     error: row.error ?? undefined,
-    attachments: row.attachments_json
-      ? (JSON.parse(row.attachments_json) as TaskRecord['attachments'])
-      : [],
-    skills: row.skills_json ? (JSON.parse(row.skills_json) as string[]) : undefined,
-    toolPolicy: row.tool_policy_json
-      ? (JSON.parse(row.tool_policy_json) as TaskRecord['toolPolicy'])
-      : undefined,
+    attachments: safeJsonParse<TaskRecord['attachments']>(row.attachments_json, []),
+    skills: safeJsonParse<string[] | undefined>(row.skills_json, undefined),
+    toolPolicy: safeJsonParse<TaskRecord['toolPolicy'] | undefined>(row.tool_policy_json, undefined),
     mode: row.mode,
     origin: row.origin,
     createdAt: row.created_at,
@@ -679,7 +684,7 @@ function taskFromRow(row: TaskRow): TaskRecord {
     finishedAt: row.finished_at ?? undefined,
     retryOf: row.retry_of ?? undefined,
     attempt: row.attempt,
-    usage: row.usage_json ? (JSON.parse(row.usage_json) as TaskUsage) : undefined,
+    usage: safeJsonParse<TaskUsage | undefined>(row.usage_json, undefined),
   }
 }
 
@@ -688,7 +693,7 @@ function eventFromRow(row: EventRow): StoredEvent {
     taskId: row.task_id,
     seq: row.seq,
     at: row.at,
-    event: JSON.parse(row.payload),
+    event: safeJsonParse(row.payload, { kind: 'warning', text: '事件数据损坏' }),
   }
 }
 

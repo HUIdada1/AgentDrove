@@ -62,7 +62,7 @@ const gridCols = computed(() => {
     <div class="shell view" :style="{ gridTemplateColumns: gridCols }">
       <AgentRail />
       <Resizer
-        @resize="taskW = clampW(taskW + $event, TASK_W.min, TASK_W.max)"
+        @resize="taskW = clampW(taskW - $event, TASK_W.min, TASK_W.max)"
         @end="persistLayout"
       />
       <section class="col">

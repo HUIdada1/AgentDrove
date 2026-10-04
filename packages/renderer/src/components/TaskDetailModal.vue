@@ -31,7 +31,7 @@ function pinToSidebar(): void {
       <div class="top-bar">
         <span class="sub-tip">弹窗预览模式 · 您可以随时将其固定到主页右侧</span>
         <GlassButton variant="ghost" size="sm" title="将详情固定在主页右侧面板" @click="pinToSidebar">
-          📌 固定到侧栏
+          固定到侧栏
         </GlassButton>
       </div>
 

@@ -15,8 +15,10 @@ const emit = defineEmits<{
 
 const expanded = ref(false)
 
-function formatTime(ts: number): string {
+function formatTime(ts?: number): string {
+  if (!ts || Number.isNaN(ts)) return ''
   const d = new Date(ts)
+  if (Number.isNaN(d.getTime())) return ''
   return `${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}:${String(d.getSeconds()).padStart(2, '0')}`
 }
 </script>
@@ -25,13 +27,13 @@ function formatTime(ts: number): string {
   <div v-if="followups.length > 0" class="followup-bar glass">
     <div class="summary-row" @click="expanded = !expanded">
       <div class="left">
-        <span class="pulse-icon">⏳</span>
+        <span class="pulse-dot" />
         <span class="title">排队追加对话 ({{ followups.length }})</span>
         <span class="hint">当前轮次完成后将自动接续发送</span>
       </div>
       <div class="right">
         <GlassButton size="sm" variant="ghost" @click.stop="expanded = !expanded">
-          {{ expanded ? '收起 ▴' : '展开查看 ▾' }}
+          {{ expanded ? '收起' : '展开查看' }}
         </GlassButton>
         <GlassButton size="sm" variant="danger" title="清空所有排队消息" @click.stop="emit('clear')">
           清空
@@ -82,15 +84,19 @@ function formatTime(ts: number): string {
   gap: 8px;
 }
 
-.pulse-icon {
-  font-size: 13px;
-  animation: spin-pulse 2s ease-in-out infinite;
+.pulse-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--accent-strong);
+  box-shadow: 0 0 8px var(--accent);
+  animation: dot-pulse 1.8s ease-in-out infinite;
 }
 
-@keyframes spin-pulse {
-  0% { transform: scale(1); opacity: 0.8; }
-  50% { transform: scale(1.15); opacity: 1; }
-  100% { transform: scale(1); opacity: 0.8; }
+@keyframes dot-pulse {
+  0% { transform: scale(0.9); opacity: 0.7; box-shadow: 0 0 4px var(--accent); }
+  50% { transform: scale(1.2); opacity: 1; box-shadow: 0 0 10px var(--accent-strong); }
+  100% { transform: scale(0.9); opacity: 0.7; box-shadow: 0 0 4px var(--accent); }
 }
 
 .title {

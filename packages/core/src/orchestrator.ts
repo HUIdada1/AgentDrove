@@ -577,7 +577,14 @@ export class Orchestrator {
         this.deps.repo.putTask(task)
         if (result.code === 0) {
           this.transition(task, 'completed')
-          this.processFollowupQueue(task)
+          try {
+            this.processFollowupQueue(task)
+          } catch (followupError) {
+            this.recordEvent(task.id, {
+              kind: 'warning',
+              text: `排队追问接续派发失败:${followupError instanceof Error ? followupError.message : String(followupError)}`,
+            })
+          }
         } else {
           this.failTask(task, `driver exited with code ${result.code}`)
         }

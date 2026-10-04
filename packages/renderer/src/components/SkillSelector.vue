@@ -18,14 +18,13 @@ interface Preset {
   id: string
   label: string
   skills: string[]
-  icon: string
 }
 
 const PRESETS: Preset[] = [
-  { id: 'full', label: '全能开发', icon: '🚀', skills: ['terminal', 'file_editor', 'code_search', 'web_search', 'test_runner'] },
-  { id: 'code', label: '代码专注', icon: '⚡', skills: ['file_editor', 'code_search'] },
-  { id: 'safe', label: '安全只读', icon: '🛡️', skills: ['code_search', 'git_review'] },
-  { id: 'test', label: '测试套件', icon: '🧪', skills: ['terminal', 'file_editor', 'test_runner'] },
+  { id: 'full', label: '全能开发', skills: ['terminal', 'file_editor', 'code_search', 'web_search', 'test_runner'] },
+  { id: 'code', label: '代码专注', skills: ['file_editor', 'code_search'] },
+  { id: 'safe', label: '安全只读', skills: ['code_search', 'git_review'] },
+  { id: 'test', label: '测试套件', skills: ['terminal', 'file_editor', 'test_runner'] },
 ]
 
 function applyPreset(preset: Preset): void {
@@ -48,7 +47,6 @@ function isSkillActive(skill: SkillDefinition): boolean {
         type="button"
         @click="applyPreset(p)"
       >
-        <span class="icon">{{ p.icon }}</span>
         <span class="name">{{ p.label }}</span>
       </button>
     </div>
@@ -63,7 +61,6 @@ function isSkillActive(skill: SkillDefinition): boolean {
         type="button"
         @click="store.toggleSkill(skill.id)"
       >
-        <span class="icon">{{ skill.icon }}</span>
         <span class="name">{{ skill.label }}</span>
         <span class="dot" />
       </button>

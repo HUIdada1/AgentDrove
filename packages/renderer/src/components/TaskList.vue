@@ -45,9 +45,10 @@ const selecting = computed(() => store.selection.value.size > 0)
 /** 客户端下拉与卡片展示名共用一份 id→label 映射,避免每次渲染重建数组 */
 const agentLabels = computed(() => new Map(store.agents.value.map((a) => [a.id, a.label])))
 
-const agentOptions = computed(() =>
-  store.agents.value.map((a) => ({ value: a.id, label: a.label })),
-)
+const agentOptions = computed(() => [
+  { value: '', label: '全部客户端' },
+  ...store.agents.value.map((a) => ({ value: a.id, label: a.label })),
+])
 
 function toggleSelect(id: string): void {
   const next = new Set(store.selection.value)

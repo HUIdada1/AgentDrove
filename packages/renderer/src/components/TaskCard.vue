@@ -2,7 +2,7 @@
 import { computed } from 'vue'
 import { useAppStore } from '../stores/app'
 import type { TaskRecord } from '@agent-drove/shared'
-import { CLIENT_FOLLOW_MODEL, STATE_TEXT, formatModelDisplay } from '../labels'
+import { CLIENT_FOLLOW_MODEL, STATE_TEXT, formatModelDisplay, formatTokens, getAgentBillingType } from '../labels'
 
 const props = defineProps<{
   task: TaskRecord
@@ -42,12 +42,8 @@ const displayModel = computed(() =>
   formatModelDisplay(props.task.modelId, props.task.agentId, store.agents.value),
 )
 
-function formatTokens(n?: number): string {
-  if (!n) return '0'
-  if (n >= 1_000_000) return `${(n / 1_000_000).toFixed(1)}M`
-  if (n >= 1_000) return `${(n / 1_000).toFixed(1)}k`
-  return String(n)
-}
+/** 计费模式区分: 'credits' (点数) 还是 'tokens' (Token) */
+const billingType = computed(() => getAgentBillingType(props.task.agentId, store.agents.value))
 
 const totalTokens = computed(() => {
   if (!props.task.usage) return 0
@@ -79,12 +75,16 @@ const totalTokens = computed(() => {
     </div>
     <div v-if="task.error" class="err">{{ task.error.slice(0, 90) }}</div>
 
-    <!-- 真实消耗与缓存命中率 -->
+    <!-- 真实消耗与缓存命中率 (严格区分点数与 Token, 无 emoji) -->
     <div v-if="task.usage" class="card-usage num">
-      <span class="usage-item" title="对话消耗点数">💎 {{ task.usage.credits }} 点</span>
-      <span class="usage-item" title="总消耗 Tokens">🔤 {{ formatTokens(totalTokens) }}</span>
+      <template v-if="billingType === 'credits'">
+        <span class="usage-item" title="对话消耗点数">点数: {{ task.usage.credits }} 点</span>
+      </template>
+      <template v-else>
+        <span class="usage-item" title="总消耗 Tokens">Token: {{ formatTokens(totalTokens) }}</span>
+      </template>
       <span v-if="task.usage.cacheHitRate" class="usage-cache" title="Prompt 缓存命中率">
-        ⚡ 缓存 {{ task.usage.cacheHitRate }}%
+        缓存 {{ task.usage.cacheHitRate }}%
       </span>
     </div>
     <div class="foot">
@@ -281,20 +281,34 @@ const totalTokens = computed(() => {
 }
 
 .card-detail-btn {
-  font-size: 10px;
-  color: var(--muted);
-  background: var(--glass-bg);
-  border: 1px solid var(--line);
-  border-radius: 4px;
-  padding: 1px 6px;
+  font-size: 11px;
+  font-weight: 500;
+  color: var(--text);
+  background: linear-gradient(135deg, rgba(255, 255, 255, 0.16) 0%, rgba(255, 255, 255, 0.05) 100%);
+  border: 1px solid rgba(255, 255, 255, 0.22);
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.35), 0 1px 3px rgba(0, 0, 0, 0.08);
+  border-radius: var(--radius-sm);
+  padding: 2px 8px;
   cursor: pointer;
-  transition: all var(--fast) var(--ease);
+  user-select: none;
+  backdrop-filter: blur(8px);
+  -webkit-backdrop-filter: blur(8px);
+  transition: transform 160ms cubic-bezier(0.16, 1, 0.3, 1),
+    background 160ms cubic-bezier(0.16, 1, 0.3, 1),
+    border-color 160ms cubic-bezier(0.16, 1, 0.3, 1),
+    box-shadow 160ms cubic-bezier(0.16, 1, 0.3, 1);
 }
 
 .card-detail-btn:hover {
   color: var(--accent-strong);
-  border-color: var(--accent-line);
-  background: var(--accent-dim);
+  border-color: rgba(255, 255, 255, 0.45);
+  background: linear-gradient(135deg, rgba(255, 255, 255, 0.25) 0%, rgba(255, 255, 255, 0.1) 100%);
+  box-shadow: inset 0 1px 0.5px rgba(255, 255, 255, 0.5), 0 3px 10px rgba(0, 0, 0, 0.15);
+  transform: translateY(-1px);
+}
+
+.card-detail-btn:active {
+  transform: translateY(0.5px) scale(0.97);
 }
 
 .card-skills {

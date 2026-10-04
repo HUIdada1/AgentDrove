@@ -6,6 +6,7 @@ import GlassMeter from '../ui/GlassMeter.vue'
 import GlassInput from '../ui/GlassInput.vue'
 import GlassModal from '../ui/GlassModal.vue'
 import Logo from './Logo.vue'
+import { formatTokens } from '../labels'
 import type { AgentView, Project } from '@agent-drove/shared'
 
 const store = useAppStore()
@@ -157,22 +158,16 @@ function hasRunningTask(agentId: string): boolean {
   return store.tasks.value.some((t) => t.agentId === agentId && t.state === 'running')
 }
 
-function formatTokens(n?: number): string {
-  if (!n) return '0'
-  if (n >= 1_000_000) return `${(n / 1_000_000).toFixed(1)}M`
-  if (n >= 1_000) return `${(n / 1_000).toFixed(1)}k`
-  return String(n)
-}
 
 function quotaRemainingText(agent: AgentView): string {
-  if (agent.remainingCredits !== undefined && agent.plan.quotaKind === 'credits') {
-    return `余 ${agent.remainingCredits >= 1000 ? (agent.remainingCredits / 1000).toFixed(1) + 'k' : agent.remainingCredits} 点`
-  }
-  if (agent.remainingTokens !== undefined) {
-    return `余 ${formatTokens(agent.remainingTokens)} tok`
-  }
-  if (agent.remainingCredits !== undefined) {
-    return `余 ${agent.remainingCredits} 点`
+  if (agent.plan.quotaKind === 'credits') {
+    if (agent.remainingCredits !== undefined) {
+      return `余 ${agent.remainingCredits >= 1000 ? (agent.remainingCredits / 1000).toFixed(1) + 'k' : agent.remainingCredits} 点`
+    }
+  } else {
+    if (agent.remainingTokens !== undefined) {
+      return `余 ${formatTokens(agent.remainingTokens)} tok`
+    }
   }
   return `余 ${Math.max(0, agent.plan.dailyTaskCap - usageOf(agent))} 次`
 }
@@ -183,6 +178,7 @@ function quotaMeterValue(agent: AgentView): number {
 }
 
 function agentDetailTitle(agent: AgentView): string {
+  const isCredits = agent.plan.quotaKind === 'credits'
   const parts = [
     `${agent.label}${agent.version ? ' ' + agent.version : ''}`,
     `健康: ${agent.health?.ok ? '正常' : agent.health?.reason ?? '未探活'}`,
@@ -192,19 +188,22 @@ function agentDetailTitle(agent: AgentView): string {
   if (agent.remainingPercent !== undefined) {
     parts.push(`额度余量: ${agent.remainingPercent}%`)
   }
-  if (agent.remainingTokens !== undefined) {
-    parts.push(`剩余 Tokens: ${agent.remainingTokens.toLocaleString()}`)
+  if (isCredits) {
+    if (agent.remainingCredits !== undefined) {
+      parts.push(`剩余点数: ${agent.remainingCredits} 点`)
+    }
+    if (agent.usedCreditsToday !== undefined) {
+      parts.push(`今日消耗: ${agent.usedCreditsToday} 点`)
+    }
+  } else {
+    if (agent.remainingTokens !== undefined) {
+      parts.push(`剩余 Token: ${agent.remainingTokens.toLocaleString()}`)
+    }
+    if (agent.usedTokensToday) {
+      parts.push(`今日消耗: ${agent.usedTokensToday.toLocaleString()} tokens`)
+    }
   }
-  if (agent.remainingCredits !== undefined) {
-    parts.push(`剩余点数: ${agent.remainingCredits} 点`)
-  }
-  if (agent.usedTokensToday) {
-    parts.push(`今日消耗: ${agent.usedTokensToday.toLocaleString()} tokens`)
-  }
-  if (agent.usedCreditsToday) {
-    parts.push(`消耗点数: ${agent.usedCreditsToday} 点`)
-  }
-  if (agent.cacheHitRateToday !== undefined) {
+  if (agent.cacheHitRateToday !== undefined && agent.cacheHitRateToday > 0) {
     parts.push(`缓存命中率: ${agent.cacheHitRateToday}%`)
   }
   return parts.join('\n')
@@ -332,13 +331,16 @@ function agentDetailTitle(agent: AgentView): string {
                 {{ quotaRemainingText(agent) }}
               </span>
               <span v-if="agent.cacheHitRateToday" class="cache-badge" title="今日平均缓存命中率">
-                ⚡{{ agent.cacheHitRateToday }}%
+                缓存 {{ agent.cacheHitRateToday }}%
               </span>
               <span v-if="hasRunningTask(agent.id)" class="running-tag">运行中</span>
             </div>
-            <div v-if="agent.usedTokensToday" class="today-usage muted">
+            <!-- 今日用量: 严格区分点数与 Token, 严禁混淆 -->
+            <div v-if="agent.plan.quotaKind === 'credits' && agent.usedCreditsToday !== undefined" class="today-usage muted">
+              今日 {{ agent.usedCreditsToday }} 点
+            </div>
+            <div v-else-if="agent.usedTokensToday" class="today-usage muted">
               今日 {{ formatTokens(agent.usedTokensToday) }} tok
-              <span v-if="agent.usedCreditsToday"> (💎{{ agent.usedCreditsToday }}点)</span>
             </div>
             <span class="ops">
               <GlassButton variant="ghost" size="sm" title="探活(绕过缓存)" @click.stop="recheck(agent)">重查</GlassButton>
@@ -357,7 +359,7 @@ function agentDetailTitle(agent: AgentView): string {
         {{ store.railCollapsed.value ? themeLabel() : `主题:${themeLabel()}` }}
       </GlassButton>
       <GlassButton variant="ghost" size="sm" class="btm" title="设置" @click="openSettings">
-        {{ store.railCollapsed.value ? '⚙' : '⚙ 设置' }}
+        设置
       </GlassButton>
       <span v-if="store.settings.value?.schedulerPaused && !store.railCollapsed.value" class="paused">
         调度已暂停

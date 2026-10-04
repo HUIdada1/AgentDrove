@@ -68,8 +68,14 @@ async function main() {
     target: 'node20',
     sourcemap: false,
     external: EXTERNAL,
-    // 源码按 ESM 写;打包成 CJS 后 import.meta.dirname 由 __dirname 接管
-    define: { 'import.meta.dirname': '__dirname' },
+    // 源码按 ESM 写;打包成 CJS 后 import.meta 由 __dirname 等接管
+    define: {
+      'import.meta.dirname': '__dirname',
+      'import.meta.url': 'import_meta_url',
+    },
+    banner: {
+      js: 'var import_meta_url = typeof document === "undefined" ? new (require("url").URL)("file:" + __filename).href : "";',
+    },
     logLevel: 'info',
   })
 

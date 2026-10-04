@@ -7,7 +7,7 @@ import SkillSelector from './SkillSelector.vue'
 import FollowupQueueBar from './FollowupQueueBar.vue'
 import GuidanceHub from './GuidanceHub.vue'
 import SlashCommandPopup, { type SlashCommand } from './SlashCommandPopup.vue'
-import { STATE_TEXT } from '../labels'
+import { STATE_TEXT, formatModelDisplay, formatTokens, getAgentBillingType } from '../labels'
 import type { ScenarioTemplate, StoredEvent } from '@agent-drove/shared'
 
 const store = useAppStore()
@@ -38,6 +38,14 @@ onBeforeUnmount(() => {
   if (durationTimer) clearInterval(durationTimer)
 })
 
+const runningDurationText = computed(() => {
+  if (!task.value?.startedAt) return ''
+  const ms = Math.max(0, nowTimestamp.value - task.value.startedAt)
+  if (ms < 60_000) return `${Math.round(ms / 1000)}s`
+  if (ms < 3600_000) return `${Math.floor(ms / 60_000)}m${Math.round((ms % 60_000) / 1000)}s`
+  return `${Math.floor(ms / 3600_000)}h${Math.floor((ms % 3600_000) / 60_000)}m`
+})
+
 function parseProgress(text: string): { percent?: number; displayText: string } {
   const match = text.match(/(\d+(?:\.\d+)?)\s*%/i)
   if (match && match[1]) {
@@ -60,18 +68,17 @@ const task = computed(() => store.tasks.value.find((t) => t.id === store.selecte
 const agentLabel = computed(
   () => store.agents.value.find((a) => a.id === task.value?.agentId)?.label ?? task.value?.agentId ?? '',
 )
+const displayModel = computed(() =>
+  task.value ? formatModelDisplay(task.value.modelId, task.value.agentId, store.agents.value) : '',
+)
+
+/** 计费计量模式: 'credits' (消耗点数) 还是 'tokens' (消耗 Token) 严禁混淆 */
+const billingType = computed(() => getAgentBillingType(task.value?.agentId, store.agents.value))
 
 const maxSeq = computed(() => (events.value.length > 0 ? events.value[events.value.length - 1]!.seq : 0))
 const atBottom = ref(true)
 
 const isRunning = computed(() => task.value?.state === 'running' || task.value?.state === 'queued')
-
-function formatTokens(n?: number): string {
-  if (!n) return '0'
-  if (n >= 1_000_000) return `${(n / 1_000_000).toFixed(1)}M`
-  if (n >= 1_000) return `${(n / 1_000).toFixed(1)}k`
-  return String(n)
-}
 
 const totalSessionTokens = computed(() => {
   if (!task.value?.usage) return 0
@@ -82,11 +89,38 @@ const totalSessionTokens = computed(() => {
   )
 })
 
-// 下一步智能推荐动作
+/**
+ * 本轮用量与消耗统计(提取至输入框下方显示):
+ * 优先取任务持久化 usage,其次取事件流最新 usage 记录
+ */
+const latestUsage = computed(() => {
+  if (task.value?.usage) return task.value.usage
+  for (let i = events.value.length - 1; i >= 0; i--) {
+    const ev = events.value[i]
+    if (ev && ev.event.kind === 'usage') {
+      return {
+        inputTokens: ev.event.inputTokens ?? 0,
+        outputTokens: ev.event.outputTokens ?? 0,
+        cachedTokens: ev.event.cachedTokens ?? 0,
+        credits: ev.event.credits ?? 0,
+        cacheHitRate: ev.event.cacheHitRate ?? 0,
+      }
+    }
+  }
+  return null
+})
+
+const latestTotalTokens = computed(() => {
+  const u = latestUsage.value
+  if (!u) return 0
+  return (u.inputTokens || 0) + (u.outputTokens || 0) + (u.cachedTokens || 0)
+})
+
+// 下一步智能推荐动作 (无多余 emoji)
 const nextStepSuggestions = [
-  { label: '🧪 运行自动化测试验证', prompt: '请运行测试套件验证本次修改，确保全部用例通过且无回归隐患。' },
-  { label: '🔍 审查潜在风险与改进点', prompt: '请对刚刚的代码修改进行质量与安全性审查，指出潜在风险或可优化点。' },
-  { label: '📝 生成变更说明与文档', prompt: '请对本次修改的内容进行结构化总结，输出清晰的变更日志与说明。' },
+  { label: '运行自动化测试验证', prompt: '请运行测试套件验证本次修改，确保全部用例通过且无回归隐患。' },
+  { label: '审查潜在风险与改进点', prompt: '请对刚刚的代码修改进行质量与安全性审查，指出潜在风险或可优化点。' },
+  { label: '生成变更说明与文档', prompt: '请对本次修改的内容进行结构化总结，输出清晰的变更日志与说明。' },
 ]
 
 async function loadInitial(taskId: string): Promise<void> {
@@ -226,8 +260,10 @@ async function sendContinue(): Promise<void> {
       continueText.value = ''
       showSlashPopup.value = false
       await store.refreshTasks()
-      if ('id' in res) {
+      if ('state' in res) {
         store.selectedTaskId.value = res.id
+      } else {
+        await store.refreshFollowups(task.value.id)
       }
     }
   } catch (error) {
@@ -246,19 +282,62 @@ async function stopCurrentTask(): Promise<void> {
   }
 }
 
+let cancelRenameFlag = false
+
 function startRename(): void {
   if (!task.value) return
+  cancelRenameFlag = false
   renameInput.value = task.value.title ?? task.value.prompt
   isRenaming.value = true
 }
 
+function cancelRename(): void {
+  cancelRenameFlag = true
+  isRenaming.value = false
+}
+
 async function commitRename(): Promise<void> {
+  if (cancelRenameFlag || !isRenaming.value) {
+    cancelRenameFlag = false
+    return
+  }
   if (!task.value || !renameInput.value.trim()) {
     isRenaming.value = false
     return
   }
-  await store.renameTask(task.value.id, renameInput.value.trim())
+  const newTitle = renameInput.value.trim()
   isRenaming.value = false
+  await store.renameTask(task.value.id, newTitle)
+}
+
+const retrying = ref(false)
+
+async function retryFailedTask(): Promise<void> {
+  if (!task.value || retrying.value) return
+  retrying.value = true
+  sendError.value = ''
+  try {
+    const next = await window.api.tasksRetry(task.value.id)
+    await store.refreshTasks()
+    store.selectedTaskId.value = next.id
+  } catch (error) {
+    sendError.value = `重试失败: ${error instanceof Error ? error.message : String(error)}`
+  } finally {
+    retrying.value = false
+  }
+}
+
+function reuseTaskPrompt(): void {
+  if (!task.value) return
+  continueText.value = task.value.prompt
+}
+
+async function openArtifactPath(filePath: string): Promise<void> {
+  try {
+    await window.api.openPath(filePath)
+  } catch (error) {
+    sendError.value = `打开产物失败: ${error instanceof Error ? error.message : String(error)}`
+  }
 }
 
 function onScenarioSelected(scenario: ScenarioTemplate): void {
@@ -292,20 +371,25 @@ function timeOf(at: number): string {
         <div class="head-main">
           <div class="who">
             <span class="agent-chip">{{ agentLabel }}</span>
+            <span v-if="displayModel" class="model-chip mono" :title="displayModel">{{ displayModel }}</span>
             <span class="badge" :class="`s-${task.state}`">{{ STATE_TEXT[task.state] }}</span>
             <span class="task-id num" :title="task.id">#{{ task.id.slice(0, 8) }}</span>
 
-            <!-- 激活技能小微章 -->
+            <!-- 激活技能小徽章 -->
             <div v-if="task.skills && task.skills.length > 0" class="skills-badges">
               <span v-for="s in task.skills" :key="s" class="s-tag">{{ s }}</span>
             </div>
 
-            <!-- 对话消耗指标小徽章 -->
+            <!-- 对话消耗指标小徽章 (严格按 Agent 计量模式分离) -->
             <div v-if="task.usage" class="session-usage-badge num">
-              <span class="u-badge-item" title="对话消耗点数">💎 {{ task.usage.credits }} 点</span>
-              <span class="u-badge-item" title="总消耗 Tokens">🔤 {{ formatTokens(totalSessionTokens) }}</span>
+              <template v-if="billingType === 'credits'">
+                <span class="u-badge-item" title="对话消耗点数">点数: {{ task.usage.credits }} 点</span>
+              </template>
+              <template v-else>
+                <span class="u-badge-item" title="总消耗 Tokens">Token: {{ formatTokens(totalSessionTokens) }}</span>
+              </template>
               <span v-if="task.usage.cacheHitRate" class="u-badge-item cache" title="Prompt 缓存命中率">
-                ⚡ 缓存 {{ task.usage.cacheHitRate }}%
+                缓存 {{ task.usage.cacheHitRate }}%
               </span>
             </div>
           </div>
@@ -317,7 +401,7 @@ function timeOf(at: number): string {
                 class="rename-input"
                 autofocus
                 @keydown.enter="commitRename"
-                @keydown.esc="isRenaming = false"
+                @keydown.esc="cancelRename"
                 @blur="commitRename"
               />
             </div>
@@ -328,7 +412,7 @@ function timeOf(at: number): string {
               @click="startRename"
             >
               {{ task.title || task.prompt }}
-              <span class="edit-icon" title="点击重命名对话">✎</span>
+              <span class="edit-hint" title="点击重命名对话">[改名]</span>
             </span>
           </div>
         </div>
@@ -343,7 +427,7 @@ function timeOf(at: number): string {
             title="立即终止当前 Agent 任务执行"
             @click="stopCurrentTask"
           >
-            ■ 终止
+            终止
           </GlassButton>
 
           <GlassButton
@@ -352,7 +436,7 @@ function timeOf(at: number): string {
             title="打开当前工作区目录"
             @click="openWorkspace"
           >
-            📁 目录
+            工作区
           </GlassButton>
 
           <GlassButton
@@ -361,7 +445,7 @@ function timeOf(at: number): string {
             title="点击弹窗查看完整任务详情与操作"
             @click="store.openDetailModal()"
           >
-            📋 详情
+            详情
           </GlassButton>
 
           <GlassButton
@@ -370,7 +454,7 @@ function timeOf(at: number): string {
             :title="store.detailCollapsed.value ? '展开详情侧栏' : '锁起详情侧栏'"
             @click="store.toggleDetailCollapsed()"
           >
-            {{ store.detailCollapsed.value ? '◨ 展开' : '🔒 锁起' }}
+            {{ store.detailCollapsed.value ? '展开详情' : '折叠详情' }}
           </GlassButton>
         </div>
       </header>
@@ -425,43 +509,12 @@ function timeOf(at: number): string {
             </div>
           </div>
 
-          <div v-else-if="event.event.kind === 'usage'" class="node usage-node">
-            <div class="usage-card glass">
-              <div class="usage-card-head">
-                <span class="usage-title">📊 本轮用量与消耗统计</span>
-                <span v-if="event.event.cacheHitRate !== undefined" class="usage-cache-badge">
-                  ⚡ 缓存命中 {{ event.event.cacheHitRate }}%
-                </span>
-              </div>
-              <div class="usage-grid num">
-                <div class="u-cell">
-                  <span class="u-label">输入 Tokens</span>
-                  <span class="u-val">{{ (event.event.inputTokens ?? 0).toLocaleString() }}</span>
-                </div>
-                <div class="u-cell">
-                  <span class="u-label">缓存读取 Tokens</span>
-                  <span class="u-val highlight">{{ (event.event.cachedTokens ?? 0).toLocaleString() }}</span>
-                </div>
-                <div class="u-cell">
-                  <span class="u-label">输出 Tokens</span>
-                  <span class="u-val">{{ (event.event.outputTokens ?? 0).toLocaleString() }}</span>
-                </div>
-                <div class="u-cell">
-                  <span class="u-label">消耗点数</span>
-                  <span class="u-val credits">💎 {{ event.event.credits ?? '0' }} 点</span>
-                </div>
-              </div>
-              <div v-if="event.event.cacheHitRate !== undefined" class="usage-cache-bar">
-                <div class="bar-track">
-                  <div class="bar-fill" :style="{ width: `${event.event.cacheHitRate}%` }" />
-                </div>
-                <span class="bar-text">Prompt Cache 缓存读取有效降低了计费与推理等待</span>
-              </div>
-            </div>
-          </div>
-
           <div v-else-if="event.event.kind === 'artifact'" class="row">
-            <span class="bubble file">
+            <span
+              class="bubble file clickable"
+              title="点击在系统中定位或打开产物"
+              @click="openArtifactPath(event.event.path)"
+            >
               <span class="kind-tag artifact">产物</span>
               <span class="mono-path">{{ event.event.path }}</span>
               <span class="change" :class="event.event.change">{{ event.event.change }}</span>
@@ -490,24 +543,43 @@ function timeOf(at: number): string {
             <span class="run-title">Agent 正在执行中…</span>
             <span v-if="runningDurationText" class="run-time num">已耗时 {{ runningDurationText }}</span>
           </div>
-          <button type="button" class="run-stop-btn" title="终止当前任务" @click="stopCurrentTask">
+          <GlassButton variant="danger" size="sm" class="run-stop-btn" title="终止当前任务" @click="stopCurrentTask">
             终止
-          </button>
+          </GlassButton>
         </div>
 
-        <!-- 任务完成后的下一步动作建议 -->
+        <!-- 任务异常失败恢复栏 (最符合人类排障心智直觉: 显示原因 + 一键重试 / 改词重发) -->
+        <div v-if="task.state === 'failed'" class="failure-alert-box glass">
+          <div class="fail-info">
+            <span class="fail-badge">任务中断</span>
+            <span class="fail-msg" :title="task.error || '执行过程中断'">
+              {{ task.error || '任务执行异常终止，可能是上游模型服务超时或进程意外退出' }}
+            </span>
+          </div>
+          <div class="fail-actions">
+            <GlassButton variant="primary" size="sm" :disabled="retrying" @click="retryFailedTask">
+              {{ retrying ? '重试中…' : '立即重试' }}
+            </GlassButton>
+            <GlassButton variant="ghost" size="sm" @click="reuseTaskPrompt">
+              填入输入框微调
+            </GlassButton>
+          </div>
+        </div>
+
+        <!-- 任务完成后的下一步动作建议 (精简无 emoji) -->
         <div v-if="task.state === 'completed'" class="suggestions-box">
-          <span class="sug-title">💡 下一步建议：</span>
+          <span class="sug-title">下一步建议：</span>
           <div class="sug-list">
-            <button
+            <GlassButton
               v-for="s in nextStepSuggestions"
               :key="s.label"
-              type="button"
+              variant="ghost"
+              size="sm"
               class="sug-btn"
               @click="applySuggestion(s)"
             >
               {{ s.label }}
-            </button>
+            </GlassButton>
           </div>
         </div>
       </div>
@@ -532,13 +604,51 @@ function timeOf(at: number): string {
             :model-value="continueText"
             multiline
             :rows="2"
-            :send-label="isRunning ? '➕ 排队发送' : '发送'"
+            :send-label="isRunning ? '排队发送' : '发送'"
             :send-disabled="sending || !continueText.trim()"
             :placeholder="isRunning ? 'Agent 正在执行中，输入可直接排队追加对话 (Enter 发送)' : '继续对话: 输入指令或键入 / 选择快捷技能 (Enter 发送)'"
             @update:model-value="handleInput"
             @keydown="onContinueKeydown"
             @send="sendContinue"
           />
+        </div>
+
+        <!-- 本轮用量与消耗统计 (输入框正下方卡片) -->
+        <div v-if="latestUsage" class="turn-usage-panel glass num">
+          <div class="u-panel-head">
+            <span class="u-panel-title">本轮用量与消耗统计</span>
+            <span v-if="latestUsage.cacheHitRate !== undefined && latestUsage.cacheHitRate > 0" class="u-cache-tag">
+              缓存命中 {{ latestUsage.cacheHitRate }}%
+            </span>
+          </div>
+          <div class="u-panel-body">
+            <!-- 点数 Agent: 严格展示点数, 严禁混淆 Token -->
+            <template v-if="billingType === 'credits'">
+              <div class="u-stat-item">
+                <span class="u-stat-lbl">本轮消耗点数</span>
+                <span class="u-stat-val highlight-credits">{{ latestUsage.credits ?? '0' }} 点</span>
+              </div>
+            </template>
+            <!-- Token Agent: 严格展示 Token 细分与总计, 严禁混淆点数 -->
+            <template v-else>
+              <div class="u-stat-item">
+                <span class="u-stat-lbl">输入</span>
+                <span class="u-stat-val">{{ formatTokens(latestUsage.inputTokens) }}</span>
+              </div>
+              <div class="u-stat-item">
+                <span class="u-stat-lbl">缓存读取</span>
+                <span class="u-stat-val highlight-cache">{{ formatTokens(latestUsage.cachedTokens) }}</span>
+              </div>
+              <div class="u-stat-item">
+                <span class="u-stat-lbl">输出</span>
+                <span class="u-stat-val">{{ formatTokens(latestUsage.outputTokens) }}</span>
+              </div>
+              <div class="u-stat-item">
+                <span class="u-stat-lbl">总计消耗</span>
+                <span class="u-stat-val highlight-total">{{ formatTokens(latestTotalTokens) }} Token</span>
+              </div>
+            </template>
+          </div>
         </div>
 
         <div v-if="sendError" class="send-err">{{ sendError }}</div>
@@ -801,6 +911,62 @@ function timeOf(at: number): string {
   font-size: 11px;
 }
 
+.bubble.file.clickable {
+  cursor: pointer;
+  transition: all var(--fast) var(--ease);
+}
+
+.bubble.file.clickable:hover {
+  background: var(--glass-bg-strong);
+  border-color: var(--accent-line);
+  transform: translateY(-1px);
+}
+
+.failure-alert-box {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 10px 14px;
+  border-radius: var(--radius-md);
+  border: 1px solid color-mix(in srgb, var(--err) 40%, transparent);
+  background: color-mix(in srgb, var(--err) 8%, var(--glass-bg));
+  margin-top: 8px;
+}
+
+.fail-info {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+  flex: 1;
+}
+
+.fail-badge {
+  font-size: 11px;
+  font-weight: 700;
+  color: var(--err);
+  background: color-mix(in srgb, var(--err) 15%, transparent);
+  padding: 2px 8px;
+  border-radius: 4px;
+  flex-shrink: 0;
+}
+
+.fail-msg {
+  font-size: 12px;
+  color: var(--text);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.fail-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-shrink: 0;
+}
+
 .kind-tag.artifact {
   color: var(--accent-strong);
   font-weight: 600;
@@ -1002,6 +1168,30 @@ function timeOf(at: number): string {
 }
 
 /* 顶部 header 用量微章 */
+.model-chip {
+  font-size: 11px;
+  padding: 1px 7px;
+  border-radius: 4px;
+  background: var(--chip-bg);
+  border: 1px solid var(--line);
+  color: var(--muted);
+  max-width: 140px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.edit-hint {
+  font-size: 10.5px;
+  color: var(--faint);
+  opacity: 0.7;
+}
+
+.edit-hint:hover {
+  color: var(--accent);
+  opacity: 1;
+}
+
 .session-usage-badge {
   display: inline-flex;
   align-items: center;
@@ -1019,41 +1209,34 @@ function timeOf(at: number): string {
   font-weight: 600;
 }
 
-/* 消息流内用量统计卡片 */
-.usage-node {
-  margin: 12px 0;
-  display: flex;
-  justify-content: center;
-}
-
-.usage-card {
-  width: 100%;
-  max-width: 480px;
+/* 输入框下方本轮用量与消耗统计面板 */
+.turn-usage-panel {
+  margin-top: 8px;
+  padding: 8px 12px;
   background: var(--glass-bg);
   border: 1px solid var(--glass-edge);
-  border-radius: var(--radius-md);
-  padding: 12px 14px;
-  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.08);
+  border-radius: var(--radius-sm);
+  box-shadow: inset 0 1px 0 var(--glass-specular);
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
 }
 
-.usage-card-head {
+.u-panel-head {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  margin-bottom: 10px;
-  padding-bottom: 6px;
-  border-bottom: 1px solid var(--line);
 }
 
-.usage-title {
-  font-size: 12px;
-  font-weight: 600;
-  color: var(--text);
-}
-
-.usage-cache-badge {
+.u-panel-title {
   font-size: 11px;
-  font-weight: 700;
+  font-weight: 600;
+  color: var(--muted);
+}
+
+.u-cache-tag {
+  font-size: 10.5px;
+  font-weight: 600;
   color: #10b981;
   background: color-mix(in srgb, #10b981 12%, transparent);
   border: 1px solid color-mix(in srgb, #10b981 30%, transparent);
@@ -1061,60 +1244,39 @@ function timeOf(at: number): string {
   border-radius: 4px;
 }
 
-.usage-grid {
-  display: grid;
-  grid-template-columns: repeat(2, 1fr);
-  gap: 8px 12px;
-}
-
-.u-cell {
+.u-panel-body {
   display: flex;
-  flex-direction: column;
-  gap: 2px;
+  align-items: center;
+  gap: 16px;
+  flex-wrap: wrap;
 }
 
-.u-label {
-  font-size: 10.5px;
+.u-stat-item {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 11.5px;
+}
+
+.u-stat-lbl {
   color: var(--muted);
+  font-size: 11px;
 }
 
-.u-val {
-  font-size: 13px;
+.u-stat-val {
   font-weight: 600;
   color: var(--text);
 }
 
-.u-val.highlight {
-  color: #10b981;
-}
-
-.u-val.credits {
+.u-stat-val.highlight-credits {
   color: var(--accent-strong);
 }
 
-.usage-cache-bar {
-  margin-top: 10px;
-  display: flex;
-  flex-direction: column;
-  gap: 4px;
+.u-stat-val.highlight-cache {
+  color: #10b981;
 }
 
-.usage-cache-bar .bar-track {
-  height: 4px;
-  background: var(--line);
-  border-radius: 999px;
-  overflow: hidden;
-}
-
-.usage-cache-bar .bar-fill {
-  height: 100%;
-  background: linear-gradient(90deg, #10b981, #06b6d4);
-  border-radius: 999px;
-  transition: width 300ms var(--ease);
-}
-
-.usage-cache-bar .bar-text {
-  font-size: 10px;
-  color: var(--faint);
+.u-stat-val.highlight-total {
+  color: var(--accent-strong);
 }
 </style>

@@ -34,29 +34,28 @@ const currentProjectName = computed(() => store.selectedProject.value?.name ?? '
         @click="emit('selectScenario', item)"
       >
         <div class="card-top">
-          <span class="icon">{{ item.icon }}</span>
           <span class="title">{{ item.title }}</span>
           <span class="mode-badge">{{ item.mode }}</span>
         </div>
         <p class="desc">{{ item.desc }}</p>
         <div class="card-footer">
-          <span class="action">一键填入 ➔</span>
+          <span class="action">一键填入 →</span>
         </div>
       </div>
     </div>
 
     <div class="quick-tips">
       <div class="tip-item">
-        <span class="tip-icon">💡</span>
+        <span class="tip-dot" />
         <span class="tip-text">输入框键入 <code>/</code> 可呼出 <code>/fix</code>、<code>/test</code>、<code>/refactor</code> 等常用指令</span>
       </div>
       <div class="tip-item">
-        <span class="tip-icon">⏳</span>
+        <span class="tip-dot" />
         <span class="tip-text">Agent 正在执行时，仍可继续输入并点击<strong>“排队发送”</strong>，多轮任务自动接力</span>
       </div>
       <div class="tip-item">
-        <span class="tip-icon">🛑</span>
-        <span class="tip-text">任务执行中若需调整思路，随时点击右上角或输入框旁的<strong>“■ 终止”</strong>即可安全中断</span>
+        <span class="tip-dot" />
+        <span class="tip-text">任务执行中若需调整思路，随时点击右上角或输入框旁的<strong>“终止”</strong>即可安全中断</span>
       </div>
     </div>
   </div>

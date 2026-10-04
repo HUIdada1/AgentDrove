@@ -25,10 +25,10 @@ function openModal(): void {
       </div>
       <div class="head-ops">
         <GlassButton variant="ghost" size="sm" title="放大为弹窗查看" @click="openModal">
-          ↗ 弹窗
+          弹窗
         </GlassButton>
-        <GlassButton variant="ghost" size="sm" title="锁起/收起侧栏,腾出主页空间" @click="lockAndCollapse">
-          🔒 锁起
+        <GlassButton variant="ghost" size="sm" title="收起详情侧栏,腾出主页空间" @click="lockAndCollapse">
+          收起
         </GlassButton>
       </div>
     </header>

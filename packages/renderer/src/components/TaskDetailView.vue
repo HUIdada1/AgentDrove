@@ -2,7 +2,7 @@
 import { computed, onUnmounted, ref, watch } from 'vue'
 import { useAppStore } from '../stores/app'
 import GlassButton from '../ui/GlassButton.vue'
-import { CLIENT_FOLLOW_MODEL, STATE_TEXT, formatModelDisplay } from '../labels'
+import { CLIENT_FOLLOW_MODEL, STATE_TEXT, formatModelDisplay, formatTokens, getAgentBillingType } from '../labels'
 import type { MergeResult, TaskRecord, WorkspaceRow } from '@agent-drove/shared'
 
 const props = withDefaults(
@@ -25,6 +25,18 @@ const agentLabel = computed(
 const displayModel = computed(() =>
   task.value ? formatModelDisplay(task.value.modelId, task.value.agentId, store.agents.value) : '',
 )
+
+/** 计费模式区分: 'credits' (点数) 还是 'tokens' (Token) */
+const billingType = computed(() => getAgentBillingType(task.value?.agentId, store.agents.value))
+
+const totalTokens = computed(() => {
+  if (!task.value?.usage) return 0
+  return (
+    (task.value.usage.inputTokens || 0) +
+    (task.value.usage.outputTokens || 0) +
+    (task.value.usage.cachedTokens || 0)
+  )
+})
 const otherAgents = computed(() =>
   store.agents.value.filter((a) => a.id !== task.value?.agentId && a.enabled && a.capabilities.headless),
 )
@@ -217,33 +229,45 @@ function fmt(ts?: number): string {
         <div v-if="task.error" class="wide"><dt>错误信息</dt><dd class="err">{{ task.error }}</dd></div>
       </dl>
 
-      <!-- 用量与缓存分析面板 -->
+      <!-- 用量与缓存分析面板 (严格区分点数与 Token 模式, 纯净无 emoji) -->
       <section v-if="task.usage" class="usage-section glass">
         <div class="usage-head">
-          <span class="usage-title">📊 对话消耗与缓存分析</span>
-          <span v-if="task.usage.cacheHitRate !== undefined" class="usage-badge">
-            ⚡ 缓存命中 {{ task.usage.cacheHitRate }}%
+          <span class="usage-title">对话消耗与用量分析</span>
+          <span v-if="task.usage.cacheHitRate !== undefined && task.usage.cacheHitRate > 0" class="usage-badge">
+            缓存命中 {{ task.usage.cacheHitRate }}%
           </span>
         </div>
         <div class="usage-grid num">
-          <div class="u-cell">
-            <span class="u-lbl">消耗点数</span>
-            <span class="u-v highlight-points">💎 {{ task.usage.credits }} 点</span>
-          </div>
-          <div class="u-cell">
-            <span class="u-lbl">缓存读取 Tokens</span>
-            <span class="u-v highlight-cache">{{ task.usage.cachedTokens.toLocaleString() }}</span>
-          </div>
-          <div class="u-cell">
-            <span class="u-lbl">输入 Tokens</span>
-            <span class="u-v">{{ task.usage.inputTokens.toLocaleString() }}</span>
-          </div>
-          <div class="u-cell">
-            <span class="u-lbl">输出 Tokens</span>
-            <span class="u-v">{{ task.usage.outputTokens.toLocaleString() }}</span>
-          </div>
+          <template v-if="billingType === 'credits'">
+            <div class="u-cell">
+              <span class="u-lbl">消耗点数</span>
+              <span class="u-v highlight-points">{{ task.usage.credits }} 点</span>
+            </div>
+            <div v-if="task.usage.cacheHitRate !== undefined" class="u-cell">
+              <span class="u-lbl">缓存效率</span>
+              <span class="u-v highlight-cache">{{ task.usage.cacheHitRate }}%</span>
+            </div>
+          </template>
+          <template v-else>
+            <div class="u-cell">
+              <span class="u-lbl">总消耗 Token</span>
+              <span class="u-v highlight-points">{{ totalTokens.toLocaleString() }}</span>
+            </div>
+            <div class="u-cell">
+              <span class="u-lbl">缓存读取 Token</span>
+              <span class="u-v highlight-cache">{{ (task.usage.cachedTokens ?? 0).toLocaleString() }}</span>
+            </div>
+            <div class="u-cell">
+              <span class="u-lbl">输入 Token</span>
+              <span class="u-v">{{ (task.usage.inputTokens ?? 0).toLocaleString() }}</span>
+            </div>
+            <div class="u-cell">
+              <span class="u-lbl">输出 Token</span>
+              <span class="u-v">{{ (task.usage.outputTokens ?? 0).toLocaleString() }}</span>
+            </div>
+          </template>
         </div>
-        <div v-if="task.usage.cacheHitRate !== undefined" class="cache-progress-row">
+        <div v-if="task.usage.cacheHitRate !== undefined && task.usage.cacheHitRate > 0" class="cache-progress-row">
           <div class="cache-track">
             <div class="cache-bar" :style="{ width: `${task.usage.cacheHitRate}%` }" />
           </div>

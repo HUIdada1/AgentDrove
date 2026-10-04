@@ -14,7 +14,7 @@ export class NodeProcessRunner implements ProcessRunner {
     child.stderr?.on('data', (chunk: Buffer) => request.onStderr(chunk))
     const exited = new Promise<number>((resolve, reject) => {
       child.once('error', reject)
-      child.once('exit', (code) => resolve(code ?? -1))
+      child.once('close', (code) => resolve(code ?? -1))
     })
     return {
       pid: child.pid ?? -1,

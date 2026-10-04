@@ -15,7 +15,7 @@ const COMMANDS: SlashCommand[] = [
     cmd: '/fix',
     label: '修复缺陷',
     desc: '诊断异常报错，定位原因并生成热修复补丁',
-    icon: '🐛',
+    icon: '',
     template: '请帮我诊断并修复以下代码中的错误或报错信息：\n',
     recommendedMode: 'edit',
   },
@@ -23,7 +23,7 @@ const COMMANDS: SlashCommand[] = [
     cmd: '/test',
     label: '编写测试',
     desc: '为指定模块编写单元测试与覆盖边界情况',
-    icon: '🧪',
+    icon: '',
     template: '请为以下核心业务逻辑编写完备的自动化测试用例，覆盖正常与异常边界：\n',
     recommendedMode: 'build',
   },
@@ -31,7 +31,7 @@ const COMMANDS: SlashCommand[] = [
     cmd: '/refactor',
     label: '重构优化',
     desc: '遵循 KISS 原则优化代码结构与可维护性',
-    icon: '⚡',
+    icon: '',
     template: '请重构以下模块的代码，精简冗余状态，消除过度工程化：\n',
     recommendedMode: 'edit',
   },
@@ -39,7 +39,7 @@ const COMMANDS: SlashCommand[] = [
     cmd: '/explain',
     label: '代码解释',
     desc: '深度解析代码执行逻辑、数据流转与关键架构',
-    icon: '📖',
+    icon: '',
     template: '请详细解释以下模块的架构设计与核心执行链路：\n',
     recommendedMode: 'plan',
   },
@@ -47,7 +47,7 @@ const COMMANDS: SlashCommand[] = [
     cmd: '/review',
     label: '代码审查',
     desc: '检查潜在竞态死锁、资源泄漏与性能隐患',
-    icon: '🛡️',
+    icon: '',
     template: '请对以下代码进行全量代码审查，指出潜在风险与改进建议：\n',
     recommendedMode: 'plan',
   },
@@ -55,7 +55,7 @@ const COMMANDS: SlashCommand[] = [
     cmd: '/plan',
     label: '方案规划',
     desc: '按照“构思方案 → 分解为具体任务”输出实现步骤',
-    icon: '📋',
+    icon: '',
     template: '请为以下需求设计落地实施方案，并分解为具体的任务清单：\n',
     recommendedMode: 'plan',
   },
@@ -128,7 +128,6 @@ defineExpose({ onKeydown })
         @click="emit('select', item)"
         @mouseenter="selectedIndex = idx"
       >
-        <span class="cmd-icon">{{ item.icon }}</span>
         <span class="cmd-tag num">{{ item.cmd }}</span>
         <span class="cmd-name">{{ item.label }}</span>
         <span class="cmd-desc">{{ item.desc }}</span>

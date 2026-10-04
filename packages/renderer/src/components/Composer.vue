@@ -6,7 +6,7 @@ import GlassInput from '../ui/GlassInput.vue'
 import GlassSelect from '../ui/GlassSelect.vue'
 import SkillSelector from './SkillSelector.vue'
 import SlashCommandPopup, { type SlashCommand } from './SlashCommandPopup.vue'
-import { CLIENT_FOLLOW_MODEL, MODE_OPTIONS } from '../labels'
+import { CLIENT_FOLLOW_MODEL, MODE_OPTIONS, parseChannelsAndModels, type ChannelGroup } from '../labels'
 import { skillsToDenyList, type SubmitTaskDto } from '@agent-drove/shared'
 
 const store = useAppStore()
@@ -28,18 +28,37 @@ const activeAgents = computed(() => store.agents.value.filter((a) => a.enabled &
 const selectedAgent = computed(() => store.agents.value.find((a) => a.id === agentId.value))
 const selectedProject = computed(() => store.selectedProject.value)
 const modelId = ref('')
+const selectedChannelId = ref('default')
 
 // modelSwitch=none 的客户端(如 zcode)没有可选模型,只展示哨兵项且锁定
 const modelLocked = computed(() => selectedAgent.value?.capabilities.modelSwitch === 'none')
 
-const modelOptions = computed(() => {
+// 客户端拥有的可用模型列表(取套餐覆盖交集)
+const effectiveModels = computed(() => {
   const agent = selectedAgent.value
   if (!agent) return []
-  if (modelLocked.value) return [{ value: CLIENT_FOLLOW_MODEL, label: '跟随客户端' }]
-  // 套餐声明覆盖范围时取交集,避免发出会被 registry.resolveModel 拒绝的模型
+  if (modelLocked.value) return [{ id: CLIENT_FOLLOW_MODEL, label: '跟随客户端' }]
   const covered = agent.plan.modelIds
-  const list = covered.length > 0 ? agent.models.filter((m) => covered.includes(m.id)) : agent.models
-  return list.map((m) => ({ value: m.id, label: m.label }))
+  return covered.length > 0 ? agent.models.filter((m) => covered.includes(m.id)) : agent.models
+})
+
+// 解析出渠道与模型级联结构(彻底杜绝跨渠道传错模型导致上游 502 漏洞)
+const channelGroups = computed<ChannelGroup[]>(() => {
+  return parseChannelsAndModels(effectiveModels.value)
+})
+
+const channelOptions = computed(() => {
+  return channelGroups.value.map((g) => ({ value: g.id, label: g.name }))
+})
+
+const currentChannelGroup = computed(() => {
+  return channelGroups.value.find((g) => g.id === selectedChannelId.value) ?? channelGroups.value[0]
+})
+
+// 级联模型选项:严格只展示当前渠道下的有效模型
+const modelOptions = computed(() => {
+  if (modelLocked.value) return [{ value: CLIENT_FOLLOW_MODEL, label: '跟随客户端' }]
+  return currentChannelGroup.value?.models ?? []
 })
 
 // 仅在客户端支持切模型且已选中时随 DTO 透传;其余情况省略字段
@@ -47,26 +66,50 @@ const resolvedModelId = computed(() =>
   selectedAgent.value && !modelLocked.value && modelId.value ? modelId.value : undefined,
 )
 
-// 切客户端或模型列表异步到达时回填模型:优先档案默认模型,其次首个可选模型,避免空白
-function syncPreferredModel() {
-  const options = modelOptions.value
-  if (options.length === 0) return
-  if (!modelId.value || !options.some((o) => o.value === modelId.value)) {
+// 级联同步:保障渠道与模型严格合法
+function syncCascadingModel() {
+  const groups = channelGroups.value
+  if (groups.length === 0) return
+
+  // 1. 若当前 channelId 不在可选渠道列表内,自动回正
+  if (!groups.some((g) => g.id === selectedChannelId.value)) {
+    const matched = groups.find((g) => g.models.some((m) => m.value === modelId.value))
+    selectedChannelId.value = matched?.id ?? groups[0]?.id ?? 'default'
+  }
+
+  // 2. 当前渠道下的可用模型 (直接检索目标 group, 杜绝 computed 时序未刷新问题)
+  const currentGroup = groups.find((g) => g.id === selectedChannelId.value) ?? groups[0]
+  const modelsInChannel = currentGroup?.models ?? []
+  if (modelsInChannel.length === 0) {
+    modelId.value = ''
+    return
+  }
+
+  // 3. 若当前 modelId 不在该渠道内,自动落入该渠道首个有效模型或默认模型
+  if (!modelId.value || !modelsInChannel.some((m) => m.value === modelId.value)) {
     const preferred = selectedAgent.value?.defaultModel
-    modelId.value =
-      preferred && options.some((o) => o.value === preferred) ? preferred : (options[0]?.value ?? '')
+    const preferredMatch = preferred && modelsInChannel.find((m) => m.value === preferred)
+    modelId.value = preferredMatch ? preferredMatch.value : (modelsInChannel[0]?.value ?? '')
   }
 }
 
 watch(agentId, () => {
-  const options = modelOptions.value
-  const preferred = selectedAgent.value?.defaultModel
-  modelId.value =
-    preferred && options.some((o) => o.value === preferred) ? preferred : (options[0]?.value ?? '')
+  // 切客户端时重新选择匹配渠道
+  selectedChannelId.value = channelGroups.value[0]?.id ?? 'default'
+  syncCascadingModel()
 })
 
-watch(modelOptions, () => {
-  syncPreferredModel()
+watch(selectedChannelId, (newChannelId) => {
+  // 渠道切换时,严格重选模型至该渠道内,避免上游由于 channel-model 错位触发 502/503 报错
+  const targetGroup = channelGroups.value.find((g) => g.id === newChannelId) ?? channelGroups.value[0]
+  const modelsInChannel = targetGroup?.models ?? []
+  if (modelsInChannel.length > 0 && !modelsInChannel.some((m) => m.value === modelId.value)) {
+    modelId.value = modelsInChannel[0]?.value ?? ''
+  }
+})
+
+watch(channelGroups, () => {
+  syncCascadingModel()
 })
 
 // 默认档位来自设置(settings 异步到达后生效);yolo 不在发布框可选档位内,回落到 build
@@ -214,14 +257,11 @@ async function submit(): Promise<void> {
     }))
     const cleanDtos = JSON.parse(JSON.stringify(dtos)) as SubmitTaskDto[]
     // 派生工作区:git 源建 worktree,非 git 整拷降级(主进程完成)
-    if (workspaceSource.value) {
-      await window.api.tasksSubmitBatch(
-        cleanDtos.map((dto) => ({ ...dto, workspaceSource: workspaceSource.value })),
-      )
-    } else {
-      const tasks = await window.api.tasksSubmitBatch(cleanDtos)
-      if (tasks.length > 0) store.selectedTaskId.value = tasks[0]?.id ?? null
-    }
+    const finalDtos = workspaceSource.value
+      ? cleanDtos.map((dto) => ({ ...dto, workspaceSource: workspaceSource.value }))
+      : cleanDtos
+    const tasks = await window.api.tasksSubmitBatch(finalDtos)
+    if (tasks.length > 0) store.selectedTaskId.value = tasks[0]?.id ?? null
     prompt.value = ''
     attachments.value = []
   } catch (error) {
@@ -277,33 +317,48 @@ function onKeydown(event: KeyboardEvent): void {
     </div>
 
     <div class="toolbar">
-      <GlassSelect
-        v-model="agentId"
-        class="who"
-        title="客户端"
-        :options="activeAgents.map((a) => ({ value: a.id, label: a.label }))"
-      />
-      <GlassSelect
-        v-model="modelId"
-        class="model"
-        title="模型"
-        :options="modelOptions"
-        :disabled="modelLocked"
-      />
-      <GlassSelect
-        v-model="mode"
-        title="档位"
-        :options="MODE_OPTIONS"
-      />
-      <GlassButton variant="ghost" size="sm" @click="pickAttachment">
-        附件{{ attachments.length ? ` ${attachments.length}` : '' }}
-      </GlassButton>
-      <GlassButton variant="ghost" size="sm" :class="{ on: batchMode }" @click="batchMode = !batchMode">
-        批量
-      </GlassButton>
-      <GlassButton variant="ghost" size="sm" :class="{ on: advanced }" @click="advanced = !advanced">
-        高级
-      </GlassButton>
+      <div class="selectors-group">
+        <GlassSelect
+          v-model="agentId"
+          class="who"
+          title="执行客户端"
+          :options="activeAgents.map((a) => ({ value: a.id, label: a.label }))"
+        />
+        <!-- 级联渠道选择器:多渠道时展示,选择特定渠道如官方/自定义中转 -->
+        <GlassSelect
+          v-if="channelOptions.length > 1"
+          v-model="selectedChannelId"
+          class="channel"
+          title="模型渠道"
+          :options="channelOptions"
+          :disabled="modelLocked"
+        />
+        <!-- 联动模型选择器:只展示当前渠道下的合法模型 -->
+        <GlassSelect
+          v-model="modelId"
+          class="model"
+          title="模型"
+          :options="modelOptions"
+          :disabled="modelLocked"
+        />
+        <GlassSelect
+          v-model="mode"
+          class="mode"
+          title="档位"
+          :options="MODE_OPTIONS"
+        />
+      </div>
+      <div class="actions-group">
+        <GlassButton variant="ghost" size="sm" @click="pickAttachment">
+          附件{{ attachments.length ? ` ${attachments.length}` : '' }}
+        </GlassButton>
+        <GlassButton variant="ghost" size="sm" :class="{ on: batchMode }" @click="batchMode = !batchMode">
+          批量
+        </GlassButton>
+        <GlassButton variant="ghost" size="sm" :class="{ on: advanced }" @click="advanced = !advanced">
+          高级
+        </GlassButton>
+      </div>
     </div>
 
     <div class="ws-row">
@@ -316,7 +371,7 @@ function onKeydown(event: KeyboardEvent): void {
         class="ws-chip"
         :title="selectedProject.path ?? '未绑定目录,派发落默认工作区'"
       >
-        ⌂ {{ selectedProject.name }}
+        {{ selectedProject.name }}
         <button class="x" title="取消选中工作区" @click="store.selectedProjectId.value = null">×</button>
       </span>
     </div>
@@ -341,7 +396,7 @@ function onKeydown(event: KeyboardEvent): void {
 
     <div v-if="attachments.length" class="chips">
       <span v-for="a in attachments" :key="a.path" class="chip">
-        {{ a.kind === 'image' ? '🖼' : '📄' }} {{ a.path.split(/[\\/]/).pop() }}
+        <span class="chip-kind">{{ a.kind === 'image' ? '[图]' : '[文]' }}</span> {{ a.path.split(/[\\/]/).pop() }}
         <button class="x" @click="removeAttachment(a.path)">×</button>
       </span>
     </div>
@@ -361,18 +416,45 @@ function onKeydown(event: KeyboardEvent): void {
 .toolbar {
   display: flex;
   align-items: center;
+  justify-content: space-between;
   gap: 8px;
   flex-wrap: wrap;
 }
 
+.selectors-group {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
+  flex: 1;
+  min-width: 0;
+}
+
+.actions-group {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-shrink: 0;
+}
+
 .who {
-  min-width: 110px;
-  max-width: 160px;
+  min-width: 95px;
+  max-width: 130px;
+}
+
+.channel {
+  min-width: 100px;
+  max-width: 140px;
 }
 
 .model {
-  min-width: 130px;
-  max-width: 220px;
+  min-width: 120px;
+  max-width: 200px;
+}
+
+.mode {
+  min-width: 75px;
+  max-width: 95px;
 }
 
 /* 工作区行:目录输入占主导 */

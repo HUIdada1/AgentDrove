@@ -24,6 +24,7 @@ const emit = defineEmits<{
 
 const isOpen = ref(false)
 const containerRef = ref<HTMLElement | null>(null)
+const alignRight = ref(false)
 
 const selectedOption = computed(() => {
   return props.options.find((opt) => String(opt.value) === String(props.modelValue))
@@ -39,6 +40,10 @@ const displayText = computed(() => {
 
 function toggleDropdown(): void {
   if (props.disabled) return
+  if (!isOpen.value && containerRef.value) {
+    const rect = containerRef.value.getBoundingClientRect()
+    alignRight.value = window.innerWidth - rect.left < 260
+  }
   isOpen.value = !isOpen.value
 }
 
@@ -117,7 +122,7 @@ onBeforeUnmount(() => {
     </div>
 
     <transition name="g-popper-fade">
-      <div v-if="isOpen" class="g-dropdown-popper glass">
+      <div v-if="isOpen" class="g-dropdown-popper glass" :class="{ 'align-right': alignRight }">
         <div v-if="options.length === 0" class="g-option-empty">
           暂无可选选项
         </div>
@@ -227,6 +232,11 @@ onBeforeUnmount(() => {
   border-radius: var(--radius-sm);
   padding: 4px;
   box-shadow: var(--glass-shadow), 0 8px 24px rgba(0, 0, 0, 0.38);
+}
+
+.g-dropdown-popper.align-right {
+  left: auto;
+  right: 0;
 }
 
 .g-option {

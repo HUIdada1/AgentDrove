@@ -58,3 +58,99 @@ export function formatModelDisplay(
   return modelId
 }
 
+/**
+ * 判断 Agent 计费计量模式:
+ * - 'credits': 消耗点数(如 Qoder Credits 等)
+ * - 'tokens': 消耗 Token(如 ZCode / GLM / Codex / Trae 等)
+ */
+export function getAgentBillingType(
+  agentId?: string,
+  agents?: Array<{ id: string; plan?: { quotaKind?: string } }>,
+): 'credits' | 'tokens' {
+  if (!agentId || !agents) return 'tokens'
+  const agent = agents.find((a) => a.id === agentId)
+  if (agent?.plan?.quotaKind === 'credits') {
+    return 'credits'
+  }
+  return 'tokens'
+}
+
+/** 规范化 Token 数量紧凑显示 (如 1.2M, 45.6k, 320) */
+export function formatTokens(n?: number): string {
+  if (!n) return '0'
+  if (n >= 1_000_000) return `${(n / 1_000_000).toFixed(1)}M`
+  if (n >= 1_000) return `${(n / 1_000).toFixed(1)}k`
+  return String(n)
+}
+
+export interface ChannelGroup {
+  id: string
+  name: string
+  models: Array<{ value: string; label: string }>
+}
+
+/**
+ * 将 Agent 模型目录解析为「渠道(Provider) → 模型列表」级联结构:
+ * 1. 复合 ID "<providerId>/<modelId>" 按渠道汇聚;
+ * 2. 扁平模型归入 "默认渠道" 或 "跟随客户端";
+ * 3. 彻底避免跨渠道传错模型导致上游 502/404 漏洞。
+ */
+export function parseChannelsAndModels(
+  models: Array<{ id: string; label: string }> = [],
+): ChannelGroup[] {
+  if (!models || models.length === 0) {
+    return [{ id: 'default', name: '默认渠道', models: [{ value: CLIENT_FOLLOW_MODEL, label: '跟随客户端' }] }]
+  }
+
+  const groupMap = new Map<string, { name: string; models: Array<{ value: string; label: string }> }>()
+
+  for (const m of models) {
+    if (m.id === CLIENT_FOLLOW_MODEL) {
+      if (!groupMap.has('default')) {
+        groupMap.set('default', { name: '默认渠道', models: [] })
+      }
+      groupMap.get('default')!.models.push({ value: m.id, label: m.label || '跟随客户端' })
+      continue
+    }
+
+    if (m.id.includes('/')) {
+      const slashIdx = m.id.indexOf('/')
+      const providerId = m.id.slice(0, slashIdx)
+      const rawModel = m.id.slice(slashIdx + 1)
+      let providerName = providerId
+      let modelLabel = rawModel
+
+      if (m.label.includes(' · ')) {
+        const parts = m.label.split(' · ')
+        providerName = parts[0]?.trim() || providerId
+        modelLabel = parts.slice(1).join(' · ').trim() || rawModel
+      } else if (m.label) {
+        modelLabel = m.label
+      }
+
+      if (!groupMap.has(providerId)) {
+        groupMap.set(providerId, { name: providerName, models: [] })
+      }
+      groupMap.get(providerId)!.models.push({
+        value: m.id,
+        label: modelLabel,
+      })
+    } else {
+      if (!groupMap.has('default')) {
+        groupMap.set('default', { name: '默认渠道', models: [] })
+      }
+      groupMap.get('default')!.models.push({
+        value: m.id,
+        label: m.label || m.id,
+      })
+    }
+  }
+
+  return Array.from(groupMap.entries()).map(([id, grp]) => ({
+    id,
+    name: grp.name,
+    models: grp.models,
+  }))
+}
+
+
