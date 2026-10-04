@@ -1,5 +1,10 @@
 # Changelog
 
+## v0.4.7 (2026-10-04)
+
+5c874ac feat(core+main+renderer): 用量账本结构化(缓存命中率/点数/剩余配额)+ IPC 克隆安全防御 + 用量仪表
+3d3ca62 chore(release): v0.4.6 版本同步与 CHANGELOG
+
 ## v0.4.6 (2026-10-04)
 
 9e7253c feat(core+main+renderer): 内置技能选择与追问排队队列 + 斜杠命令/引导中心
