@@ -1,14 +1,17 @@
 <script setup lang="ts">
-import { ref } from 'vue'
+import { computed, ref } from 'vue'
 import type { ComponentPublicInstance } from 'vue'
 import type { FollowupQueueItem } from '@agent-drove/shared'
 import GlassButton from '../ui/GlassButton.vue'
+import { EFFORT_LABEL } from '../labels'
 
 const props = defineProps<{
   taskId: string
   followups: FollowupQueueItem[]
   /** 父任务是否执行中:决定是否提供"打断当前轮并立即发送" */
   taskRunning?: boolean
+  /** 父任务是否已终态(R09):队列不再自动执行,逐条提供"发送"并新增"全部发送" */
+  taskTerminal?: boolean
 }>()
 
 const emit = defineEmits<{
@@ -18,13 +21,24 @@ const emit = defineEmits<{
   (e: 'edit', followupId: string, prompt: string): void
   /** 提前发送:移到队首(P0-6/D3) */
   (e: 'promote', followupId: string): void
+  /** 相邻项下移调序(G2-07):与下一项交换;契约(tasksReorderFollowup)支持任意锚点,IPC 在父层 */
+  (e: 'demote', followupId: string): void
   /** 打断当前轮并立即发送(P0-6/D3):确认在父层,IPC 也在父层 */
   (e: 'interrupt', followupId: string): void
+  /** 终态下逐条发送(R09):仅展示于父任务终态,覆盖参数随条透传由父层执行 */
+  (e: 'send', followupId: string): void
+  /** 终态下全部发送(R09):首条落地接续任务,其余并入该任务自动接力 */
+  (e: 'sendAll'): void
 }>()
 
 const expanded = ref(false)
 const editingId = ref('')
 const editingText = ref('')
+
+/** 队列提示按父任务状态切换(R09):运行/排队=会自动接续;终态=不再自动执行,须手动发送 */
+const hint = computed(() =>
+  props.taskRunning ? '当前轮次完成后将自动接续发送' : '任务已结束，排队消息不会自动执行',
+)
 
 function startEdit(item: FollowupQueueItem): void {
   editingId.value = item.id
@@ -46,7 +60,8 @@ function commitEdit(): void {
   if (text && text !== original) emit('edit', id, text)
 }
 
-/** Enter 提交编辑;IME 组词态(isComposing/229)的 Enter 是选词确认,不是提交意图(与其余输入框口径一致) */
+/** Enter 提交编辑(textarea .exact 修饰放行 Shift+Enter 换行);IME 组词态(isComposing/229)的
+ * Enter 是选词确认,不是提交意图——不拦截,与其余输入框口径一致 */
 function onEditKeydown(event: KeyboardEvent): void {
   if (event.isComposing || event.keyCode === 229) return
   event.preventDefault()
@@ -55,10 +70,26 @@ function onEditKeydown(event: KeyboardEvent): void {
 
 /** 函数 ref:编辑框挂载即聚焦并全选 */
 function setEditRef(el: Element | ComponentPublicInstance | null): void {
-  if (el instanceof HTMLInputElement) {
+  if (el instanceof HTMLTextAreaElement) {
     el.focus()
     el.select()
   }
+}
+
+/**
+ * G2-07:参数覆盖徽标显示具体值(模型/模式/档位),替代只写「带参数」;
+ * 组不出任何段时回落「参数」。
+ */
+function ovText(item: FollowupQueueItem): string {
+  return (
+    [
+      item.modelId ? `模型:${item.modelId}` : '',
+      item.mode ?? '',
+      item.reasoningEffort ? `${EFFORT_LABEL[item.reasoningEffort]}档` : '',
+    ]
+      .filter(Boolean)
+      .join('·') || '参数'
+  )
 }
 
 function formatTime(ts?: number): string {
@@ -75,9 +106,19 @@ function formatTime(ts?: number): string {
       <div class="left">
         <span class="pulse-dot" />
         <span class="title">排队追加对话 ({{ followups.length }})</span>
-        <span class="hint">当前轮次完成后将自动接续发送</span>
+        <span class="hint">{{ hint }}</span>
       </div>
       <div class="right">
+        <!-- 父任务已终态(R09):队列不再自动执行,提供一键全部发送 -->
+        <GlassButton
+          v-if="taskTerminal"
+          size="sm"
+          variant="primary"
+          title="按队列顺序发送全部排队消息,合并为一条接续任务"
+          @click.stop="emit('sendAll')"
+        >
+          全部发送
+        </GlassButton>
         <GlassButton size="sm" variant="ghost" @click.stop="expanded = !expanded">
           {{ expanded ? '收起' : '展开查看' }}
         </GlassButton>
@@ -90,29 +131,32 @@ function formatTime(ts?: number): string {
     <div v-if="expanded" class="queue-list">
       <div v-for="(item, index) in followups" :key="item.id" class="queue-item">
         <span class="index num">#{{ index + 1 }}</span>
-        <input
+        <!-- G2-07:多行 textarea 编辑长 prompt,Shift+Enter 换行、Enter 提交 -->
+        <textarea
           v-if="editingId === item.id"
           :ref="setEditRef"
           v-model="editingText"
           class="edit-input"
-          @keydown.enter="onEditKeydown"
+          rows="3"
+          @keydown.enter.exact="onEditKeydown"
           @keydown.esc="cancelEdit"
           @blur="commitEdit"
         />
         <span
           v-else
           class="text clickable"
-          :title="`${item.prompt}(点击编辑文案)`"
+          :title="`${item.prompt}（点击编辑文案）`"
           @click.stop="startEdit(item)"
         >
           {{ item.prompt }}
         </span>
+        <!-- G2-07:徽标显示具体覆盖值(模型/模式/档位),title 保留全量说明 -->
         <span
           v-if="item.modelId || item.mode || item.reasoningEffort || item.toolPolicy"
           class="ov-tag"
-          title="本条携带着本轮参数覆盖,接续时按此执行"
+          title="本条携带着本轮参数覆盖,发送时按此执行"
         >
-          带参数
+          {{ ovText(item) }}
         </span>
         <span class="time num">{{ formatTime(item.createdAt) }}</span>
         <button
@@ -124,6 +168,17 @@ function formatTime(ts?: number): string {
         >
           ↑
         </button>
+        <!-- G2-07:相邻项下移调序(与下一项交换),IPC 在父层(组 3 G3-04⑤ 接线) -->
+        <button
+          v-if="index < followups.length - 1"
+          type="button"
+          class="act-btn"
+          title="与下一项交换顺序"
+          @click.stop="emit('demote', item.id)"
+        >
+          ↓
+        </button>
+        <!-- 打断当前轮并立即发送:维持仅 running 态(R09) -->
         <button
           v-if="taskRunning"
           type="button"
@@ -132,6 +187,16 @@ function formatTime(ts?: number): string {
           @click.stop="emit('interrupt', item.id)"
         >
           ⏵
+        </button>
+        <!-- 父任务终态(R09):逐条发送,覆盖参数随条透传 -->
+        <button
+          v-if="taskTerminal"
+          type="button"
+          class="act-btn"
+          title="立即发送本条排队消息"
+          @click.stop="emit('send', item.id)"
+        >
+          发送
         </button>
         <button
           type="button"
@@ -154,6 +219,8 @@ function formatTime(ts?: number): string {
   background: var(--accent-dim);
   overflow: hidden;
   transition: all var(--fast) var(--ease);
+  /* R12:容器查询基准——按排队条自身宽度做窄列降级 */
+  container-type: inline-size;
 }
 
 .summary-row {
@@ -169,6 +236,8 @@ function formatTime(ts?: number): string {
   display: flex;
   align-items: center;
   gap: 8px;
+  /* R12:允许收缩,窄列不把右侧按钮组挤出面板 */
+  min-width: 0;
 }
 
 .pulse-dot {
@@ -190,11 +259,23 @@ function formatTime(ts?: number): string {
   font-size: 12px;
   font-weight: 600;
   color: var(--accent-strong);
+  white-space: nowrap;
 }
 
 .hint {
   font-size: 11px;
   color: var(--muted);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  min-width: 0;
+}
+
+/* R12:窄容器(<420px)隐藏提示语,防折行推高挤压消息流 */
+@container (max-width: 420px) {
+  .hint {
+    display: none;
+  }
 }
 
 .right {
@@ -250,17 +331,25 @@ function formatTime(ts?: number): string {
 .edit-input {
   flex: 1;
   min-width: 0;
+  min-height: 60px;
+  resize: vertical;
   background: var(--field-bg);
   border: 1px solid var(--accent);
   border-radius: 4px;
   color: var(--text);
   font-size: 12px;
+  font-family: inherit;
+  line-height: 1.5;
   padding: 2px 6px;
   outline: none;
 }
 
 .ov-tag {
   flex: none;
+  max-width: 40%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
   font-size: 10px;
   padding: 1px 5px;
   border-radius: 4px;

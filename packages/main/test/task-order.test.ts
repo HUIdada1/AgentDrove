@@ -6,7 +6,7 @@ import { describe, expect, it } from 'vitest'
 import { MODEL_CLIENT_FOLLOW, type TaskRecord } from '@agent-drove/core'
 import { MIGRATIONS, compareTaskOrder, openStore, type StoredTask } from '../src/adapters/sqlite-repo.js'
 
-function makeTask(partial: Partial<TaskRecord> = {}): StoredTask {
+function makeTask(partial: Partial<StoredTask> = {}): StoredTask {
   return {
     id: `t-${Math.random().toString(36).slice(2, 10)}`,
     agentId: 'zcode',
@@ -205,14 +205,14 @@ describe('P0-4 思考档位落库与展示序比较器', () => {
     store.close()
   })
 
-  it('compareTaskOrder:手动区按 orderIndex 升序在前,空缺按 createdAt 倒序随后', () => {
+  it('compareTaskOrder:空缺按 createdAt 倒序置顶在前,手动区按 orderIndex 升序随后', () => {
     const manual0 = makeTask({ id: 'm0', createdAt: 1, orderIndex: 0 })
     const manual1 = makeTask({ id: 'm1', createdAt: 2, orderIndex: 1 })
     const fresh = makeTask({ id: 'fresh', createdAt: 100 })
     const stale = makeTask({ id: 'stale', createdAt: 50 })
-    expect(compareTaskOrder(manual0, manual1)).toBeLessThan(0)
-    expect(compareTaskOrder(manual1, fresh)).toBeLessThan(0)
     expect(compareTaskOrder(fresh, stale)).toBeLessThan(0) // 空缺区 createdAt 倒序
-    expect(compareTaskOrder(stale, manual0)).toBeGreaterThan(0)
+    expect(compareTaskOrder(fresh, manual0)).toBeLessThan(0) // 空缺区置顶在手动区之前
+    expect(compareTaskOrder(manual0, manual1)).toBeLessThan(0) // 手动区 orderIndex 升序
+    expect(compareTaskOrder(manual1, fresh)).toBeGreaterThan(0) // 手动区随后
   })
 })

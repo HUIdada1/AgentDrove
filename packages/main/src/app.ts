@@ -30,10 +30,12 @@ import {
   DEFAULT_MAX_CONCURRENCY,
   type AgentDriver,
   type AgentProfile,
+  type AppConfig,
   type Clock,
   type DetectedAgent,
   type ModelSwitchKind,
   type OrchestratorDeps,
+  type PlanOverrideConfig,
 } from '@agent-drove/core'
 import type { UpdateStatus } from '@agent-drove/shared'
 import { NodeFileSystem } from './adapters/node-fs.js'
@@ -332,7 +334,7 @@ async function bootstrap(): Promise<void> {
     saveConfig: (next) => saveYamlConfig(paths.config, next),
     update,
     rescanAgents: () =>
-      detectAndRegisterAgents({ store, registry, logger, zcodeCandidates, zcodeCli, zcodeDriver, traeDriver, qoderDriver, codexDriver, fs }),
+      detectAndRegisterAgents({ store, registry, logger, zcodeCandidates, zcodeCli, zcodeDriver, traeDriver, qoderDriver, codexDriver, fs, getConfig: () => configSource.load() }),
     applyHotkey,
     logger,
     getMainWindow: () => mainWindow,
@@ -350,7 +352,7 @@ async function bootstrap(): Promise<void> {
 
   // ---- 客户端探测后台化(探测结果 + agents 表恢复启用状态)----
   // 完成后广播渲染层重拉客户端,并重建托盘"打开客户端"菜单(创建托盘时注册表还是空的)
-  void detectAndRegisterAgents({ store, registry, logger, zcodeCandidates, zcodeCli, zcodeDriver, traeDriver, qoderDriver, codexDriver, fs })
+  void detectAndRegisterAgents({ store, registry, logger, zcodeCandidates, zcodeCli, zcodeDriver, traeDriver, qoderDriver, codexDriver, fs, getConfig: () => configSource.load() })
     .then(() => {
       notifyRenderer('agents:changed')
       rebuildTrayMenu()
@@ -481,6 +483,7 @@ interface AgentPlanOptions {
   attachments: boolean
   modelSwitch?: ModelSwitchKind
   defaultModel?: string
+  reasoningEffort?: boolean
   totalCredits?: number
   totalTokens?: number
 }
@@ -497,13 +500,17 @@ async function detectAndRegisterAgents(deps: {
   qoderDriver: QoderDriver
   codexDriver: CodexDriver
   fs: NodeFileSystem
+  /** G5-02:动态读配置,组装 profile.plan 时应用设置页套餐校准(重扫即时生效) */
+  getConfig: () => AppConfig
 }): Promise<void> {
-  const { store, registry, logger, zcodeCandidates, zcodeCli, zcodeDriver, traeDriver, qoderDriver, codexDriver, fs } = deps
+  const { store, registry, logger, zcodeCandidates, zcodeCli, zcodeDriver, traeDriver, qoderDriver, codexDriver, fs, getConfig } = deps
   const savedAgents = new Map(store.allAgents().map((row) => [row.id, row]))
   // 本轮探测命中的 id;收尾据此注销"装过但现在没了"的客户端
   const detectedIds = new Set<string>()
   const registerDetected = (detected: DetectedAgent, plan: AgentPlanOptions): void => {
-    const profile = buildProfile(detected, plan, savedAgents.get(detected.id)?.enabled)
+    // G5-02:设置页对该客户端的套餐校准优先于注册默认
+    const override = getConfig().planOverrides?.[detected.id]
+    const profile = buildProfile(detected, plan, savedAgents.get(detected.id)?.enabled, override)
     // 重扫会再次命中已登记的 id,Registry.register 禁止重复注册,先移除旧档案按最新探测结果重建
     registry.unregister(detected.id)
     registry.register(profile)
@@ -558,6 +565,7 @@ async function detectAndRegisterAgents(deps: {
         modelSwitch: 'config-file',
         defaultModel: MODEL_CLIENT_FOLLOW,
         attachments: true,
+        reasoningEffort: true,
         totalTokens: 150_000_000,
         totalCredits: 150_000,
       })
@@ -568,6 +576,7 @@ async function detectAndRegisterAgents(deps: {
         models: [],
         followClient: true,
         attachments: true,
+        reasoningEffort: true,
         totalTokens: 150_000_000,
         totalCredits: 150_000,
       })
@@ -616,6 +625,7 @@ async function detectAndRegisterAgents(deps: {
       modelSwitch: 'cli-arg',
       defaultModel: MODEL_CLIENT_FOLLOW,
       attachments: false,
+      reasoningEffort: true,
       totalTokens: 10_000_000,
       totalCredits: 10_000,
     })
@@ -636,6 +646,7 @@ function buildProfile(
   detected: DetectedAgent,
   options: AgentPlanOptions,
   savedEnabled?: boolean,
+  override?: PlanOverrideConfig,
 ): AgentProfile {
   return {
     id: detected.id,
@@ -654,16 +665,18 @@ function buildProfile(
       sessionResume: detected.id !== 'trae',
       modelSwitch: options.modelSwitch ?? (options.followClient ? 'none' : 'cli-arg'),
       attachments: options.attachments,
+      reasoningEffort: options.reasoningEffort ?? (detected.id === 'zcode' || detected.id === 'codex'),
     },
     plan: {
       name: options.planName,
-      quotaKind: options.quota,
+      quotaKind: override?.quotaKind ?? options.quota,
       modelIds: options.models.map((m) => m.id),
       // 默认值以 core 注册表为唯一出处;register 时的 normalizePlan 还会再兜底一次
-      dailyTaskCap: DEFAULT_DAILY_TASK_CAP,
+      // G5-02:设置页套餐校准优先于注册默认(总量/Token/日上限),余量口径与调度闸同源
+      dailyTaskCap: override?.dailyTaskCap ?? DEFAULT_DAILY_TASK_CAP,
       maxConcurrency: DEFAULT_MAX_CONCURRENCY,
-      totalCredits: options.totalCredits,
-      totalTokens: options.totalTokens,
+      totalCredits: override?.totalCredits ?? options.totalCredits,
+      totalTokens: override?.totalTokens ?? options.totalTokens,
     },
     enabled: savedEnabled ?? true,
   }

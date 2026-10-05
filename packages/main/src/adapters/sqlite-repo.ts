@@ -4,6 +4,7 @@ import Database from 'better-sqlite3'
 import { localDayOf } from '@agent-drove/core'
 import { compareTaskOrder } from '@agent-drove/shared'
 import type {
+  FollowupQueueItem,
   JournalEntry,
   JournalStore,
   ModelPreset,
@@ -39,8 +40,8 @@ export type StoredTask = TaskRecord & { orderIndex?: number }
  */
 export { compareTaskOrder }
 
-/** 同上语义的 SQL 版,供 groupOrderIds 取组内基准序 */
-const GROUP_ORDER_SQL = 'ORDER BY order_index IS NULL, order_index, created_at DESC'
+/** 同上语义的 SQL 版,供 groupOrderIds 取组内基准序:未显式排序的新任务置顶排在最前 */
+const GROUP_ORDER_SQL = 'ORDER BY (order_index IS NOT NULL) ASC, order_index ASC, created_at DESC'
 
 /** 迁移步骤表(导出仅供测试构造历史版本库);index+1 = user_version */
 export const MIGRATIONS: ((db: SqliteDb) => void)[] = [
@@ -126,6 +127,16 @@ export const MIGRATIONS: ((db: SqliteDb) => void)[] = [
     db.exec(`ALTER TABLE tasks ADD COLUMN order_index INTEGER;`)
     db.exec(`ALTER TABLE tasks ADD COLUMN reasoning_effort TEXT;`)
   },
+  // v8: 排队追问队列落库(G5-01);payload 存队列项本体,position 维持队内原序
+  (db) => {
+    db.exec(`
+      CREATE TABLE followups (
+        id TEXT PRIMARY KEY, parent_task_id TEXT NOT NULL, position INTEGER NOT NULL,
+        payload_json TEXT NOT NULL, created_at INTEGER NOT NULL
+      );
+      CREATE INDEX idx_followups_parent ON followups(parent_task_id, position);
+    `)
+  },
 ]
 
 export class SqliteStore
@@ -203,7 +214,7 @@ export class SqliteStore
       .run(rowFromTask(task))
   }
 
-  getTask(id: string): TaskRecord | undefined {
+  getTask(id: string): StoredTask | undefined {
     const row = this.db.prepare('SELECT * FROM tasks WHERE id = ?').get(id) as
       | TaskRow
       | undefined
@@ -221,6 +232,8 @@ export class SqliteStore
     const run = this.db.transaction(() => {
       this.db.prepare('DELETE FROM tasks WHERE id = ?').run(id)
       this.db.prepare('DELETE FROM events WHERE task_id = ?').run(id)
+      // 随任务清掉排队追问(G5-01):否则删除的任务重启后队列行残留成为孤儿
+      this.db.prepare('DELETE FROM followups WHERE parent_task_id = ?').run(id)
     })
     run()
   }
@@ -272,7 +285,7 @@ export class SqliteStore
 
   /**
    * 读出某分组的任务 id 序列,基准与任务列表展示序一致(P0-2):
-   * orderIndex 有值者按值升序在前(手动区),空缺者按 createdAt 倒序随后(兼容旧数据)。
+   * 未显式排序者按 createdAt 倒序置顶在前,已排定者按 orderIndex 升序随后(与 compareTaskOrder 同语义)。
    */
   private groupOrderIds(projectId: string | null): string[] {
     const rows = (
@@ -343,6 +356,41 @@ export class SqliteStore
     return result.maxSeq ?? 0
   }
 
+  // ---- FollowupQueue persistence(G5-01)----
+
+  /** 全量读出追问队列:按 parent_task_id + position 排序重组为内存队列 Map */
+  allFollowups(): Map<string, FollowupQueueItem[]> {
+    const rows = this.db
+      .prepare('SELECT parent_task_id, payload_json FROM followups ORDER BY parent_task_id, position')
+      .all() as FollowupRow[]
+    const result = new Map<string, FollowupQueueItem[]>()
+    for (const row of rows) {
+      const queue = result.get(row.parent_task_id) ?? []
+      try {
+        queue.push(JSON.parse(row.payload_json) as FollowupQueueItem)
+      } catch {
+        // 单条损坏跳过,不影响其余队列项恢复
+      }
+      result.set(row.parent_task_id, queue)
+    }
+    return result
+  }
+
+  /** 全量替换某任务的追问队列(事务内 DELETE+INSERT);items 为空即清空该任务队列 */
+  replaceFollowups(parentTaskId: string, items: FollowupQueueItem[]): void {
+    const run = this.db.transaction(() => {
+      this.db.prepare('DELETE FROM followups WHERE parent_task_id = ?').run(parentTaskId)
+      const insert = this.db.prepare(
+        `INSERT INTO followups (id, parent_task_id, position, payload_json, created_at)
+         VALUES (?, ?, ?, ?, ?)`,
+      )
+      items.forEach((item, position) => {
+        insert.run(item.id, parentTaskId, position, JSON.stringify(item), item.createdAt)
+      })
+    })
+    run()
+  }
+
   // ---- UsageLedger ----
 
   countOf(agentId: string, day: string): number {
@@ -388,6 +436,14 @@ export class SqliteStore
       taskCount: row.task_count,
       estimated: row.estimated,
     }))
+  }
+
+  /** 客户端最早一条任务的创建时间(G5-02):额度周期起点 = min(最早任务, 今日零点) */
+  firstTaskCreatedAt(agentId: string): number | undefined {
+    const row = this.db
+      .prepare('SELECT MIN(created_at) AS firstAt FROM tasks WHERE agent_id = ?')
+      .get(agentId) as { firstAt: number | null }
+    return row.firstAt ?? undefined
   }
 
   /**
@@ -615,6 +671,10 @@ export class SqliteStore
       this.db
         .prepare('DELETE FROM events WHERE task_id NOT IN (SELECT id FROM tasks)')
         .run()
+      // 追问队列孤儿行随保留期清理一并剔除(G5-01),防止已清理任务的队列残留
+      this.db
+        .prepare('DELETE FROM followups WHERE parent_task_id NOT IN (SELECT id FROM tasks)')
+        .run()
       return info.changes
     })
     return run() as number
@@ -697,6 +757,11 @@ interface EventRow {
   kind: string
   payload: string
   at: number
+}
+
+interface FollowupRow {
+  parent_task_id: string
+  payload_json: string
 }
 
 interface JournalRow {

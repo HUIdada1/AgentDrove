@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { computed, onMounted, onUnmounted, ref } from 'vue'
-import type { AgentView, AppConfig, UpdatePhase } from '@agent-drove/shared'
+import type { AgentView, AppConfig, PlanOverrideConfig, UpdatePhase } from '@agent-drove/shared'
 import { useAppStore } from '../stores/app'
 import GlassModal from '../ui/GlassModal.vue'
 import GlassButton from '../ui/GlassButton.vue'
@@ -8,7 +8,8 @@ import GlassInput from '../ui/GlassInput.vue'
 import GlassSelect from '../ui/GlassSelect.vue'
 import GlassToggle from '../ui/GlassToggle.vue'
 import GlassMeter from '../ui/GlassMeter.vue'
-import { MODE_OPTIONS } from '../labels'
+import { MODE_OPTIONS, formatQuotaNumber, formatTokens } from '../labels'
+import type { UsageView } from '@agent-drove/shared'
 
 const store = useAppStore()
 
@@ -34,6 +35,18 @@ const PHASE_TEXT: Record<UpdatePhase, string> = {
 }
 
 const phaseText = computed(() => PHASE_TEXT[store.updateStatus.value.phase])
+
+/** R08:用量区数据——usage:get 与 agentsList 现有字段首次全量消费,与侧栏 tooltip 同源 */
+const usageRows = computed<UsageView[]>(() => store.usage.value)
+
+/** 打开设置即轻量刷新 usage(不触发探活),避免展示启动时的陈旧数据 */
+async function loadUsage(): Promise<void> {
+  try {
+    await store.refreshUsage()
+  } catch {
+    // 单次刷新失败不判死:回落到已缓存的用量数据渲染
+  }
+}
 
 const appVersion = __APP_VERSION__
 
@@ -73,6 +86,7 @@ onMounted(async () => {
   } catch {
     // 单次刷新失败不判死:启动首拉多数已拿到配置,直接用缓存渲染
   }
+  void loadUsage()
   const config = store.settings.value
   // 结构化克隆成草稿:编辑/取消都不回写全局 settings,保存时才提交。
   // 不能用 structuredClone:settings.value 是 Vue 响应式代理(Proxy),克隆必抛 DataCloneError,
@@ -80,9 +94,27 @@ onMounted(async () => {
   if (config && !draft.value) draft.value = JSON.parse(JSON.stringify(config))
 })
 
+// G4-06:嵌套 GlassModal 的 Esc 连锁修复——GlassModal 在 window 上监听 Esc,
+// 子弹窗(校准/yolo 确认)open 时按 Esc 会同时关掉设置页;捕获阶段拦截并只关子弹窗
+function onCaptureKeydown(event: KeyboardEvent): void {
+  if (event.key !== 'Escape') return
+  if (calibAgent.value) {
+    event.stopImmediatePropagation()
+    closeCalibration()
+  } else if (yoloConfirmOpen.value) {
+    event.stopImmediatePropagation()
+    yoloConfirmOpen.value = false
+  }
+}
+
 onUnmounted(() => {
   offConflict?.()
   clearTimeout(savedTimer)
+  window.removeEventListener('keydown', onCaptureKeydown, true)
+})
+
+onMounted(() => {
+  window.addEventListener('keydown', onCaptureKeydown, true)
 })
 
 async function save(): Promise<void> {
@@ -171,6 +203,10 @@ function setMode(mode: string): void {
   if (draft.value) draft.value.task.defaultMode = mode as AppConfig['task']['defaultMode']
 }
 
+// —— G4-06:yolo 开启改为应用内确认层(两级原生 confirm 合并为单层,正文含风险说明,勾选式) ——
+const yoloConfirmOpen = ref(false)
+const yoloAck = ref(false)
+
 function toggleYolo(value: boolean): void {
   const d = draft.value
   if (!d) return
@@ -178,9 +214,111 @@ function toggleYolo(value: boolean): void {
     d.danger.allowYolo = false
     return
   }
-  if (!window.confirm('yolo 为全权限执行,仅限完全可信任务。确定开启?')) return
-  if (!window.confirm('再次确认:开启后任务将绕过全部工具审批,继续吗?')) return
-  d.danger.allowYolo = true
+  yoloAck.value = false
+  yoloConfirmOpen.value = true
+}
+
+function confirmYolo(): void {
+  const d = draft.value
+  yoloConfirmOpen.value = false
+  if (d && yoloAck.value) d.danger.allowYolo = true
+}
+
+// —— G4-06:套餐校准表单(双模式) ——
+const CALIB_MODE_OPTIONS = [
+  { value: 'total', label: '模式 A · 填套餐总量' },
+  { value: 'remaining', label: '模式 B · 直接填当前剩余' },
+]
+
+const calibAgent = ref<UsageView | null>(null)
+const calibMode = ref<'total' | 'remaining'>('total')
+const calibTotalCredits = ref('')
+const calibTotalTokens = ref('')
+const calibDailyTaskCap = ref('')
+const calibRemainingCredits = ref('')
+const calibRemainingTokens = ref('')
+const calibSaving = ref(false)
+const calibError = ref('')
+
+// G4-06:提交通道 settings:set-plan-override 由组 5(G5-02)提供,shared AgentDroveApi
+// 已正式声明 settingsSetPlanOverride(agentId, patch|null);patch=null 清除校准恢复注册默认。
+// 失败提示留在弹窗内,不伪造成功反馈。
+
+/** 打开校准表单并回显当前生效值(usageGet 返回值,主进程合并覆盖后即生效值) */
+function openCalibration(row: UsageView): void {
+  calibAgent.value = row
+  calibMode.value = 'total'
+  calibTotalCredits.value = row.totalCredits !== undefined ? String(row.totalCredits) : ''
+  calibTotalTokens.value = row.totalTokens !== undefined ? String(row.totalTokens) : ''
+  calibDailyTaskCap.value = row.dailyTaskCap > 0 ? String(row.dailyTaskCap) : ''
+  calibRemainingCredits.value =
+    row.remainingCredits !== undefined ? String(row.remainingCredits) : ''
+  calibRemainingTokens.value = row.remainingTokens !== undefined ? String(row.remainingTokens) : ''
+  calibError.value = ''
+}
+
+function closeCalibration(): void {
+  calibAgent.value = null
+  calibError.value = ''
+}
+
+function setCalibMode(mode: string): void {
+  if (mode === 'total' || mode === 'remaining') calibMode.value = mode
+}
+
+/** 表单数字串→数值;空串=null,该字段不进入 patch(主进程为合并语义,不覆盖已有校准) */
+function numOrNull(text: string): number | null {
+  const t = text.trim()
+  if (!t) return null
+  const n = Number(t)
+  return Number.isNaN(n) ? null : n
+}
+
+async function submitCalibration(clear = false): Promise<void> {
+  const row = calibAgent.value
+  if (!row || calibSaving.value) return
+  let patch: PlanOverrideConfig | null
+  if (clear) {
+    // patch=null:主进程删除该校准,恢复注册默认
+    patch = null
+  } else if (calibMode.value === 'total') {
+    // 模式 A:填套餐总量,余量由主进程按 总量 − 累计消耗 倒推;
+    // 只提交填写的维度(主进程为合并语义,空字段不得覆盖已有校准)
+    const patchObj: PlanOverrideConfig = {}
+    const totalCredits = numOrNull(calibTotalCredits.value)
+    const totalTokens = numOrNull(calibTotalTokens.value)
+    const dailyTaskCap = numOrNull(calibDailyTaskCap.value)
+    if (totalCredits !== null) patchObj.totalCredits = totalCredits
+    if (totalTokens !== null) patchObj.totalTokens = totalTokens
+    if (dailyTaskCap !== null) patchObj.dailyTaskCap = dailyTaskCap
+    if (Object.keys(patchObj).length === 0) {
+      calibError.value = '请至少填写一项;要恢复默认请点「清除校准」'
+      return
+    }
+    patch = patchObj
+  } else {
+    // 模式 B:直接填当前剩余,与套餐后台数字对齐
+    const patchObj: PlanOverrideConfig = {}
+    const remainingCredits = numOrNull(calibRemainingCredits.value)
+    const remainingTokens = numOrNull(calibRemainingTokens.value)
+    if (remainingCredits !== null) patchObj.remainingCredits = remainingCredits
+    if (remainingTokens !== null) patchObj.remainingTokens = remainingTokens
+    if (Object.keys(patchObj).length === 0) {
+      calibError.value = '请至少填写一项;要恢复默认请点「清除校准」'
+      return
+    }
+    patch = patchObj
+  }
+  calibSaving.value = true
+  try {
+    await window.api.settingsSetPlanOverride(row.agentId, patch)
+    await store.refreshAgents()
+    closeCalibration()
+  } catch (error) {
+    calibError.value = `校准失败:${error instanceof Error ? error.message : String(error)}`
+  } finally {
+    calibSaving.value = false
+  }
 }
 
 /** 客户端健康点配色,语义同 AgentRail 的 healthClass:无探活记录=灰 */
@@ -248,6 +386,63 @@ async function runExport(kind: 'data' | 'report'): Promise<void> {
           </span>
           <GlassToggle :model-value="agent.enabled" @change="toggleAgent(agent, $event)" />
         </div>
+      </section>
+
+      <!-- R08:用量明细视图——「点数去哪了」就地可查,数值与侧栏 tooltip 同源 -->
+      <section class="card">
+        <div class="card-head">
+          <h2>用量</h2>
+          <GlassButton variant="ghost" size="sm" @click="runExport('report')">
+            导出周用量报告(CSV)
+          </GlassButton>
+        </div>
+        <div v-if="usageRows.length === 0" class="muted">暂无用量数据</div>
+        <div v-else class="usage-table">
+          <div class="usage-row usage-head" aria-hidden="true">
+            <span>客户端</span>
+            <span>任务</span>
+            <span>Token</span>
+            <span>缓存</span>
+            <span>估算点数</span>
+            <span>命中率</span>
+            <span>余量</span>
+            <span class="u-op">操作</span>
+          </div>
+          <div v-for="row in usageRows" :key="row.agentId" class="usage-row">
+            <span class="u-name" :title="row.label">{{ row.label }}</span>
+            <span class="num" title="今日派发任务数(设了每日上限时含上限)">
+              {{ row.taskCount }}{{ row.dailyTaskCap > 0 ? `/${row.dailyTaskCap}` : '' }}
+            </span>
+            <span class="num" title="今日输入+输出 Token 合计">
+              {{ formatTokens(row.usedTokensToday) }}
+            </span>
+            <span class="num" title="今日命中缓存的 Token">
+              {{ formatTokens(row.cachedTokensToday) }}
+            </span>
+            <span class="num" title="按 Token/1000 折算的本应用统计口径,非官方账单">
+              约 {{ formatQuotaNumber(row.usedCreditsToday) }}
+            </span>
+            <span class="num" title="今日平均缓存命中率">
+              {{ row.cacheHitRateToday ?? 0 }}%
+            </span>
+            <span
+              class="num"
+              :class="{ 'u-low': row.remainingPercent !== undefined && row.remainingPercent <= 20 }"
+              :title="row.remainingPercent !== undefined ? `余量 ${row.remainingPercent}%` : '未设置额度,余量未知'"
+            >
+              {{ row.remainingPercent !== undefined ? `${row.remainingPercent}%` : '未知' }}
+            </span>
+            <!-- G4-06:每行校准入口——双模式套餐校准表单,修正硬编码虚构总量 -->
+            <span class="u-op">
+              <button class="calib-btn" title="校准该客户端的套餐额度" @click="openCalibration(row)">
+                校准
+              </button>
+            </span>
+          </div>
+        </div>
+        <p class="muted">
+          统计口径:本应用派发统计(zcode 另含本地 CLI 用量库);点数为估算值,非官方订阅账单。
+        </p>
       </section>
 
       <section class="card">
@@ -385,6 +580,91 @@ async function runExport(kind: 'data' | 'report'): Promise<void> {
       </transition>
       <span class="spacer" />
       <GlassButton variant="primary" :disabled="!draft" @click="save">保存</GlassButton>
+    </template>
+  </GlassModal>
+
+  <!-- G4-06:套餐校准表单——双模式(填总量倒推 / 直接填剩余),可清除覆盖恢复注册默认 -->
+  <GlassModal
+    :open="!!calibAgent"
+    :title="calibAgent ? `套餐校准 · ${calibAgent.label}` : '套餐校准'"
+    width="480px"
+    @close="closeCalibration"
+  >
+    <div v-if="calibAgent" class="calib-form">
+      <label class="calib-mode">
+        校准方式
+        <GlassSelect
+          :model-value="calibMode"
+          :options="CALIB_MODE_OPTIONS"
+          @update:model-value="setCalibMode"
+        />
+      </label>
+      <template v-if="calibMode === 'total'">
+        <p class="calib-hint">
+          模式 A:填套餐总量,余量按「总量 − 本应用累计消耗」倒推。留空表示该维度不覆盖。
+        </p>
+        <div class="grid">
+          <label>
+            套餐总点数
+            <GlassInput v-model="calibTotalCredits" />
+          </label>
+          <label>
+            套餐总 Token
+            <GlassInput v-model="calibTotalTokens" />
+          </label>
+          <label>
+            每日任务上限
+            <GlassInput v-model="calibDailyTaskCap" />
+          </label>
+        </div>
+      </template>
+      <template v-else>
+        <p class="calib-hint">
+          模式 B:直接填当前剩余,与套餐后台数字对齐(免于本地累计漏计启用前用量)。
+        </p>
+        <div class="grid">
+          <label>
+            剩余点数
+            <GlassInput v-model="calibRemainingCredits" />
+          </label>
+          <label>
+            剩余 Token
+            <GlassInput v-model="calibRemainingTokens" />
+          </label>
+        </div>
+      </template>
+      <div v-if="calibError" class="conflict">{{ calibError }}</div>
+    </div>
+    <template #footer>
+      <GlassButton variant="ghost" size="sm" :disabled="calibSaving" @click="submitCalibration(true)">
+        清除校准(恢复默认)
+      </GlassButton>
+      <span class="spacer" />
+      <GlassButton variant="plain" :disabled="calibSaving" @click="closeCalibration">取消</GlassButton>
+      <GlassButton variant="primary" :disabled="calibSaving" @click="submitCalibration()">
+        保存校准
+      </GlassButton>
+    </template>
+  </GlassModal>
+
+  <!-- G4-06:yolo 开启确认层——替代两连原生 window.confirm,正文含风险说明,勾选式单次确认 -->
+  <GlassModal
+    :open="yoloConfirmOpen"
+    title="开启 yolo 模式"
+    width="460px"
+    @close="yoloConfirmOpen = false"
+  >
+    <div class="yolo-confirm">
+      <p class="calib-hint">
+        yolo 为<strong>全权限执行</strong>:任务将绕过全部工具审批——文件读写、命令执行、网络访问均不再逐项确认。
+        仅限完全可信任务使用,误派发不可信任务可能造成本机数据破坏或敏感信息泄露。
+      </p>
+      <GlassToggle :model-value="yoloAck" label="我已了解上述风险,确认开启" @change="yoloAck = $event" />
+    </div>
+    <template #footer>
+      <span class="spacer" />
+      <GlassButton variant="plain" @click="yoloConfirmOpen = false">取消</GlassButton>
+      <GlassButton variant="danger" :disabled="!yoloAck" @click="confirmYolo">确认开启</GlassButton>
     </template>
   </GlassModal>
 </template>
@@ -543,6 +823,108 @@ async function runExport(kind: 'data' | 'report'): Promise<void> {
   height: 100%;
   background: var(--accent);
   transition: width var(--fast);
+}
+
+/* R08:用量明细表——表头弱化,数字列右对齐等宽字体,余量 ≤20% 警示色 */
+.usage-table {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  font-size: 12px;
+}
+
+.usage-row {
+  display: grid;
+  grid-template-columns: minmax(80px, 1.3fr) repeat(6, minmax(56px, 1fr)) 52px;
+  gap: 6px;
+  align-items: center;
+  padding: 4px 8px;
+  border-radius: var(--radius-sm);
+}
+
+.usage-row + .usage-row {
+  border-top: 1px solid var(--line);
+}
+
+.usage-row .num {
+  text-align: right;
+  font-family: var(--mono);
+  font-size: 11.5px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.usage-head {
+  font-size: 10.5px;
+  color: var(--muted);
+  letter-spacing: 0.04em;
+}
+
+.usage-head span:not(:first-child) {
+  text-align: right;
+}
+
+.u-name {
+  min-width: 0;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  font-weight: 600;
+}
+
+.u-low {
+  color: var(--err);
+  font-weight: 600;
+}
+
+/* G4-06:用量表操作列(校准入口) */
+.u-op {
+  text-align: center;
+}
+
+.calib-btn {
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  background: var(--field-bg);
+  color: var(--muted);
+  font-size: 11px;
+  padding: 2px 8px;
+  cursor: pointer;
+  transition: color var(--fast) var(--ease), border-color var(--fast) var(--ease);
+}
+
+.calib-btn:hover {
+  color: var(--accent-strong);
+  border-color: var(--accent-line);
+}
+
+/* G4-06:校准表单 */
+.calib-form {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.calib-mode {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  font-size: 12px;
+  color: var(--muted);
+}
+
+.calib-hint {
+  margin: 0;
+  font-size: 12px;
+  color: var(--muted);
+  line-height: 1.55;
+}
+
+.yolo-confirm {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
 }
 
 .conflict {

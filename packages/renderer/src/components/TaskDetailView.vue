@@ -2,6 +2,7 @@
 import { computed, onUnmounted, ref, watch } from 'vue'
 import { useAppStore } from '../stores/app'
 import GlassButton from '../ui/GlassButton.vue'
+import GlassModal from '../ui/GlassModal.vue'
 import { CLIENT_FOLLOW_MODEL, STATE_TEXT, formatModelDisplay, formatTokens, getAgentBillingType } from '../labels'
 import type { MergeResult, TaskRecord, WorkspaceRow } from '@agent-drove/shared'
 
@@ -105,14 +106,29 @@ watch(
 )
 
 // 详情元数据(会话 id/结束时间/错误)轻量轮询兜底
+// G2-08:关键字段浅比较替代「每次新对象恒真」的整块赋值;终态字段稳定后不再赋值,
+// 消除 2s 一次的无效重渲染(panel/modal 双实例并存时同样受益)
 let pollId = 0
+/** 终态判定:字段稳定后轮询不再驱动重渲染 */
+const isTerminalState = (s?: string): boolean =>
+  s === 'completed' || s === 'failed' || s === 'canceled' || s === 'interrupted'
 const poll = setInterval(async () => {
   const id = store.selectedTaskId.value
   if (!id) return
   const seq = ++pollId
   const fresh = await window.api.tasksGet(id)
   if (!fresh || store.selectedTaskId.value !== id || seq !== pollId) return
-  if (fresh !== task.value) task.value = fresh
+  const cur = task.value
+  const changed =
+    !cur ||
+    cur.state !== fresh.state ||
+    cur.error !== fresh.error ||
+    cur.finishedAt !== fresh.finishedAt ||
+    cur.sessionId !== fresh.sessionId ||
+    cur.usage?.credits !== fresh.usage?.credits ||
+    cur.usage?.outputTokens !== fresh.usage?.outputTokens
+  if (!changed && isTerminalState(fresh.state)) return
+  if (changed) task.value = fresh
 }, 2000)
 onUnmounted(() => clearInterval(poll))
 
@@ -135,6 +151,35 @@ async function run(action: () => Promise<void>, prefix: string): Promise<void> {
   }
 }
 
+// ---- 破坏性操作应用内确认层(G2-06,仿 SessionColumn R13):Esc 取消、Enter 确认 ----
+type ConfirmAsk = { title: string; body: string; okLabel: string; run: () => Promise<void> }
+const confirmAsk = ref<ConfirmAsk | null>(null)
+
+function cancelConfirm(): void {
+  confirmAsk.value = null
+}
+
+async function acceptConfirm(): Promise<void> {
+  const ask = confirmAsk.value
+  if (!ask) return
+  confirmAsk.value = null
+  await ask.run()
+}
+
+/** Enter 确认(GlassModal 自带 Esc 取消);IME 组词态的 Enter 不算确认意图 */
+function onConfirmKeydown(event: KeyboardEvent): void {
+  if (event.isComposing || event.keyCode === 229) return
+  if (event.key === 'Enter') {
+    event.preventDefault()
+    void acceptConfirm()
+  }
+}
+
+watch(confirmAsk, (ask) => {
+  if (ask) window.addEventListener('keydown', onConfirmKeydown)
+  else window.removeEventListener('keydown', onConfirmKeydown)
+})
+
 async function cancel(): Promise<void> {
   if (!task.value) return
   await run(async () => {
@@ -144,14 +189,28 @@ async function cancel(): Promise<void> {
   }, '取消失败')
 }
 
-async function retry(): Promise<void> {
+async function runRetry(): Promise<void> {
   if (!task.value) return
-  if (store.settings.value?.task.confirmRetry && !window.confirm('重试会再次消耗套餐额度,继续?')) return
   await run(async () => {
     const next = await window.api.tasksRetry(task.value!.id)
     await store.refreshTasks()
     store.selectedTaskId.value = next.id
   }, '重试失败')
+}
+
+/** G2-06:confirmRetry 开启时改走应用内确认层(替代原生 confirm),确认后执行原重试逻辑 */
+function retry(): void {
+  if (!task.value) return
+  if (store.settings.value?.task.confirmRetry) {
+    confirmAsk.value = {
+      title: '重新运行',
+      body: '重试会再次消耗套餐额度,继续?',
+      okLabel: '重新运行',
+      run: runRetry,
+    }
+    return
+  }
+  void runRetry()
 }
 
 async function resubmitOn(target: string): Promise<void> {
@@ -202,13 +261,21 @@ async function mergeArtifacts(): Promise<void> {
   }, '合并产物失败')
 }
 
-async function cleanWorkspace(): Promise<void> {
+/** G2-06:清理工作区先过应用内确认层——物理删除不可恢复,一键误触零兜底不可接受 */
+function cleanWorkspace(): void {
   const row = taskWorkspaces.value[0]
   if (!row) return
-  await run(async () => {
-    await window.api.workspacesClean(row.id)
-    await store.refreshWorkspaces()
-  }, '清理工作区失败')
+  confirmAsk.value = {
+    title: '清理工作区',
+    body: '将物理删除派生目录（worktree remove --force / 整拷目录直接删除），未合并的变更与产物不可恢复。建议先「合并产物」。',
+    okLabel: '确认清理',
+    run: async () => {
+      await run(async () => {
+        await window.api.workspacesClean(row.id)
+        await store.refreshWorkspaces()
+      }, '清理工作区失败')
+    },
+  }
 }
 
 function fmt(ts?: number): string {
@@ -362,6 +429,16 @@ function fmt(ts?: number): string {
       <p class="big">详情</p>
       <p class="sub">选中任务后,这里展示元信息与可用操作。</p>
     </div>
+
+    <!-- G2-06:破坏性操作应用内确认层(Esc 取消、Enter 确认、危险色按钮) -->
+    <GlassModal :open="confirmAsk !== null" :title="confirmAsk?.title" width="420px" @close="cancelConfirm">
+      <p class="confirm-body">{{ confirmAsk?.body }}</p>
+      <template #footer>
+        <span class="foot-spacer" />
+        <GlassButton variant="ghost" @click="cancelConfirm">取消</GlassButton>
+        <GlassButton variant="danger" @click="acceptConfirm">{{ confirmAsk?.okLabel }}</GlassButton>
+      </template>
+    </GlassModal>
   </div>
 </template>
 
@@ -510,6 +587,19 @@ function fmt(ts?: number): string {
   padding: 6px 9px;
   cursor: pointer;
   word-break: break-word;
+}
+
+/* G2-06:确认弹窗正文与 footer 弹性占位 */
+.confirm-body {
+  margin: 0;
+  font-size: 12.5px;
+  line-height: 1.6;
+  color: var(--text);
+  word-break: break-word;
+}
+
+.foot-spacer {
+  flex: 1;
 }
 
 .actions {

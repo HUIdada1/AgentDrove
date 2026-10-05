@@ -1,15 +1,29 @@
 <script setup lang="ts">
 import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { useAppStore } from '../stores/app'
+import Composer from './Composer.vue'
 import GlassButton from '../ui/GlassButton.vue'
 import GlassInput from '../ui/GlassInput.vue'
+import GlassModal from '../ui/GlassModal.vue'
 import GlassSelect from '../ui/GlassSelect.vue'
 import SkillSelector from './SkillSelector.vue'
 import FollowupQueueBar from './FollowupQueueBar.vue'
 import GuidanceHub from './GuidanceHub.vue'
 import SlashCommandPopup, { type SlashCommand } from './SlashCommandPopup.vue'
-import { STATE_TEXT, formatModelDisplay, formatTokens, getAgentBillingType } from '../labels'
-import type { ReasoningEffort, ScenarioTemplate, StoredEvent } from '@agent-drove/shared'
+import {
+  CLIENT_FOLLOW_MODEL,
+  EFFORT_LABEL,
+  MODE_OPTIONS,
+  REASONING_EFFORT_OPTIONS,
+  STATE_TEXT,
+  formatModelDisplay,
+  formatTokens,
+  getAgentBillingType,
+  parseChannelsAndModels,
+  type ChannelGroup,
+} from '../labels'
+import type { ReasoningEffort, ScenarioTemplate, StoredEvent, TaskRecord } from '@agent-drove/shared'
+import type { TaskMode } from '@agent-drove/core'
 
 const store = useAppStore()
 const events = ref<StoredEvent[]>([])
@@ -28,17 +42,18 @@ let loadId = 0
 // —— 会话头部溢出元数据弹层(P0-9/F1):#id/技能/用量收进"⋯",主行任意列宽 ≤2 行 ——
 const showMeta = ref(false)
 
-// —— 本轮参数芯片(P0-6/C4):仅对下一次发送生效,发送后复位为"沿用上一轮" ——
-/** 思考档位通用四档文案(契约 ReasoningEffort);选项即白名单,发送时按值断言 */
-const EFFORT_OPTIONS: Array<{ value: ReasoningEffort; label: string }> = [
-  { value: 'minimal', label: '极简' },
-  { value: 'low', label: '低' },
-  { value: 'medium', label: '中' },
-  { value: 'high', label: '高' },
-]
-const turnPanelOpen = ref(false)
+// 思考档位选项消费 labels.ts 单一来源(R09③/R06),本组件不再保留本地档位数组
+
 const turnModelId = ref('')
+const turnChannelId = ref('')
 const turnEffort = ref('')
+// G3-04:本轮模式覆盖(build/edit/plan),''=跟随父任务(ContinueOptions.mode 缺省即沿用);
+// 斜杠指令的 recommendedMode 也落于此,续聊/排队一并随 ContinueOptions 透传
+const turnMode = ref<'' | TaskMode>('')
+/** G3-04:本轮技能覆盖,null=跟随父任务(orchestrator 的 ?? parent.skills 回退可达) */
+const turnSkills = ref<string[] | null>(null)
+/** G3-04:进入会话(或切会话)时的全局技能快照——此后 activeSkills 的变化视为胶囊内改写 */
+const turnSkillsBase = ref<string[]>([])
 const turnNote = ref('')
 let turnNoteTimer: ReturnType<typeof setTimeout> | null = null
 
@@ -46,16 +61,31 @@ let turnNoteTimer: ReturnType<typeof setTimeout> | null = null
 const nowTimestamp = ref(Date.now())
 let durationTimer: ReturnType<typeof setInterval> | null = null
 
+let resizeObserver: ResizeObserver | null = null
+
 onMounted(() => {
   durationTimer = setInterval(() => {
     nowTimestamp.value = Date.now()
   }, 1000)
+  if (typeof ResizeObserver !== 'undefined') {
+    resizeObserver = new ResizeObserver(() => {
+      if (atBottom.value) {
+        scrollBottom(false)
+      }
+    })
+    if (scrollEl.value) {
+      resizeObserver.observe(scrollEl.value)
+    }
+  }
 })
 
 onBeforeUnmount(() => {
+  if (resizeObserver) resizeObserver.disconnect()
   if (durationTimer) clearInterval(durationTimer)
   if (turnNoteTimer) clearTimeout(turnNoteTimer)
   if (scrollRafId) cancelAnimationFrame(scrollRafId)
+  // R13:确认层开着时卸载,兜底摘除 Enter 监听
+  window.removeEventListener('keydown', onConfirmKeydown)
 })
 
 const runningDurationText = computed(() => {
@@ -84,11 +114,19 @@ function parseProgress(text: string): { percent?: number; displayText: string } 
   return { displayText: text }
 }
 
-const task = computed(() => store.tasks.value.find((t) => t.id === store.selectedTaskId.value) ?? null)
+/** G3-03:断链兜底缓存——被筛选排除的选中任务/祖先经 tasksGet 拉回后落此,链路与会话区不消失 */
+const chainFallback = ref<Map<string, TaskRecord>>(new Map())
+
+const task = computed(
+  () =>
+    store.tasks.value.find((t) => t.id === store.selectedTaskId.value) ??
+    chainFallback.value.get(store.selectedTaskId.value ?? '') ??
+    null,
+)
 const agentLabel = computed(
   () => store.agents.value.find((a) => a.id === task.value?.agentId)?.label ?? task.value?.agentId ?? '',
 )
-/** 会话区语境提示(P0-1):当前对话上下文的客户端展示名;空串=未绑定,不渲染提示条 */
+/** 会话区语境提示:当前对话上下文的客户端展示名 */
 const contextAgentLabel = computed(
   () => store.agents.value.find((a) => a.id === store.agentContext.value)?.label ?? '',
 )
@@ -99,35 +137,130 @@ const displayModel = computed(() =>
 /** 计费计量模式: 'credits' (消耗点数) 还是 'tokens' (消耗 Token) 严禁混淆 */
 const billingType = computed(() => getAgentBillingType(task.value?.agentId, store.agents.value))
 
-// —— 本轮参数候选与能力门控(P0-6/P0-4) ——
+// —— 本轮参数候选与能力门控 ——
 const turnAgent = computed(() => store.agents.value.find((a) => a.id === task.value?.agentId) ?? null)
-const turnModelOptions = computed(() => [
-  { value: '', label: '沿用上一轮' },
-  ...(turnAgent.value?.models ?? []).map((m) => ({ value: m.id, label: m.label || m.id })),
-])
-/** capabilities.reasoningEffort=false/缺省 = 该客户端不支持思考档位,隐藏下拉并说明原因 */
+
+/**
+ * 续聊模型选择与发布框同一套规则(R10):
+ * parseChannelsAndModels 渠道级联 + agent.plan.modelIds 套餐覆盖过滤 + 「跟随客户端」哨兵,
+ * 多渠道时先选渠道再选模型,杜绝"看得见却派发才报 model not available"。
+ */
+const turnModelLocked = computed(() => {
+  const agent = turnAgent.value
+  if (!agent) return true
+  if (agent.models.length === 0) return true
+  if (agent.capabilities.modelSwitch === 'none' && agent.models.length <= 1) return true
+  return false
+})
+
+const turnEffectiveModels = computed(() => {
+  const agent = turnAgent.value
+  if (!agent) return []
+  if (turnModelLocked.value) return [{ id: CLIENT_FOLLOW_MODEL, label: '跟随客户端' }]
+  const covered = agent.plan.modelIds
+  return covered.length > 0 ? agent.models.filter((m) => covered.includes(m.id)) : agent.models
+})
+
+const turnChannelGroups = computed<ChannelGroup[]>(() => parseChannelsAndModels(turnEffectiveModels.value))
+
+const turnChannelOptions = computed(() => turnChannelGroups.value.map((g) => ({ value: g.id, label: g.name })))
+
+const turnCurrentGroup = computed(
+  () => turnChannelGroups.value.find((g) => g.id === turnChannelId.value) ?? turnChannelGroups.value[0],
+)
+
+const turnModelOptions = computed(() => {
+  // 哨兵项 ''=不覆盖,沿用父任务模型;G3-05:与档位下拉统一命名,哨兵项语义一致、无前缀
+  const currentLabel = task.value?.modelId
+    ? formatModelDisplay(task.value.modelId, task.value.agentId, store.agents.value)
+    : ''
+  return [
+    { value: '', label: currentLabel ? `跟随父任务（当前${currentLabel}）` : '跟随父任务' },
+    ...(turnModelLocked.value
+      ? [{ value: CLIENT_FOLLOW_MODEL, label: '跟随客户端' }]
+      : (turnCurrentGroup.value?.models ?? [])),
+  ]
+})
+
+/** capabilities.reasoningEffort=false/缺省 = 该客户端不支持思考档位 */
 const effortSupported = computed(() => turnAgent.value?.capabilities?.reasoningEffort === true)
-const turnEffortOptions = computed(() => [
-  { value: '', label: '沿用上一轮' },
-  ...EFFORT_OPTIONS,
-])
-const hasTurnOverrides = computed(() => Boolean(turnModelId.value || turnEffort.value))
+
+/** G3-04:本轮模式选项——首项哨兵「跟随父任务」+ labels.ts 单一来源 MODE_OPTIONS */
+const turnModeOptions = computed(() => [{ value: '', label: '跟随父任务' }, ...MODE_OPTIONS])
+
+const turnEffortOptions = computed(() => {
+  // R09③:档位单一来源在 labels.ts(R06);G3-05:去掉每项「🧠 思考: 」冗余前缀,
+  // 哨兵项标示父任务当前档位,与模型下拉命名对齐,前缀说明交给触发器 title
+  const defaultEffort = task.value?.reasoningEffort
+    ? EFFORT_LABEL[task.value.reasoningEffort] ?? task.value.reasoningEffort
+    : ''
+  return [
+    { value: '', label: defaultEffort ? `跟随父任务（当前${defaultEffort}）` : '跟随父任务' },
+    ...REASONING_EFFORT_OPTIONS.filter((o): o is { value: ReasoningEffort; label: string } => o.value !== '').map(
+      (o) => ({ value: o.value, label: o.label }),
+    ),
+  ]
+})
+
+// G3-05:hasTurnOverrides 驱动胶囊组高亮与「复位」——覆盖本轮 model/effort/mode/skills 任一即视为覆盖态
+const hasTurnOverrides = computed(() =>
+  Boolean(turnModelId.value || turnEffort.value || turnMode.value || turnSkills.value),
+)
+
+// G3-04:胶囊内技能选择器与全局共用同一份 store.activeSkills(SkillSelector 直连)。
+// 会话态下发布框不可见,activeSkills 的变化即视为用户在胶囊内改写本轮技能→写入 turnSkills;
+// 未动胶囊时 turnSkills 保持 null,orchestrator 沿用父任务技能集(全局开关中途被改也不影响本轮)
+watch(
+  () => store.activeSkills.value,
+  (val) => {
+    if (!task.value) return
+    const base = turnSkillsBase.value
+    const changed = val.length !== base.length || val.some((s) => !base.includes(s))
+    if (changed) {
+      turnSkills.value = [...val]
+      turnSkillsBase.value = [...val]
+    }
+  },
+)
+
 const turnSummaryText = computed(() => {
   const parts: string[] = []
   if (turnModelId.value) {
     parts.push(`模型 ${turnModelOptions.value.find((o) => o.value === turnModelId.value)?.label ?? turnModelId.value}`)
   }
   if (turnEffort.value) {
-    parts.push(`${EFFORT_OPTIONS.find((o) => o.value === turnEffort.value)?.label ?? turnEffort.value}档思考`)
+    const effort = turnEffort.value as ReasoningEffort
+    parts.push(`${EFFORT_LABEL[effort] ?? effort}档思考`)
   }
   return parts.join(' · ')
 })
 
-function resetTurnOverrides(): void {
-  turnModelId.value = ''
-  turnEffort.value = ''
-  turnPanelOpen.value = false
-}
+/**
+ * R10:切换会话不清空用户上次的模型/档位选择(跨会话沿用);
+ * 仅当客户端/渠道/模型列表变化导致选择失配时,由级联守卫自动回落到「跟随父任务」。
+ * (R09① 曾移除切会话时的自动清空;G3-05 新增的 resetTurnOverrides 仅由「复位」按钮显式触发)
+ */
+watch(
+  [turnChannelGroups, () => task.value?.id],
+  () => {
+    const groups = turnChannelGroups.value
+    if (groups.length === 0) {
+      turnChannelId.value = ''
+      turnModelId.value = ''
+      return
+    }
+    if (!groups.some((g) => g.id === turnChannelId.value)) {
+      const matched = groups.find((g) => g.models.some((m) => m.value === turnModelId.value))
+      turnChannelId.value = matched?.id ?? groups[0]!.id
+    }
+    const inChannel = turnCurrentGroup.value?.models.some((m) => m.value === turnModelId.value) ?? false
+    if (turnModelId.value && !inChannel) turnModelId.value = ''
+    if (turnEffort.value && !REASONING_EFFORT_OPTIONS.some((o) => o.value === turnEffort.value)) {
+      turnEffort.value = ''
+    }
+  },
+  { immediate: true },
+)
 
 /** 轻提示:排队场景下告知本轮参数去向,8 秒自灭(新任务场景头部/详情可见,不再重复提示) */
 function setTurnNote(text: string): void {
@@ -141,10 +274,251 @@ function setTurnNote(text: string): void {
   }
 }
 
+/** G3-05:一键复位本轮全部覆盖参数,回到「跟随父任务」态(胶囊组高亮随之消失) */
+function resetTurnOverrides(): void {
+  turnModelId.value = ''
+  turnEffort.value = ''
+  turnMode.value = ''
+  turnSkills.value = null
+}
+
 const maxSeq = computed(() => (events.value.length > 0 ? events.value[events.value.length - 1]!.seq : 0))
 const atBottom = ref(true)
 
 const isRunning = computed(() => task.value?.state === 'running' || task.value?.state === 'queued')
+
+/** 父任务已终态(R09):排队消息不再自动执行,队列条提供逐条「发送」与「全部发送」 */
+const isTerminal = computed(() => {
+  const s = task.value?.state
+  return s === 'completed' || s === 'failed' || s === 'canceled' || s === 'interrupted'
+})
+
+// —— 多轮会话流聚合(R11):呈现层按 parentId 链拼接,底层任务记录仍是每轮独立卡 ——
+
+/** 聚合流中的一轮 */
+interface SessionTurn {
+  task: TaskRecord
+  /** 第 N 轮(1 起) */
+  index: number
+  events: StoredEvent[]
+  isCurrent: boolean
+}
+
+/** 历史轮事件缓存(taskId → 事件);当前轮仍走 events ref,「加载更早」/自动跟随逻辑不变 */
+const historyTurnEvents = ref<Map<string, StoredEvent[]>>(new Map())
+let chainLoadId = 0
+
+/**
+ * 向上回溯 parentId 链,得到「祖先轮(旧→新)+ 当前轮」;
+ * 祖先不在任务列表时从 chainFallback(G3-03:tasksGet 兜底拉取)合并,被保留期清理的
+ * 祖先链在断点处停止(tasksGet 为 null),不再无限请求。
+ */
+const chainTasks = computed<TaskRecord[]>(() => {
+  const current = task.value
+  if (!current) return []
+  const byId = new Map(
+    [...store.tasks.value, ...chainFallback.value.values()].map((t) => [t.id, t]),
+  )
+  const reversed: TaskRecord[] = []
+  const seen = new Set<string>([current.id])
+  let cursor: TaskRecord | undefined = current
+  while (cursor?.parentId) {
+    if (seen.has(cursor.parentId)) break
+    const parent = byId.get(cursor.parentId)
+    if (!parent) break
+    seen.add(parent.id)
+    reversed.push(parent)
+    cursor = parent
+  }
+  return [...reversed.reverse(), current]
+})
+
+/**
+ * G3-03:补齐断链——沿 parentId 逐级检查合并源(store.tasks + chainFallback),
+ * 缺失时经 tasksGet 兜底拉取写入 chainFallback;选中任务自身被筛选排除时先补本尊。
+ * tasksGet 返回 null(已被保留期物理清理)即停止上溯,不再请求。
+ */
+async function ensureChainFallback(): Promise<void> {
+  const selectedId = store.selectedTaskId.value
+  if (!selectedId) return
+  const byId = new Map<string, TaskRecord>()
+  for (const t of store.tasks.value) byId.set(t.id, t)
+  for (const t of chainFallback.value.values()) byId.set(t.id, t)
+  const seen = new Set<string>([selectedId])
+  let cursor: TaskRecord | undefined = byId.get(selectedId)
+  if (!cursor) {
+    try {
+      cursor = (await window.api.tasksGet(selectedId)) ?? undefined
+    } catch {
+      cursor = undefined
+    }
+    if (!cursor) return
+    chainFallback.value = new Map(chainFallback.value).set(cursor.id, cursor)
+    byId.set(cursor.id, cursor)
+  }
+  while (cursor.parentId) {
+    if (seen.has(cursor.parentId)) break
+    const parent = byId.get(cursor.parentId)
+    if (!parent) {
+      let fetched: TaskRecord | null = null
+      try {
+        fetched = await window.api.tasksGet(cursor.parentId)
+      } catch {
+        fetched = null
+      }
+      if (!fetched) break
+      chainFallback.value = new Map(chainFallback.value).set(fetched.id, fetched)
+      byId.set(fetched.id, fetched)
+      seen.add(fetched.id)
+      cursor = fetched
+      continue
+    }
+    seen.add(parent.id)
+    cursor = parent
+  }
+}
+
+const sessionTurns = computed<SessionTurn[]>(() => {
+  const chain = chainTasks.value
+  return chain.map((t, i) => ({
+    task: t,
+    index: i + 1,
+    events: i === chain.length - 1 ? events.value : (historyTurnEvents.value.get(t.id) ?? []),
+    isCurrent: i === chain.length - 1,
+  }))
+})
+
+/** 按 taskId:seq 去重、seq 升序合并(历史分页与实时批推可能交叠,防互覆盖) */
+function mergeEventLists(...lists: StoredEvent[][]): StoredEvent[] {
+  const seen = new Set<string>()
+  const out: StoredEvent[] = []
+  for (const list of lists) {
+    for (const ev of list) {
+      const key = `${ev.taskId}:${ev.seq}`
+      if (seen.has(key)) continue
+      seen.add(key)
+      out.push(ev)
+    }
+  }
+  return out.sort((a, b) => a.seq - b.seq)
+}
+
+// —— G3-11:相邻 progress 折叠为可展开摘要组,agent 正文不再被进度芯片淹没 ——
+
+/** progress 事件窄化形态(G3-11):组内渲染直接访问 text 字段,免模板逐条判别 */
+type ProgressStoredEvent = StoredEvent & {
+  event: Extract<StoredEvent['event'], { kind: 'progress' }>
+}
+
+/** 压缩后的渲染单元:单条事件,或连续 ≥3 条 progress 聚成的组 */
+type CompressedEvent =
+  | { type: 'single'; ev: StoredEvent }
+  | { type: 'progress-group'; items: ProgressStoredEvent[] }
+
+/** 相邻 progress 聚组门槛:零散进度(<3 条连续)仍逐条渲染 */
+const PROGRESS_GROUP_MIN = 3
+
+/** 纯函数:把事件序列中连续的 progress 相邻段(≥3 条)聚为组,其余逐条透传 */
+function compressEvents(list: StoredEvent[]): CompressedEvent[] {
+  const out: CompressedEvent[] = []
+  let buffer: StoredEvent[] = []
+  const flush = (): void => {
+    if (buffer.length === 0) return
+    if (buffer.length >= PROGRESS_GROUP_MIN) {
+      // buffer 内全部为 progress(写入处已判别),此处断言为窄化类型
+      out.push({ type: 'progress-group', items: buffer as ProgressStoredEvent[] })
+    } else {
+      for (const ev of buffer) out.push({ type: 'single', ev })
+    }
+    buffer = []
+  }
+  for (const ev of list) {
+    if (ev.event.kind === 'progress') buffer.push(ev)
+    else {
+      flush()
+      out.push({ type: 'single', ev })
+    }
+  }
+  flush()
+  return out
+}
+
+/** 进度组 key:组首事件的 taskId:seq(跨轮 seq 可能重复,带 taskId 防冲突) */
+function progressGroupKey(items: StoredEvent[]): string {
+  const first = items[0]
+  return first ? `${first.taskId}:${first.seq}` : ''
+}
+
+/** G3-11:用户手动偏离默认展开态的进度组(key=progressGroupKey);缺省仅当前轮最后一组展开 */
+const progressGroupOverrides = ref<Set<string>>(new Set())
+
+function isProgressGroupExpanded(key: string, defaultExpanded: boolean): boolean {
+  if (progressGroupOverrides.value.has(key)) return !defaultExpanded
+  return defaultExpanded
+}
+
+function toggleProgressGroup(key: string, defaultExpanded: boolean): void {
+  const next = new Set(progressGroupOverrides.value)
+  if (next.has(key)) next.delete(key)
+  else next.add(key)
+  progressGroupOverrides.value = next
+}
+
+/** G3-11:渲染轮次=聚合轮次 + 逐轮压缩结果(相邻 progress 折组),模板直接消费 */
+interface RenderTurn extends SessionTurn {
+  compressed: CompressedEvent[]
+}
+
+const renderTurns = computed<RenderTurn[]>(() =>
+  sessionTurns.value.map((turn) => ({ ...turn, compressed: compressEvents(turn.events) })),
+)
+
+/** G3-11:模板 key——单条用 taskId:seq,进度组用组首 seq 防跨轮冲突 */
+function compressedKey(turnId: string, item: CompressedEvent): string {
+  if (item.type === 'single') return `${turnId}-${item.ev.seq}`
+  return `${turnId}-pg-${progressGroupKey(item.items)}`
+}
+
+/** G3-11:默认展开态——仅当前轮最后一组默认展开(其后不再有 progress-group) */
+function progressGroupDefaultExpanded(turn: RenderTurn, idx: number): boolean {
+  if (!turn.isCurrent) return false
+  return !turn.compressed.some((c, i) => i > idx && c.type === 'progress-group')
+}
+
+// 历史轮事件补齐:逐轮走既有 tasksEventsPage;链未变(任务列表刷新)不重拉
+// G3-03:回调开头先沿链补齐断链祖先(tasksGet 兜底),chainFallback 更新会使
+// chainTasks 重算并再次触发本 watch,lastChainKey 幂等守卫防重复拉取
+let lastChainKey = ''
+watch(
+  [() => store.selectedTaskId.value, chainTasks],
+  async () => {
+    await ensureChainFallback()
+    const chain = chainTasks.value
+    const key = chain.map((t) => t.id).join('>')
+    if (key === lastChainKey) return
+    lastChainKey = key
+    const id = ++chainLoadId
+    const ancestors = chain.slice(0, -1)
+    const next = new Map<string, StoredEvent[]>()
+    for (const t of ancestors) {
+      try {
+        const page = await window.api.tasksEventsPage({ taskId: t.id, limit: 200 })
+        if (id !== chainLoadId) return
+        next.set(t.id, mergeEventLists(page, historyTurnEvents.value.get(t.id) ?? []))
+      } catch {
+        if (id !== chainLoadId) return
+        next.set(t.id, historyTurnEvents.value.get(t.id) ?? [])
+      }
+    }
+    historyTurnEvents.value = next
+    // 历史轮补齐会改变流高度:回到最新,保证接续迁移后看到的是新轮
+    if (ancestors.length > 0) {
+      await nextTick()
+      scrollBottom(true)
+    }
+  },
+  { immediate: true },
+)
 
 const totalSessionTokens = computed(() => {
   if (!task.value?.usage) return 0
@@ -222,6 +596,29 @@ async function loadOlder(): Promise<void> {
   }
 }
 
+/** G3-12:历史轮「加载本轮更早」进行中的任务 id(空串=空闲) */
+const loadingOlderTurn = ref('')
+
+/**
+ * G3-12:历史轮翻页——取该轮缓存首条 seq 作 beforeSeq 向前翻一页,
+ * 经 mergeEventLists 按 taskId:seq 去重合并;各轮独立翻页互不影响。
+ */
+async function loadOlderForTurn(taskId: string): Promise<void> {
+  if (loadingOlderTurn.value) return
+  const existing = historyTurnEvents.value.get(taskId) ?? []
+  const firstSeq = existing[0]?.seq
+  if (!firstSeq || firstSeq <= 1) return
+  loadingOlderTurn.value = taskId
+  try {
+    const page = await window.api.tasksEventsPage({ taskId, beforeSeq: firstSeq, limit: 200 })
+    historyTurnEvents.value = new Map(historyTurnEvents.value).set(taskId, mergeEventLists(page, existing))
+  } catch (error) {
+    sendError.value = `加载本轮更早事件失败:${error instanceof Error ? error.message : String(error)}`
+  } finally {
+    loadingOlderTurn.value = ''
+  }
+}
+
 watch(
   () => store.selectedTaskId.value,
   (id) => {
@@ -231,7 +628,12 @@ watch(
     isRenaming.value = false
     showSlashPopup.value = false
     showMeta.value = false
-    resetTurnOverrides()
+    // R10:模型/档位选择跨会话沿用,不再清空;失配回落交给级联守卫
+    // G3-04:mode 不跨会话沿用,切会话即回「跟随父任务」;
+    // 技能覆盖同步复位,基准快照取当前全局选择,此后变化视为胶囊内改写
+    turnMode.value = ''
+    turnSkills.value = null
+    turnSkillsBase.value = [...store.activeSkills.value]
     setTurnNote('')
     if (id) {
       void loadInitial(id)
@@ -241,17 +643,35 @@ watch(
   { immediate: true },
 )
 
-// 事件批推到达
+// 事件批推到达(R11):对链上每个任务槽取增量,按 taskId 归位到对应轮次;当前轮保持自动跟随
 watch(
   () => store.liveEvents.value,
   (map) => {
-    const id = store.selectedTaskId.value
-    if (!id) return
-    const incoming = map.get(id) ?? []
-    const fresh = incoming.filter((e) => e.seq > maxSeq.value)
-    if (fresh.length === 0) return
-    events.value = [...events.value, ...fresh]
-    void nextTick(() => scrollBottom(false))
+    const chain = chainTasks.value
+    if (chain.length === 0) return
+    let appended = false
+    for (const t of chain) {
+      const incoming = map.get(t.id) ?? []
+      if (incoming.length === 0) continue
+      if (t.id === store.selectedTaskId.value) {
+        const fresh = incoming.filter((e) => e.seq > maxSeq.value)
+        if (fresh.length > 0) {
+          events.value = [...events.value, ...fresh]
+          appended = true
+        }
+      } else {
+        const existing = historyTurnEvents.value.get(t.id) ?? []
+        const floor = existing.length > 0 ? existing[existing.length - 1]!.seq : 0
+        const fresh = incoming.filter((e) => e.seq > floor)
+        if (fresh.length > 0) {
+          const next = new Map(historyTurnEvents.value)
+          next.set(t.id, mergeEventLists(existing, fresh))
+          historyTurnEvents.value = next
+          appended = true
+        }
+      }
+    }
+    if (appended) void nextTick(() => scrollBottom(false))
   },
 )
 
@@ -265,10 +685,29 @@ watch(
   },
 )
 
+/** 离底超过该阈值浮现「↓ 回到最新」(R15),贴底自动隐藏 */
+const JUMP_LATEST_THRESHOLD_PX = 240
+const showJumpLatest = ref(false)
+
+watch(scrollEl, (el, prev) => {
+  if (resizeObserver) {
+    if (prev) resizeObserver.unobserve(prev)
+    if (el) resizeObserver.observe(el)
+  }
+})
+
 function onScroll(): void {
   const el = scrollEl.value
   if (!el) return
-  atBottom.value = el.scrollHeight - el.scrollTop - el.clientHeight < 40
+  const distance = el.scrollHeight - el.scrollTop - el.clientHeight
+  atBottom.value = distance < 80
+  showJumpLatest.value = distance > JUMP_LATEST_THRESHOLD_PX
+}
+
+/** 回到底部并恢复自动跟随(R15);滚动后 onScroll 会复算显隐 */
+function jumpToLatest(): void {
+  showJumpLatest.value = false
+  scrollBottom(true)
 }
 
 /** 挂起的跟随滚动 rAF:高频事件批下每帧至多滚一次(P0-9/F2) */
@@ -315,6 +754,8 @@ function onContinueKeydown(event: KeyboardEvent): void {
 
 function applySlashCommand(cmd: SlashCommand): void {
   continueText.value = cmd.template
+  // G3-04:斜杠指令的推荐模式在会话续聊场景同样生效(此前被静默丢弃,与发布框不一致)
+  if (cmd.recommendedMode) turnMode.value = cmd.recommendedMode
   showSlashPopup.value = false
 }
 
@@ -326,12 +767,15 @@ async function sendContinue(): Promise<void> {
   try {
     // 统一走 tasksContinue(P0-6/C4):queueIfRunning=true 运行中自动排队不报错,
     // 本轮覆盖参数随 ContinueOptions 传给 core——排队时随队列项落 JSON,接续时生效。
+    // G3-04:mode 随胶囊选择透传;skills 仅在胶囊内改写过才传(null=跟随父任务,
+    // orchestrator 的 ?? parent.skills 回退生效,全局技能开关不再静默替换父任务技能集)
     const res = await window.api.tasksContinue(task.value.id, text, {
-      skills: [...store.activeSkills.value],
       queueIfRunning: true,
-      // 档位取值来自选项白名单,按契约类型断言;空串=沿用上一轮,不下发
+      ...(turnSkills.value ? { skills: [...turnSkills.value] } : {}),
+      // 档位/模式取值来自选项白名单,按契约类型断言;空串=跟随父任务,不下发
       ...(turnModelId.value ? { modelId: turnModelId.value } : {}),
       ...(turnEffort.value ? { reasoningEffort: turnEffort.value as ReasoningEffort } : {}),
+      ...(turnMode.value ? { mode: turnMode.value as TaskMode } : {}),
     })
     continueText.value = ''
     showSlashPopup.value = false
@@ -357,6 +801,70 @@ async function sendContinue(): Promise<void> {
 // —— 排队队列管理(P0-6/D3):编辑文案 / 提前发送 / 打断当前轮并立即发送 ——
 // 契约新通道为可选成员(preload/mock 落地后转必需),此处一律可选链调用。
 
+// —— 破坏性操作应用内二次确认(R13):清空排队 / 打断当前轮并立即发送 / 终止当前任务(G3-13),Esc 取消、Enter 确认 ——
+type ConfirmState =
+  | { kind: 'clear-queue' }
+  | { kind: 'interrupt'; followupId: string }
+  | { kind: 'stop-task' }
+const confirmState = ref<ConfirmState | null>(null)
+
+const confirmView = computed(() => {
+  if (!confirmState.value) return { title: '', body: '', okLabel: '' }
+  if (confirmState.value.kind === 'clear-queue') {
+    return {
+      title: '清空排队消息',
+      body: `将清空 ${store.activeFollowups.value.length} 条排队消息，不可恢复。`,
+      okLabel: '确认清空',
+    }
+  }
+  if (confirmState.value.kind === 'stop-task') {
+    // G3-13:两处终止入口统一先过应用内确认层,杜绝单击误触不可逆终止
+    return {
+      title: '终止当前任务',
+      body: '将立即中断当前轮执行，不可恢复。排队消息将保留为待发。',
+      okLabel: '终止',
+    }
+  }
+  return {
+    title: '打断并立即发送',
+    body: '将终止当前轮并立即发送该条排队消息；其余排队消息将随新任务自动接续。',
+    okLabel: '终止并发送',
+  }
+})
+
+function cancelConfirm(): void {
+  confirmState.value = null
+}
+
+async function acceptConfirm(): Promise<void> {
+  const state = confirmState.value
+  if (!state) return
+  confirmState.value = null
+  if (state.kind === 'clear-queue') {
+    if (task.value) await store.clearFollowups(task.value.id)
+    return
+  }
+  if (state.kind === 'stop-task') {
+    if (task.value) await store.stopTask(task.value.id)
+    return
+  }
+  await performInterrupt(state.followupId)
+}
+
+/** Enter 确认(GlassModal 自带 Esc 取消);IME 组词态的 Enter 不算确认意图 */
+function onConfirmKeydown(event: KeyboardEvent): void {
+  if (event.isComposing || event.keyCode === 229) return
+  if (event.key === 'Enter') {
+    event.preventDefault()
+    void acceptConfirm()
+  }
+}
+
+watch(confirmState, (state) => {
+  if (state) window.addEventListener('keydown', onConfirmKeydown)
+  else window.removeEventListener('keydown', onConfirmKeydown)
+})
+
 async function onQueueEdit(followupId: string, prompt: string): Promise<void> {
   if (!task.value) return
   try {
@@ -379,17 +887,33 @@ async function onQueuePromote(followupId: string): Promise<void> {
   }
 }
 
-async function onQueueInterrupt(followupId: string): Promise<void> {
+/** G3-04:队列相邻调序(承接 G2-07 的 demote 事件):把该项与下一项交换位置 */
+async function onQueueDemote(followupId: string): Promise<void> {
+  if (!task.value) return
+  const list = store.activeFollowups.value
+  const idx = list.findIndex((f) => f.id === followupId)
+  if (idx < 0 || idx === list.length - 1) return
+  // 契约语义:beforeFollowupId=「再下一项」id → 该项插到其之前,恰好落在下一项之后;
+  // 无再下一项(null)= 移到队尾,与 promote 的队首语义对称
+  const afterNextId = list[idx + 2]?.id ?? null
+  try {
+    await window.api.tasksReorderFollowup?.(task.value.id, followupId, afterNextId)
+    await store.refreshFollowups(task.value.id)
+  } catch (error) {
+    sendError.value = `调序失败: ${error instanceof Error ? error.message : String(error)}`
+  }
+}
+
+/** 打断当前轮并立即发送(R13):只弹应用内确认层,实际执行在 performInterrupt */
+function onQueueInterrupt(followupId: string): void {
+  confirmState.value = { kind: 'interrupt', followupId }
+}
+
+async function performInterrupt(followupId: string): Promise<void> {
   const current = task.value
   if (!current) return
   const item = store.activeFollowups.value.find((f) => f.id === followupId)
   if (!item) return
-  // 破坏性操作二次确认:文案必须明示"将终止当前执行"(P0-6 验收标准);
-  // 剩余排队项将迁移到新任务自动接续,不再悬挂在已取消的父任务上(P0-6 复审)
-  const confirmed = window.confirm(
-    '打断当前轮并立即发送该条排队消息?\n\n将终止当前执行;该条立即发送,其余排队消息将随新任务自动接续。',
-  )
-  if (!confirmed) return
   try {
     // 1. 取消当前轮但保留队列(clearFollowups=false);任务恰已收尾时返回 false,降级为普通续聊
     await window.api.tasksCancel(current.id, false)
@@ -418,13 +942,82 @@ async function onQueueInterrupt(followupId: string): Promise<void> {
   }
 }
 
-async function stopCurrentTask(): Promise<void> {
-  if (!task.value) return
+/**
+ * 终态队列逐条发送(R09④):父任务已终态时 tasksContinue 直接落地接续新任务,
+ * 排队项携带的覆盖参数(modelId/mode/toolPolicy/reasoningEffort)随条透传,
+ * 与「带参数」标签承诺一致;其余排队项留在原任务,toast 明示去处。
+ */
+async function sendOneFollowup(followupId: string): Promise<void> {
+  const current = task.value
+  if (!current || !isTerminal.value) return
+  const item = store.activeFollowups.value.find((f) => f.id === followupId)
+  if (!item) return
   try {
-    await store.stopTask(task.value.id)
+    const res = await window.api.tasksContinue(current.id, item.prompt, {
+      skills: [...(item.skills ?? [])],
+      queueIfRunning: true,
+      ...(item.modelId !== undefined ? { modelId: item.modelId } : {}),
+      ...(item.mode !== undefined ? { mode: item.mode } : {}),
+      ...(item.toolPolicy !== undefined ? { toolPolicy: item.toolPolicy } : {}),
+      ...(item.reasoningEffort !== undefined ? { reasoningEffort: item.reasoningEffort } : {}),
+    })
+    if (!('state' in res)) {
+      // 极小概率竞态(父任务又回到运行/排队态):本条已按普通排队处理,刷新队列即可
+      await store.refreshFollowups(current.id)
+      return
+    }
+    const rest = store.activeFollowups.value.filter((f) => f.id !== followupId).length
+    // 该条使命已由显式续聊承接,移除队列项防止留在原任务成为死项
+    await window.api.tasksRemoveFollowup?.(current.id, followupId)
+    await store.refreshTasks()
+    store.selectedTaskId.value = res.id
+    store.showToast(rest > 0 ? `已发送 · 其余 ${rest} 条仍留在原任务待发` : '已发送')
   } catch (error) {
-    sendError.value = `终止失败: ${error instanceof Error ? error.message : String(error)}`
+    sendError.value = `发送排队消息失败: ${error instanceof Error ? error.message : String(error)}`
   }
+}
+
+/**
+ * 终态队列全部发送(R09④):首条走 tasksContinue 落地唯一一条接续任务,
+ * 其余经 tasksMigrateFollowups 并入该新任务随其完成自动接力;父任务队列清空。
+ */
+async function sendAllFollowups(): Promise<void> {
+  const current = task.value
+  if (!current || !isTerminal.value) return
+  const first = store.activeFollowups.value[0]
+  if (!first) return
+  try {
+    const total = store.activeFollowups.value.length
+    // 1. 首条落地接续任务:覆盖参数随条透传
+    const res = await window.api.tasksContinue(current.id, first.prompt, {
+      skills: [...(first.skills ?? [])],
+      queueIfRunning: true,
+      ...(first.modelId !== undefined ? { modelId: first.modelId } : {}),
+      ...(first.mode !== undefined ? { mode: first.mode } : {}),
+      ...(first.toolPolicy !== undefined ? { toolPolicy: first.toolPolicy } : {}),
+      ...(first.reasoningEffort !== undefined ? { reasoningEffort: first.reasoningEffort } : {}),
+    })
+    if (!('state' in res)) {
+      // 竞态兜底:父任务又回到运行/排队态,整队恢复自动接续语义,无需迁移
+      await store.refreshFollowups(current.id)
+      return
+    }
+    // 2. 首条使命已承接,先移除再整体迁移,避免它随迁移被二次发送
+    await window.api.tasksRemoveFollowup?.(current.id, first.id)
+    await window.api.tasksMigrateFollowups?.(current.id, res.id)
+    await store.refreshTasks()
+    store.selectedTaskId.value = res.id
+    store.showToast(total > 1 ? `已发送 ${total} 条 · 其余将随接续任务自动接力` : '已发送')
+  } catch (error) {
+    sendError.value = `全部发送失败: ${error instanceof Error ? error.message : String(error)}`
+  }
+}
+
+/** G3-13:终止改为先弹应用内确认层(头部按钮与运行指示条两个入口自动同享),
+ *  实际执行在 acceptConfirm 的 stop-task 分支;确认层 Enter 确认/Esc 取消机制沿用 R13 */
+function stopCurrentTask(): void {
+  if (!task.value) return
+  confirmState.value = { kind: 'stop-task' }
 }
 
 let cancelRenameFlag = false
@@ -472,6 +1065,27 @@ async function retryFailedTask(): Promise<void> {
   }
 }
 
+/**
+ * 中断态一键恢复(R14):interrupted 的唯一合法收敛路径是先标记失败,
+ * 再复用 retryFailedTask 的 tasksRetry 派生新任务(attempt+1),全程留在会话流内。
+ */
+async function markFailedAndRetry(): Promise<void> {
+  const current = task.value
+  if (!current || retrying.value) return
+  retrying.value = true
+  sendError.value = ''
+  try {
+    await window.api.tasksMarkFailed(current.id)
+    const next = await window.api.tasksRetry(current.id)
+    await store.refreshTasks()
+    store.selectedTaskId.value = next.id
+  } catch (error) {
+    sendError.value = `恢复失败: ${error instanceof Error ? error.message : String(error)}`
+  } finally {
+    retrying.value = false
+  }
+}
+
 function reuseTaskPrompt(): void {
   if (!task.value) return
   continueText.value = task.value.prompt
@@ -494,6 +1108,8 @@ function onScenarioSelected(scenario: ScenarioTemplate): void {
   continueText.value = scenario.prompt
   if (scenario.recommendedSkills) {
     store.setSkills(scenario.recommendedSkills)
+    // G3-14:场景卡整组覆盖全局技能时给出说明,用户知悉发布框下次派发的技能集已被改写
+    store.showToast('已应用场景推荐技能组合(可在技能栏调整)')
   }
 }
 
@@ -581,7 +1197,7 @@ function timeOf(at: number): string {
         </div>
 
         <div class="head-actions">
-          <!-- 运行中显示醒目的终止按钮 -->
+          <!-- R12:窄容器收为图标钮(.act-lbl 由 container query 隐藏),宽容器维持图标不显、纯文字 -->
           <GlassButton
             v-if="isRunning"
             variant="danger"
@@ -590,7 +1206,18 @@ function timeOf(at: number): string {
             title="立即终止当前 Agent 任务执行"
             @click="stopCurrentTask"
           >
-            终止
+            <span class="act-ico" aria-hidden="true">⏹</span><span class="act-lbl">终止</span>
+          </GlassButton>
+
+          <!-- G3-06:会话头部「新任务」入口——切回发布台派发新任务无需离开当前会话,
+               会话可从任务列表点回;newChat 仅清选中与队列,客户端绑定保持 -->
+          <GlassButton
+            variant="ghost"
+            size="sm"
+            title="切回发布台派发新任务,当前会话可从任务列表点回"
+            @click="store.newChat()"
+          >
+            <span class="act-ico" aria-hidden="true">＋</span><span class="act-lbl">新任务</span>
           </GlassButton>
 
           <GlassButton
@@ -599,7 +1226,7 @@ function timeOf(at: number): string {
             title="打开当前工作区目录"
             @click="openWorkspace"
           >
-            工作区
+            <span class="act-ico" aria-hidden="true">⌂</span><span class="act-lbl">工作区</span>
           </GlassButton>
 
           <GlassButton
@@ -608,7 +1235,7 @@ function timeOf(at: number): string {
             title="点击弹窗查看完整任务详情与操作"
             @click="store.openDetailModal()"
           >
-            详情
+            <span class="act-ico" aria-hidden="true">ⓘ</span><span class="act-lbl">详情</span>
           </GlassButton>
 
           <GlassButton
@@ -617,27 +1244,33 @@ function timeOf(at: number): string {
             :title="store.detailCollapsed.value ? '展开详情侧栏' : '锁起详情侧栏'"
             @click="store.toggleDetailCollapsed()"
           >
-            {{ store.detailCollapsed.value ? '展开详情' : '折叠详情' }}
+            <span class="act-ico" aria-hidden="true">◧</span>
+            <span class="act-lbl">{{ store.detailCollapsed.value ? '展开详情' : '折叠详情' }}</span>
           </GlassButton>
         </div>
       </header>
 
-      <!-- 元数据弹层透明遮罩:点击任意处关闭 -->
+      <!-- 元数据弹层遮罩:覆盖会话列内任意处点击即关闭(容器化后改为列内 absolute) -->
       <div v-if="showMeta" class="meta-mask" @click="showMeta = false" />
 
-      <!-- 排队追问提示悬浮条 -->
+      <!-- 排队追问提示悬浮条(R09④:终态仍显示,hint 按状态切换并提供发送/全部发送) -->
       <FollowupQueueBar
         :task-id="task.id"
         :task-running="isRunning"
+        :task-terminal="isTerminal"
         :followups="store.activeFollowups.value"
         @remove="store.removeFollowup(task.id, $event)"
-        @clear="store.clearFollowups(task.id)"
+        @clear="confirmState = { kind: 'clear-queue' }"
         @edit="onQueueEdit"
         @promote="onQueuePromote"
+        @demote="onQueueDemote"
         @interrupt="onQueueInterrupt"
+        @send="sendOneFollowup"
+        @send-all="sendAllFollowups"
       />
 
       <div ref="scrollEl" class="stream" @scroll="onScroll">
+        <!-- 「加载更早」仅作用于当前轮(历史轮已整轮拉取,加载方式维持既有) -->
         <GlassButton
           v-if="events.length > 0 && events[0]!.seq > 1"
           variant="ghost"
@@ -648,70 +1281,136 @@ function timeOf(at: number): string {
           {{ loadingOlder ? '加载中…' : '加载更早' }}
         </GlassButton>
 
-        <!-- 首轮提问气泡展示 -->
-        <div class="row mine">
-          <div class="bubble user-prompt">
-            <span class="bubble-header">用户指令</span>
-            <div class="text">{{ task.prompt }}</div>
-            <span class="num t">{{ timeOf(task.createdAt) }}</span>
-          </div>
-        </div>
-
-        <template v-for="event in events" :key="event.seq">
-          <div v-if="event.event.kind === 'state-changed'" class="node">
-            <span class="node-chip">
-              {{ STATE_TEXT[event.event.from] }} → {{ STATE_TEXT[event.event.to] }}
-              <span class="num t">{{ timeOf(event.at) }}</span>
+        <!-- 多轮会话流聚合呈现(R11):parentId 链逐轮拼接为一条连续流,历史轮只读;
+             G3-11:逐轮事件经 compressEvents 压缩,相邻 progress 折为可展开摘要组 -->
+        <template v-for="turn in renderTurns" :key="turn.task.id">
+          <div v-if="renderTurns.length > 1" class="turn-divider">
+            <span class="turn-divider-line" aria-hidden="true" />
+            <span class="turn-divider-chip num">
+              第 {{ turn.index }} 轮 ·
+              {{ formatModelDisplay(turn.task.modelId, turn.task.agentId, store.agents.value) }} ·
+              {{ STATE_TEXT[turn.task.state] }}
             </span>
+            <span class="turn-divider-line" aria-hidden="true" />
           </div>
 
-          <div v-else-if="event.event.kind === 'progress'" class="node prog-node">
-            <div class="node-chip soft prog-chip">
-              <span class="node-spin" aria-hidden="true" />
-              <span class="prog-text">{{ parseProgress(event.event.text).displayText }}</span>
-              <span v-if="parseProgress(event.event.text).percent !== undefined" class="prog-pct num">
-                {{ parseProgress(event.event.text).percent }}%
+          <!-- G3-12:历史轮翻页——该轮缓存首条 seq > 1 时给出「加载本轮更早」,各轮独立 -->
+          <GlassButton
+            v-if="!turn.isCurrent && (turn.events[0]?.seq ?? 1) > 1"
+            variant="ghost"
+            size="sm"
+            class="older"
+            :disabled="loadingOlderTurn === turn.task.id"
+            @click="loadOlderForTurn(turn.task.id)"
+          >
+            {{ loadingOlderTurn === turn.task.id ? '加载中…' : '加载本轮更早' }}
+          </GlassButton>
+
+          <!-- 每轮的用户指令气泡(首轮/接续轮同构) -->
+          <div class="row mine">
+            <div class="bubble user-prompt">
+              <span class="bubble-header">用户指令</span>
+              <div class="text">{{ turn.task.prompt }}</div>
+              <span class="num t">{{ timeOf(turn.task.createdAt) }}</span>
+            </div>
+          </div>
+
+          <template v-for="(item, idx) in turn.compressed" :key="compressedKey(turn.task.id, item)">
+            <div v-if="item.type === 'single' && item.ev.event.kind === 'state-changed'" class="node">
+              <span class="node-chip">
+                {{ STATE_TEXT[item.ev.event.from] }} → {{ STATE_TEXT[item.ev.event.to] }}
+                <span class="num t">{{ timeOf(item.ev.at) }}</span>
               </span>
-              <span class="num t">{{ timeOf(event.at) }}</span>
             </div>
-            <div v-if="parseProgress(event.event.text).percent !== undefined" class="prog-track">
-              <i :style="{ width: `${parseProgress(event.event.text).percent}%` }" />
+
+            <!-- G3-11:零散 progress(<3 条连续)保持逐条渲染,样式不变 -->
+            <div v-else-if="item.type === 'single' && item.ev.event.kind === 'progress'" class="node prog-node">
+              <div class="node-chip soft prog-chip">
+                <span class="node-spin" aria-hidden="true" />
+                <span class="prog-text">{{ parseProgress(item.ev.event.text).displayText }}</span>
+                <span v-if="parseProgress(item.ev.event.text).percent !== undefined" class="prog-pct num">
+                  {{ parseProgress(item.ev.event.text).percent }}%
+                </span>
+                <span class="num t">{{ timeOf(item.ev.at) }}</span>
+              </div>
+              <div v-if="parseProgress(item.ev.event.text).percent !== undefined" class="prog-track">
+                <i :style="{ width: `${parseProgress(item.ev.event.text).percent}%` }" />
+              </div>
             </div>
-          </div>
 
-          <div v-else-if="event.event.kind === 'artifact'" class="row">
-            <span
-              class="bubble file clickable"
-              title="点击在系统中定位或打开产物"
-              @click="openArtifactPath(event.event.path)"
-            >
-              <span class="kind-tag artifact">产物</span>
-              <span class="mono-path">{{ event.event.path }}</span>
-              <span class="change" :class="event.event.change">{{ event.event.change }}</span>
-            </span>
-          </div>
-
-          <div v-else-if="event.event.kind === 'warning'" class="row">
-            <span class="bubble warn">
-              <span class="text">{{ event.event.text }}</span>
-              <span class="num t">{{ timeOf(event.at) }}</span>
-            </span>
-          </div>
-
-          <!-- 系统说明节点(P0-4):实际下发参数(如思考档位)等运行期事实,中性呈现不惊扰 -->
-          <div v-else-if="event.event.kind === 'info'" class="node">
-            <span class="node-chip soft" :title="event.event.text">
-              {{ event.event.text }}
-              <span class="num t">{{ timeOf(event.at) }}</span>
-            </span>
-          </div>
-
-          <div v-else-if="event.event.kind === 'message'" class="row" :class="{ mine: event.event.channel === 'agent' }">
-            <div class="bubble msg" :class="{ err: event.event.channel === 'stderr' }">
-              <div class="msg-content">{{ event.event.text }}</div>
-              <span class="num t">{{ timeOf(event.at) }}</span>
+            <div v-else-if="item.type === 'single' && item.ev.event.kind === 'artifact'" class="row">
+              <span
+                class="bubble file clickable"
+                :title="`${item.ev.event.path}（点击在系统中定位或打开产物）`"
+                @click="openArtifactPath(item.ev.event.path)"
+              >
+                <span class="kind-tag artifact">产物</span>
+                <span class="mono-path">{{ item.ev.event.path }}</span>
+                <span class="change" :class="item.ev.event.change">{{ item.ev.event.change }}</span>
+              </span>
             </div>
-          </div>
+
+            <div v-else-if="item.type === 'single' && item.ev.event.kind === 'warning'" class="row">
+              <span class="bubble warn">
+                <span class="text">{{ item.ev.event.text }}</span>
+                <span class="num t">{{ timeOf(item.ev.at) }}</span>
+              </span>
+            </div>
+
+            <!-- 系统说明节点(P0-4/R16):实际下发参数与「接续自」等运行期事实,中性居中呈现 -->
+            <div v-else-if="item.type === 'single' && item.ev.event.kind === 'info'" class="node">
+              <span class="node-chip soft" :title="item.ev.event.text">
+                {{ item.ev.event.text }}
+                <span class="num t">{{ timeOf(item.ev.at) }}</span>
+              </span>
+            </div>
+
+            <!-- 对话气泡方向修正(R16):Agent 正文回复居左并带标识;stderr 保持错误样式;用户指令/追问居右 -->
+            <div v-else-if="item.type === 'single' && item.ev.event.kind === 'message'" class="row">
+              <div class="bubble msg" :class="{ err: item.ev.event.channel === 'stderr' }">
+                <span v-if="item.ev.event.channel === 'agent'" class="bubble-header agent-name">
+                  <span class="agent-dot" aria-hidden="true" /> Agent
+                </span>
+                <div class="msg-content">{{ item.ev.event.text }}</div>
+                <span class="num t">{{ timeOf(item.ev.at) }}</span>
+              </div>
+            </div>
+
+            <!-- G3-11:相邻 progress 折叠摘要组——一行摘要芯片,点击展开/折叠组内全部进度条目 -->
+            <div v-else-if="item.type === 'progress-group'" class="node prog-node">
+              <button
+                type="button"
+                class="node-chip soft prog-chip prog-group-chip"
+                :title="isProgressGroupExpanded(progressGroupKey(item.items), progressGroupDefaultExpanded(turn, idx))
+                  ? '点击折叠本轮进度'
+                  : `点击展开 ${item.items.length} 条进度`"
+                @click="toggleProgressGroup(progressGroupKey(item.items), progressGroupDefaultExpanded(turn, idx))"
+              >
+                <span class="node-spin" aria-hidden="true" />
+                <span class="prog-text">
+                  ⚙ {{ item.items.length }} 条进度 · 最新：{{ parseProgress(item.items[item.items.length - 1]!.event.text).displayText }}
+                </span>
+                <span class="num t">{{ timeOf(item.items[item.items.length - 1]!.at) }}</span>
+              </button>
+              <template
+                v-if="isProgressGroupExpanded(progressGroupKey(item.items), progressGroupDefaultExpanded(turn, idx))"
+              >
+                <div v-for="gev in item.items" :key="`${gev.taskId}-${gev.seq}`" class="node prog-node">
+                  <div class="node-chip soft prog-chip">
+                    <span class="node-spin" aria-hidden="true" />
+                    <span class="prog-text">{{ parseProgress(gev.event.text).displayText }}</span>
+                    <span v-if="parseProgress(gev.event.text).percent !== undefined" class="prog-pct num">
+                      {{ parseProgress(gev.event.text).percent }}%
+                    </span>
+                    <span class="num t">{{ timeOf(gev.at) }}</span>
+                  </div>
+                  <div v-if="parseProgress(gev.event.text).percent !== undefined" class="prog-track">
+                    <i :style="{ width: `${parseProgress(gev.event.text).percent}%` }" />
+                  </div>
+                </div>
+              </template>
+            </div>
+          </template>
         </template>
 
         <!-- 运行中的状态指示条 (参考 AgentHub MemProgressDialog) -->
@@ -726,17 +1425,25 @@ function timeOf(at: number): string {
           </GlassButton>
         </div>
 
-        <!-- 任务异常失败恢复栏 (最符合人类排障心智直觉: 显示原因 + 一键重试 / 改词重发) -->
-        <div v-if="task.state === 'failed'" class="failure-alert-box glass">
+        <!-- 任务异常失败/中断恢复栏(R14):failed 与 interrupted 都在流内联给出一键恢复 -->
+        <div v-if="task.state === 'failed' || task.state === 'interrupted'" class="failure-alert-box glass">
           <div class="fail-info">
-            <span class="fail-badge">任务中断</span>
+            <span class="fail-badge">
+              {{ task.state === 'interrupted' ? '已中断（应用异常退出）' : '任务失败' }}
+            </span>
             <span class="fail-msg" :title="task.error || '执行过程中断'">
-              {{ task.error || '任务执行异常终止，可能是上游模型服务超时或进程意外退出' }}
+              {{ task.error || (task.state === 'interrupted' ? '应用异常退出导致本轮执行中断,可标记失败后重试' : '任务执行异常终止,可能是上游模型服务超时或进程意外退出') }}
             </span>
           </div>
           <div class="fail-actions">
-            <GlassButton variant="primary" size="sm" :disabled="retrying" @click="retryFailedTask">
-              {{ retrying ? '重试中…' : '立即重试' }}
+            <GlassButton
+              variant="primary"
+              size="sm"
+              :disabled="retrying"
+              :title="task.state === 'interrupted' ? '标记为失败并派生重试任务(中断态唯一合法收敛路径)' : ''"
+              @click="task.state === 'interrupted' ? markFailedAndRetry() : retryFailedTask()"
+            >
+              {{ retrying ? '恢复中…' : task.state === 'interrupted' ? '标记失败并重试' : '立即重试' }}
             </GlassButton>
             <GlassButton variant="ghost" size="sm" @click="reuseTaskPrompt">
               填入输入框微调
@@ -760,48 +1467,14 @@ function timeOf(at: number): string {
             </GlassButton>
           </div>
         </div>
+
+        <!-- 回到最新悬浮按钮(R15):离底超过阈值出现,sticky 悬浮于流区右下 -->
+        <button v-if="showJumpLatest" type="button" class="jump-latest" @click="jumpToLatest">
+          ↓ 回到最新
+        </button>
       </div>
 
       <footer class="composer-container">
-        <!-- 技能选择器栏 -->
-        <div class="skills-wrapper">
-          <SkillSelector compact />
-        </div>
-
-        <!-- 本轮参数芯片(P0-6/C4):默认沿用上一轮,点开可改模型/思考档位,仅对下一次发送生效 -->
-        <div class="turn-opts">
-          <button
-            type="button"
-            class="turn-chip"
-            :class="{ active: hasTurnOverrides || turnPanelOpen }"
-            title="仅对下一次发送生效,缺省沿用父任务的模型与思考档位"
-            @click="turnPanelOpen = !turnPanelOpen"
-          >
-            本轮参数{{ turnSummaryText ? ` · ${turnSummaryText}` : '' }}
-          </button>
-          <span v-if="turnNote" class="turn-note">{{ turnNote }}</span>
-        </div>
-        <div v-if="turnPanelOpen" class="turn-panel glass">
-          <div class="turn-field">
-            <span class="turn-lbl">模型</span>
-            <GlassSelect v-model="turnModelId" :options="turnModelOptions" />
-          </div>
-          <div v-if="effortSupported" class="turn-field">
-            <span class="turn-lbl">思考</span>
-            <GlassSelect v-model="turnEffort" :options="turnEffortOptions" />
-          </div>
-          <span v-else class="turn-hint">当前客户端不支持思考档位</span>
-          <GlassButton
-            variant="ghost"
-            size="sm"
-            :disabled="!hasTurnOverrides"
-            title="清空本轮覆盖,恢复沿用上一轮参数"
-            @click="resetTurnOverrides"
-          >
-            恢复沿用
-          </GlassButton>
-        </div>
-
         <div class="input-wrapper">
           <!-- 斜杠指令浮层 -->
           <SlashCommandPopup
@@ -817,7 +1490,7 @@ function timeOf(at: number): string {
             multiline
             :rows="2"
             auto-grow
-            :send-label="isRunning ? '排队发送' : '发送'"
+            :send-label="isRunning ? '追加排队' : '发送'"
             :send-disabled="sending || !continueText.trim()"
             :placeholder="isRunning ? 'Agent 正在执行中，输入可直接排队追加对话 (Enter 发送)' : '继续对话: 输入指令或键入 / 选择快捷技能 (Enter 发送)'"
             @update:model-value="handleInput"
@@ -826,41 +1499,80 @@ function timeOf(at: number): string {
           />
         </div>
 
-        <!-- 本轮用量与消耗统计 (输入框正下方卡片) -->
-        <div v-if="latestUsage" class="turn-usage-panel glass num">
-          <div class="u-panel-head">
-            <span class="u-panel-title">本轮用量与消耗统计</span>
-            <span v-if="latestUsage.cacheHitRate !== undefined && latestUsage.cacheHitRate > 0" class="u-cache-tag">
-              缓存命中 {{ latestUsage.cacheHitRate }}%
+        <!-- 排队反馈(R09②):setTurnNote 写入后在此渲染,8 秒自灭 -->
+        <div v-if="turnNote" class="turn-note">{{ turnNote }}</div>
+
+        <!-- 现代化操作胶囊条 (Agent/渠道/模式/模型/思考档位/技能选择器)
+             G3-05:hasTurnOverrides 驱动覆盖态描边高亮 + 「已覆盖」角标(持续可见) + 一键复位 -->
+        <div class="bottom-action-bar">
+          <div class="pills-group" :class="{ overridden: hasTurnOverrides }">
+            <span v-if="hasTurnOverrides" class="ov-indicator">已覆盖·随下一轮生效</span>
+            <span class="pill-chip agent-chip" :title="`当前对话客户端: ${agentLabel}`">
+              🤖 {{ agentLabel }}
             </span>
+            <!-- 级联渠道选择器(R10):多渠道时先选渠道再选模型,与发布框同一套规则;
+                 G3-15:单渠道时以只读徽标保留渠道可见性,池化额度场景可确认流量走向 -->
+            <GlassSelect
+              v-if="turnChannelOptions.length > 1"
+              v-model="turnChannelId"
+              class="pill-select channel-pill"
+              title="模型渠道"
+              :options="turnChannelOptions"
+              :disabled="turnModelLocked"
+            />
+            <span
+              v-else-if="turnCurrentGroup"
+              class="channel-badge"
+              :title="`当前渠道: ${turnCurrentGroup.name}(单渠道无需选择)`"
+            >{{ turnCurrentGroup.name }}</span>
+            <!-- G3-04:本轮模式(mode/build-edit-plan),''=跟随父任务;斜杠指令推荐模式也落此 -->
+            <GlassSelect
+              v-model="turnMode"
+              class="pill-select mode-pill"
+              title="本轮模式,缺省跟随父任务"
+              :options="turnModeOptions"
+            />
+            <GlassSelect
+              v-model="turnModelId"
+              class="pill-select model-pill"
+              title="切换当前对话模型"
+              :options="turnModelOptions"
+              :disabled="turnModelLocked"
+            />
+            <GlassSelect
+              v-if="effortSupported"
+              v-model="turnEffort"
+              class="pill-select effort-pill"
+              title="思考强度档位"
+              :options="turnEffortOptions"
+            />
+            <div class="skills-pill" :class="{ overridden: turnSkills !== null }">
+              <SkillSelector
+                compact
+                :deny-supported="turnAgent ? !['codex', 'qoder', 'trae'].includes(turnAgent.id) : true"
+              />
+              <span v-if="turnSkills !== null" class="ov-tag">技能已覆盖</span>
+            </div>
+            <GlassButton
+              v-if="hasTurnOverrides"
+              variant="ghost"
+              size="sm"
+              title="恢复跟随父任务"
+              @click="resetTurnOverrides"
+            >
+              复位
+            </GlassButton>
           </div>
-          <div class="u-panel-body">
-            <!-- 点数 Agent: 严格展示点数, 严禁混淆 Token -->
+
+          <!-- 精简高质感用量指示徽标，不再挤占巨大面板 -->
+          <div v-if="latestUsage" class="usage-mini-badge num" :title="`输入: ${formatTokens(latestUsage.inputTokens)} | 缓存: ${formatTokens(latestUsage.cachedTokens)} | 输出: ${formatTokens(latestUsage.outputTokens)}`">
             <template v-if="billingType === 'credits'">
-              <div class="u-stat-item">
-                <span class="u-stat-lbl">本轮消耗点数</span>
-                <span class="u-stat-val highlight-credits">{{ latestUsage.credits ?? '0' }} 点</span>
-              </div>
+              <span>{{ latestUsage.credits ?? '0' }} 点</span>
             </template>
-            <!-- Token Agent: 严格展示 Token 细分与总计, 严禁混淆点数 -->
             <template v-else>
-              <div class="u-stat-item">
-                <span class="u-stat-lbl">输入</span>
-                <span class="u-stat-val">{{ formatTokens(latestUsage.inputTokens) }}</span>
-              </div>
-              <div class="u-stat-item">
-                <span class="u-stat-lbl">缓存读取</span>
-                <span class="u-stat-val highlight-cache">{{ formatTokens(latestUsage.cachedTokens) }}</span>
-              </div>
-              <div class="u-stat-item">
-                <span class="u-stat-lbl">输出</span>
-                <span class="u-stat-val">{{ formatTokens(latestUsage.outputTokens) }}</span>
-              </div>
-              <div class="u-stat-item">
-                <span class="u-stat-lbl">总计消耗</span>
-                <span class="u-stat-val highlight-total">{{ formatTokens(latestTotalTokens) }} Token</span>
-              </div>
+              <span>{{ formatTokens(latestTotalTokens) }} tok</span>
             </template>
+            <span v-if="latestUsage.cacheHitRate" class="cache-rate">缓存 {{ latestUsage.cacheHitRate }}%</span>
           </div>
         </div>
 
@@ -868,14 +1580,27 @@ function timeOf(at: number): string {
       </footer>
     </template>
 
-    <!-- 未选中任何任务: 呈现 Agent 智能引导中心 -->
+    <!-- 未选中任何任务: 呈现 Agent 智能引导中心 + 常驻底部发布工作台(R12⑥:内容独立滚动,发布框不滚出视野) -->
     <div v-else class="guidance-view">
-      <!-- 会话区语境提示(P0-1):发布框已绑定的当前对话对象,轻量单行 -->
       <div v-if="contextAgentLabel" class="ctx-bar glass">
         正在与 <b>{{ contextAgentLabel }}</b> 对话 · 发布框已绑定该客户端
       </div>
-      <GuidanceHub @select-scenario="onScenarioSelected" />
+      <div class="guidance-scroll">
+        <GuidanceHub @select-scenario="onScenarioSelected" />
+      </div>
+      <div class="center-composer-card">
+        <Composer />
+      </div>
     </div>
+
+    <!-- 破坏性操作确认层(R13):清空排队 / 打断并立即发送,Esc 取消、Enter 确认 -->
+    <GlassModal :open="confirmState !== null" :title="confirmView.title" width="420px" @close="cancelConfirm">
+      <p class="confirm-body">{{ confirmView.body }}</p>
+      <template #footer>
+        <GlassButton variant="ghost" size="sm" @click="cancelConfirm">取消</GlassButton>
+        <GlassButton variant="danger" size="sm" @click="acceptConfirm">{{ confirmView.okLabel }}</GlassButton>
+      </template>
+    </GlassModal>
   </section>
 </template>
 
@@ -888,14 +1613,26 @@ function timeOf(at: number): string {
   height: 100%;
   padding: 12px 14px;
   position: relative;
+  /* R12:容器查询基准 + 横向溢出守卫(长路径/窄列一律内部收缩,不撑破面板) */
+  container-type: inline-size;
+  overflow: hidden;
 }
 
+/* R12⑥:空态 = 提示条(不滚)+ 引导内容(独立滚动)+ 发布框(常驻底部不滚出视野) */
 .guidance-view {
   flex: 1;
   display: flex;
   flex-direction: column;
   min-height: 0;
+  overflow: hidden;
+}
+
+.guidance-scroll {
+  flex: 1;
+  min-height: 0;
   overflow-y: auto;
+  display: flex;
+  flex-direction: column;
 }
 
 /* 会话区语境提示条(P0-1):轻量单行,不抢引导中心视觉 */
@@ -917,6 +1654,7 @@ function timeOf(at: number): string {
   align-items: flex-start;
   justify-content: space-between;
   gap: 12px;
+  flex-wrap: wrap; /* R12①:窄容器允许换行,头部按钮不压详情栏 */
   padding-bottom: 10px;
   border-bottom: 1px solid var(--line);
   margin-bottom: 6px;
@@ -979,7 +1717,8 @@ function timeOf(at: number): string {
 }
 
 .meta-mask {
-  position: fixed;
+  /* R12:.session 已 container 化(fixed 会退化),显式改为列内 absolute:点击会话列任意处关闭弹层 */
+  position: absolute;
   inset: 0;
   z-index: 40;
 }
@@ -1079,10 +1818,9 @@ function timeOf(at: number): string {
   color: var(--text);
 }
 
-.edit-icon {
-  font-size: 11px;
-  color: var(--faint);
-  opacity: 0.6;
+.rename-box {
+  flex: 1;
+  min-width: 0;
 }
 
 .rename-input {
@@ -1093,7 +1831,10 @@ function timeOf(at: number): string {
   font-size: 12px;
   padding: 2px 6px;
   outline: none;
-  width: 280px;
+  /* R12②:跟随容器宽度自适应,窄列不再写死像素撑出面板 */
+  width: 100%;
+  box-sizing: border-box;
+  min-width: 0;
 }
 
 .head-actions {
@@ -1101,6 +1842,30 @@ function timeOf(at: number): string {
   align-items: center;
   gap: 6px;
   flex: none;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+}
+
+/* R12①:宽容器隐藏图标纯文字;≤420px 收为图标钮(title 兜底语义) */
+.act-ico {
+  display: none;
+  font-size: 12px;
+  line-height: 1;
+}
+
+@container (max-width: 520px) {
+  .head-actions {
+    gap: 4px;
+    flex-wrap: nowrap;
+  }
+
+  .head-actions .act-lbl {
+    display: none;
+  }
+
+  .head-actions .act-ico {
+    display: inline;
+  }
 }
 
 .stop-btn {
@@ -1164,6 +1929,17 @@ function timeOf(at: number): string {
   padding-left: 12%;
 }
 
+/* R12④:容器 ≤420px(R01 最小会话流 ≈360px 仍可触发)降为固定小值 */
+@container (max-width: 420px) {
+  .row {
+    padding-right: 12px;
+  }
+
+  .row.mine {
+    padding-left: 12px;
+  }
+}
+
 .bubble {
   display: inline-flex;
   flex-direction: column;
@@ -1213,6 +1989,18 @@ function timeOf(at: number): string {
   align-items: center;
   gap: 8px;
   font-size: 11px;
+  /* R12③:窄列不再被长路径撑出横向滚动,全路径看 title */
+  min-width: 0;
+  max-width: 100%;
+}
+
+.mono-path {
+  font-family: var(--mono);
+  color: var(--text);
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .bubble.file.clickable {
@@ -1274,11 +2062,6 @@ function timeOf(at: number): string {
 .kind-tag.artifact {
   color: var(--accent-strong);
   font-weight: 600;
-}
-
-.mono-path {
-  font-family: var(--mono);
-  color: var(--text);
 }
 
 .change.added { color: var(--ok); }
@@ -1496,138 +2279,222 @@ function timeOf(at: number): string {
   opacity: 1;
 }
 
-/* 本轮参数芯片行(P0-6):轻量不抢输入框视觉 */
-.turn-opts {
-  display: flex;
-  align-items: center;
-  flex-wrap: wrap;
-  gap: 8px;
-  padding: 0 4px;
-}
-
-.turn-chip {
-  display: inline-flex;
-  align-items: center;
-  gap: 4px;
-  font-size: 11px;
-  padding: 2px 9px;
-  border-radius: 999px;
-  background: var(--chip-bg);
-  border: 1px solid var(--line);
-  color: var(--muted);
-  cursor: pointer;
-  user-select: none;
-  transition: all var(--fast) var(--ease);
-}
-
-.turn-chip:hover {
-  border-color: var(--accent-line);
-  color: var(--text);
-}
-
-.turn-chip.active {
-  background: var(--accent-dim);
-  border-color: var(--accent-line);
-  color: var(--accent-strong);
-}
-
+/* 排队反馈轻提示(R09②):setTurnNote 写入、发送区渲染、8 秒自灭 */
 .turn-note {
   font-size: 11px;
   color: var(--accent-strong);
 }
 
-.turn-panel {
+/* 多轮聚合分组线(R11):「第 N 轮 · 模型 · 状态」 */
+.turn-divider {
   display: flex;
   align-items: center;
-  flex-wrap: wrap;
-  gap: 10px;
-  padding: 8px 10px;
-  border-radius: var(--radius-sm);
-  font-size: 11.5px;
+  gap: 8px;
+  margin: 10px 0 2px;
 }
 
-.turn-field {
+.turn-divider-line {
+  flex: 1;
+  height: 1px;
+  background: var(--line);
+}
+
+.turn-divider-chip {
+  flex: none;
+  font-size: 10.5px;
+  color: var(--faint);
+  background: var(--glass-bg);
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  padding: 2px 10px;
+}
+
+/* Agent 气泡名称标识(R16):与用户指令 header 同构,绿色圆点区分对话方向 */
+.agent-name {
+  color: var(--ok);
+  text-transform: none;
+}
+
+.agent-dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--ok);
+  display: inline-block;
+  flex: none;
+}
+
+/* 回到最新(R15):sticky 悬浮于流区右下,贴底随 v-if 移除 */
+.jump-latest {
+  position: sticky;
+  bottom: 10px;
+  align-self: flex-end;
+  z-index: 6;
+  margin: 6px 6px 0 0;
   display: inline-flex;
   align-items: center;
-  gap: 6px;
+  gap: 4px;
+  font-size: 11.5px;
+  color: var(--accent-strong);
+  background: var(--glass-bg-strong);
+  border: 1px solid var(--accent-line);
+  border-radius: 999px;
+  padding: 5px 12px;
+  cursor: pointer;
+  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.25);
+  transition: all var(--fast) var(--ease);
 }
 
-.turn-lbl {
-  color: var(--muted);
+.jump-latest:hover {
+  background: var(--accent-dim);
 }
 
-.turn-hint {
-  color: var(--faint);
-}
-
-/* 输入框下方本轮用量与消耗统计面板 */
-.turn-usage-panel {
-  margin-top: 8px;
-  padding: 8px 12px;
-  background: var(--glass-bg);
-  border: 1px solid var(--glass-edge);
-  border-radius: var(--radius-sm);
-  box-shadow: inset 0 1px 0 var(--glass-specular);
-  display: flex;
-  flex-direction: column;
-  gap: 6px;
-}
-
-.u-panel-head {
+.bottom-action-bar {
   display: flex;
   align-items: center;
   justify-content: space-between;
+  gap: 8px;
+  flex-wrap: wrap;
+  padding: 4px 0 2px;
 }
 
-.u-panel-title {
-  font-size: 11px;
+.pills-group {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  flex: 1;
+}
+
+.pill-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  font-size: 11.5px;
   font-weight: 600;
+  padding: 3px 8px;
+  border-radius: var(--radius-sm);
+  background: var(--glass-bg);
+  border: 1px solid var(--accent-line);
+  color: var(--accent-strong);
+  white-space: nowrap;
+}
+
+.pill-select {
+  min-width: 120px;
+}
+
+.model-pill {
+  max-width: 220px;
+}
+
+/* R10:续聊渠道选择器,与发布框 .channel 同款宽度约束 */
+.channel-pill {
+  min-width: 100px;
+  max-width: 140px;
+}
+
+.effort-pill {
+  min-width: 110px;
+  max-width: 140px;
+}
+
+/* G3-04:本轮模式下拉,与 effort-pill 同宽约束 */
+.mode-pill {
+  min-width: 90px;
+  max-width: 130px;
+}
+
+/* G3-05:覆盖态胶囊组——描边高亮 + 「已覆盖」角标持续可见,R10 跨会话沿用不再无感 */
+.pills-group.overridden {
+  border-color: var(--accent-line);
+  box-shadow: 0 0 0 2px var(--accent-dim);
+}
+
+.ov-indicator {
+  font-size: 10.5px;
+  color: var(--accent-strong);
+  background: var(--accent-dim);
+  border: 1px solid var(--accent-line);
+  border-radius: 999px;
+  padding: 2px 8px;
+  white-space: nowrap;
+}
+
+/* G3-04:技能被本轮覆盖时以同款高亮标出 */
+.skills-pill.overridden {
+  border: 1px solid var(--accent-line);
+  border-radius: var(--radius-sm);
+  box-shadow: 0 0 0 2px var(--accent-dim);
+  padding: 1px 3px;
+}
+
+.ov-tag {
+  font-size: 10px;
+  color: var(--accent-strong);
+  white-space: nowrap;
+}
+
+/* G3-15:单渠道只读渠道徽标(与发布框 .channel-badge 同款) */
+.channel-badge {
+  display: inline-flex;
+  align-items: center;
+  font-size: 11px;
+  color: var(--faint);
+  border: 1px dashed var(--line);
+  border-radius: var(--radius-sm);
+  padding: 5px 8px;
+  white-space: nowrap;
+  cursor: help;
+}
+
+/* G3-11:进度摘要组芯片可点击(button 承载 node-chip 外观) */
+.prog-group-chip {
+  cursor: pointer;
+  font-family: inherit;
+  transition: all var(--fast) var(--ease);
+}
+
+.prog-group-chip:hover {
+  background: var(--glass-bg-strong);
+  border-color: var(--accent-line);
   color: var(--muted);
 }
 
-.u-cache-tag {
-  font-size: 10.5px;
-  font-weight: 600;
-  color: #10b981;
-  background: color-mix(in srgb, #10b981 12%, transparent);
-  border: 1px solid color-mix(in srgb, #10b981 30%, transparent);
-  padding: 1px 6px;
-  border-radius: 4px;
+.skills-pill {
+  flex-shrink: 0;
 }
 
-.u-panel-body {
-  display: flex;
-  align-items: center;
-  gap: 16px;
-  flex-wrap: wrap;
-}
-
-.u-stat-item {
+.usage-mini-badge {
   display: inline-flex;
   align-items: center;
   gap: 6px;
-  font-size: 11.5px;
-}
-
-.u-stat-lbl {
-  color: var(--muted);
   font-size: 11px;
+  color: var(--muted);
+  background: var(--glass-bg);
+  border: 1px solid var(--line);
+  padding: 2px 8px;
+  border-radius: var(--radius-sm);
+  margin-left: auto;
+  flex-shrink: 0;
 }
 
-.u-stat-val {
-  font-weight: 600;
-  color: var(--text);
-}
-
-.u-stat-val.highlight-credits {
-  color: var(--accent-strong);
-}
-
-.u-stat-val.highlight-cache {
+.usage-mini-badge .cache-rate {
   color: #10b981;
+  font-weight: 600;
 }
 
-.u-stat-val.highlight-total {
-  color: var(--accent-strong);
+.center-composer-card {
+  margin-top: 12px;
+  /* R12⑥:发布框常驻底部,引导内容在独立滚动区内滚动 */
+  flex: none;
+}
+
+/* R13:应用内确认层正文 */
+.confirm-body {
+  margin: 0;
+  font-size: 12.5px;
+  line-height: 1.6;
+  color: var(--text);
 }
 </style>

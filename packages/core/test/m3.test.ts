@@ -5,7 +5,7 @@ import { MockDriver } from '../src/drivers/mock.js'
 import { Orchestrator } from '../src/orchestrator.js'
 import { Registry } from '../src/registry.js'
 import { satisfiesRange } from '../src/version.js'
-import type { AgentProfile } from '../src/index.js'
+import type { AgentProfile, TaskRecord } from '../src/index.js'
 import {
   FixedClock,
   MemoryTaskRepository,
@@ -175,7 +175,8 @@ describe('续聊链', () => {
     const first = orchestrator.submit({ agentId: 'zcode', prompt: '首轮' })
     await waitFor(() => first.state === 'completed')
 
-    const second = orchestrator.continueConversation(first.id, '继续深入')
+    // 父任务已完成且未启用排队,continueConversation 必然立即返回新任务记录
+    const second = orchestrator.continueConversation(first.id, '继续深入') as TaskRecord
     expect(second.parentId).toBe(first.id)
     expect(second.sessionId).toBe('sess-abc12345')
     expect(second.cwd).toBe(first.cwd)
@@ -183,7 +184,7 @@ describe('续聊链', () => {
 
     // second 的驱动模拟未提取到会话 id → 续聊降级 resumeLatest(-c)
     // third 继承 second 已知的会话 id
-    const third = orchestrator.continueConversation(second.id, '再继续')
+    const third = orchestrator.continueConversation(second.id, '再继续') as TaskRecord
     expect(third.parentId).toBe(second.id)
     expect(third.sessionId).toBe('sess-abc12345')
   })
@@ -214,7 +215,7 @@ describe('续聊链', () => {
     })
     const first = orchestrator.submit({ agentId: 'zcode', prompt: '无会话输出' })
     await waitFor(() => first.state === 'completed')
-    const followUp = orchestrator.continueConversation(first.id, '续')
+    const followUp = orchestrator.continueConversation(first.id, '续') as TaskRecord
     await waitFor(() => followUp.state === 'completed')
     expect(seenInput.sessionId).toBeUndefined()
     expect(seenInput.resumeLatest).toBe(true)
@@ -487,7 +488,7 @@ describe('P0-4/P0-6: 思考档位透传与本轮覆盖', () => {
     expect(second.reasoningEffort).toBe('high')
   })
 
-  it('接续成功后推送 followup:continued,新任务事件流头部写"接续自"message 事件', async () => {
+  it('接续成功后推送 followup:continued,新任务事件流头部写"接续自"info 事件', async () => {
     const registry = new Registry()
     registry.register(qoderProfile)
     const repo = new MemoryTaskRepository()
@@ -510,12 +511,12 @@ describe('P0-4/P0-6: 思考档位透传与本轮覆盖', () => {
     })
     const second = orchestrator.list().find((t) => t.parentId === first.id)!
     expect(continued).toEqual([{ fromTaskId: first.id, toTaskId: second.id }])
-    // message 事件落库且位于事件流头部(seq=1),会话链可回溯
+    // info 事件落库且位于事件流头部(seq=1),会话链可回溯;R16:系统提示用 info 中性呈现
     const events = repo.eventsOf(second.id)
     expect(events[0]!.seq).toBe(1)
-    expect(events[0]!.event.kind).toBe('message')
+    expect(events[0]!.event.kind).toBe('info')
     expect(
-      events[0]!.event.kind === 'message' && events[0]!.event.text,
+      events[0]!.event.kind === 'info' && events[0]!.event.text,
     ).toBe(`接续自 #${first.id}`)
   })
 

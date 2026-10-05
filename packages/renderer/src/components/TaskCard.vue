@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed } from 'vue'
+import { computed, onBeforeUnmount, ref, watch } from 'vue'
 import { useAppStore } from '../stores/app'
 import type { TaskRecord } from '@agent-drove/shared'
 import { CLIENT_FOLLOW_MODEL, STATE_TEXT, formatModelDisplay, formatTokens, getAgentBillingType } from '../labels'
@@ -33,13 +33,54 @@ const ORIGIN_MARK: Partial<Record<TaskRecord['origin'], string>> = {
 }
 
 const summary = computed(() => (props.task.title || props.task.prompt).replace(/\s+/g, ' ').slice(0, 80))
+
+/**
+ * 运行中耗时每秒跳动(R24):事件批推不触发任务列重渲染,Date.now() 直接参与计算
+ * 会把时长冻结在最后一次偶然刷新——改由组件内 1s ticker 驱动 nowTick。
+ * 仅 running 时启动,进入终态/卸载即停(参照 SessionColumn 的 ticker)。
+ */
+const nowTick = ref(Date.now())
+let durationTimer: ReturnType<typeof setInterval> | null = null
+
+watch(
+  () => props.task.state === 'running',
+  (running) => {
+    if (running) {
+      if (durationTimer) return
+      nowTick.value = Date.now()
+      durationTimer = setInterval(() => {
+        nowTick.value = Date.now()
+      }, 1000)
+    } else if (durationTimer) {
+      clearInterval(durationTimer)
+      durationTimer = null
+    }
+  },
+  { immediate: true },
+)
+
+onBeforeUnmount(() => {
+  if (durationTimer) clearInterval(durationTimer)
+})
+
 const duration = computed(() => {
   if (!props.task.startedAt) return ''
-  const end = props.task.finishedAt ?? Date.now()
+  const end = props.task.finishedAt ?? nowTick.value
   const ms = Math.max(0, end - props.task.startedAt)
   if (ms < 60_000) return `${Math.round(ms / 1000)}s`
   if (ms < 3600_000) return `${Math.floor(ms / 60_000)}m${Math.round((ms % 60_000) / 1000)}s`
   return `${Math.floor(ms / 3600_000)}h${Math.floor((ms % 3600_000) / 60_000)}m`
+})
+
+/**
+ * 常驻工作区徽标(R22):按 projects 映射 projectId→名称,移动后即时可见;
+ * daily 固定显「日常」,归属为空(或项目已删)显「未分组」。
+ */
+const workspaceLabel = computed(() => {
+  const pid = props.task.projectId
+  if (!pid) return '未分组'
+  if (pid === 'daily') return '日常'
+  return store.projects.value.find((p) => p.id === pid)?.name ?? '未分组'
 })
 const time = computed(() => {
   const d = new Date(props.task.createdAt)
@@ -62,24 +103,34 @@ const totalTokens = computed(() => {
 })
 
 // ---- 拖拽归类/排序(P0-2) ----
-/** 批量选中态禁用拖拽,避免误拖选中的任务 */
-const canDrag = computed(() => store.selection.value.size === 0)
+const canDrag = computed(() => true)
+
+/** G2-01:拖拽源视觉反馈——dragstart 置位、dragend 复位,原位卡呈半透明虚线轮廓 */
+const dragging = ref(false)
+
+/** G2-02:排队追问数徽标——契约字段由 G5-05 随 tasks:list 附带,先按可选字段消费,缺失即不渲染 */
+const followupCount = computed(
+  () => (props.task as TaskRecord & { followupCount?: number }).followupCount ?? 0,
+)
+
+/** G2-09:存在更新尝试(retryOf 指向本卡的新任务)则整卡淡化,重试链不再在列表堆积成噪音 */
+const superseded = computed(() => store.tasks.value.some((t) => t.retryOf === props.task.id))
 
 function onDragStart(event: DragEvent): void {
-  if (!canDrag.value) {
-    event.preventDefault()
-    return
-  }
+  dragging.value = true
   store.draggingTaskId.value = props.task.id
   if (event.dataTransfer) {
-    // 必须 setData,否则 Chromium 不允许 drop;taskId 同时走 store 供跨组件(AgentRail)读取
     event.dataTransfer.effectAllowed = 'move'
+    const payload = store.selection.value.has(props.task.id)
+      ? [...store.selection.value]
+      : [props.task.id]
     event.dataTransfer.setData('text/plain', props.task.id)
+    event.dataTransfer.setData('application/json', JSON.stringify(payload))
   }
 }
 
 function onDragEnd(): void {
-  // drop 与 dragend 总是成对(dragend 兜底清理,含拖拽中途 Esc 取消)
+  dragging.value = false
   store.draggingTaskId.value = null
   emit('drag-end')
 }
@@ -88,20 +139,26 @@ function onDragEnd(): void {
 <template>
   <article
     class="card spot"
-    :class="[`s-${task.state}`, { selected }]"
-    :draggable="canDrag"
+    :class="[`s-${task.state}`, { selected, dragging, superseded }]"
+    :title="superseded ? '已有更新尝试' : undefined"
+    :data-task-id="task.id"
     @click="$emit('click')"
-    @dragstart="onDragStart"
-    @dragend="onDragEnd"
     @dragover="$emit('drag-over', $event)"
     @drop="$emit('drop', $event)"
     @contextmenu.prevent="$emit('context', $event)"
   >
-    <div class="top">
+    <!-- G2-01:draggable 收窄到卡头——摘要/错误文本恢复原生选择复制,拖拽热区=卡头 -->
+    <div class="top" :draggable="canDrag" @dragstart="onDragStart" @dragend="onDragEnd">
+      <span class="drag-handle" title="按住拖拽调整顺序或归类" @click.stop>⋮⋮</span>
       <span class="agent">{{ agentLabel ?? task.agentId }}</span>
+      <span class="ws-tag" :title="`工作区:${workspaceLabel}`">{{ workspaceLabel }}</span>
       <span class="badge" :class="{ 'is-running': task.state === 'running' }">
         <span v-if="task.state === 'running'" class="card-spin" aria-hidden="true" />
         {{ STATE_TEXT[task.state] }}
+      </span>
+      <!-- G2-02:排队追问常驻计数徽标——给 A 排了消息切到 B 后也能在列表里找回 -->
+      <span v-if="followupCount > 0" class="fu-badge num" :title="`${followupCount} 条排队追问`">
+        ⏳{{ followupCount }}
       </span>
       <span v-if="task.skills?.length" class="card-skills">
         <span v-for="s in task.skills.slice(0, 3)" :key="s" class="s-dot" :title="s">{{ s.slice(0, 1) }}</span>
@@ -129,7 +186,12 @@ function onDragEnd(): void {
     </div>
     <div class="foot">
       <span v-if="ORIGIN_MARK[task.origin]" class="origin">{{ ORIGIN_MARK[task.origin] }}</span>
-      <span v-if="task.attempt > 1" class="origin">attempt {{ task.attempt }}</span>
+      <!-- G2-09:重试/重跑链路可视化——↻N 徽标悬停可见父任务 id 与尝试次数 -->
+      <span
+        v-if="task.attempt > 1"
+        class="origin"
+        :title="`源自任务 #${task.retryOf ?? '?'} · 第 ${task.attempt} 次尝试`"
+      >↻{{ task.attempt }}</span>
       <span class="spacer" />
       <button
         type="button"
@@ -156,8 +218,8 @@ function onDragEnd(): void {
   box-shadow: inset 0 1px 0 var(--glass-specular);
   padding: 12px 14px;
   cursor: pointer;
-  /* 卡片即拖拽源(P0-2):禁文本原生选择,避免按住拖动时误触发文本 drag */
-  user-select: none;
+  /* R24/G2-01:user-select 收窄到卡头拖拽热区(.top),摘要与错误文本可选中复制;
+     draggable 同样收窄到 .top,article 不再整体可拖,按住摘要拖动是文本选择而非元素拖拽 */
   transition: transform var(--fast) var(--ease), border-color var(--fast) var(--ease),
     background var(--fast) var(--ease);
 }
@@ -179,6 +241,17 @@ function onDragEnd(): void {
 .card.selected {
   border-color: var(--accent-line);
   background: var(--accent-dim);
+}
+
+/* G2-01:拖拽源视觉反馈——原位卡半透明虚线轮廓,与落点指示线可区分 */
+.card.dragging {
+  opacity: 0.55;
+  outline: 2px dashed var(--accent-line);
+}
+
+/* G2-09:已有更新尝试的旧卡整体淡化 */
+.card.superseded {
+  opacity: 0.7;
 }
 
 /* 左缘状态色条:扫一眼即知列内任务状态分布 */
@@ -216,10 +289,48 @@ function onDragEnd(): void {
   align-items: center;
   gap: 8px;
   font-size: 12px;
+  /* 卡头=拖拽热区(P0-2/R24/G2-01):draggable 在此生效,禁文本原生选择,
+     避免按住卡头拖动时误触发文本 drag;卡身文本不受影响 */
+  user-select: none;
+}
+
+.drag-handle {
+  cursor: grab;
+  color: var(--faint);
+  font-size: 11px;
+  line-height: 1;
+  padding: 0 2px;
+  letter-spacing: -1px;
+  opacity: 0.35;
+  transition: opacity 140ms ease, color 140ms ease;
+  user-select: none;
+}
+
+.card:hover .drag-handle {
+  opacity: 0.85;
+  color: var(--muted);
+}
+
+.drag-handle:active {
+  cursor: grabbing;
 }
 
 .agent {
   font-weight: 600;
+}
+
+/* 常驻工作区徽标(R22):归属一目了然,移动后即时更新 */
+.ws-tag {
+  font-size: 10px;
+  color: var(--muted);
+  border: 1px solid var(--line);
+  border-radius: 5px;
+  padding: 0 6px;
+  max-width: 96px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  flex: none;
 }
 
 .model {
@@ -366,6 +477,17 @@ function onDragEnd(): void {
   background: var(--chip-bg);
   color: var(--accent-strong);
   font-family: var(--mono);
+}
+
+/* G2-02:排队追问常驻计数徽标(复用 plan-tag 小徽标规格) */
+.fu-badge {
+  font-size: 10px;
+  color: var(--muted);
+  background: var(--accent-dim);
+  padding: 1px 6px;
+  border-radius: 4px;
+  border: 1px solid var(--accent-line);
+  flex: none;
 }
 
 .custom-title-tag {

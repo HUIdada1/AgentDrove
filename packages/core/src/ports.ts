@@ -1,4 +1,4 @@
-import type { StoredEvent, TaskRecord } from './types.js'
+import type { FollowupQueueItem, StoredEvent, TaskRecord } from './types.js'
 
 /**
  * 端口层:核心领域不 import electron/child_process,
@@ -27,6 +27,13 @@ export interface TaskRepository {
   appendEvents(events: StoredEvent[]): void
   eventsOf(taskId: string): StoredEvent[]
   maxSeqOf(taskId: string): number
+  /**
+   * 追问队列持久化(G5-01,可选):实现方落库后重启可恢复内存队列;
+   * 内存仓库测试不实现,调用方一律经可选链守卫。
+   */
+  allFollowups?(): Map<string, FollowupQueueItem[]>
+  /** 全量替换某任务的追问队列(空数组 = 清空);由编排层在每个内存变更点后调用 */
+  replaceFollowups?(parentTaskId: string, items: FollowupQueueItem[]): void
 }
 
 /**

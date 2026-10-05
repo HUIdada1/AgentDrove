@@ -6,7 +6,7 @@ import GlassMeter from '../ui/GlassMeter.vue'
 import GlassInput from '../ui/GlassInput.vue'
 import GlassModal from '../ui/GlassModal.vue'
 import Logo from './Logo.vue'
-import { formatQuotaNumber, formatTokens } from '../labels'
+import { formatQuotaNumber, formatTokens, formatAgentQuotaDisplay } from '../labels'
 import type { AgentView, Project } from '@agent-drove/shared'
 
 const store = useAppStore()
@@ -17,6 +17,10 @@ const DAILY_PROJECT_ID = 'daily'
 const notice = ref('')
 const renameTarget = ref<Project | null>(null)
 const renameText = ref('')
+/** G1-08:移除工作区的应用内确认层目标;null=未打开 */
+const removeTarget = ref<Project | null>(null)
+/** 客户端空态「重新扫描」进行中标记(R05) */
+const rescanning = ref(false)
 
 /** 任务卡拖到工作区项上的悬停高亮(P0-2) */
 const dragOverProjectId = ref('')
@@ -29,7 +33,20 @@ const usageByAgent = computed(() => {
 })
 
 function usageOf(agent: AgentView): number {
-  return usageByAgent.value.get(agent.id) ?? 0
+  return usageByAgent.value.get(agent.id) ?? agent.usedToday ?? 0
+}
+
+function quotaInfo(agent: AgentView) {
+  return formatAgentQuotaDisplay({
+    plan: agent.plan,
+    remainingCredits: agent.remainingCredits,
+    remainingTokens: agent.remainingTokens,
+    remainingPercent: agent.remainingPercent,
+    usedCreditsToday: agent.usedCreditsToday,
+    usedTokensToday: agent.usedTokensToday,
+    usedToday: usageOf(agent),
+    isOverridden: agent.isOverridden,
+  })
 }
 
 /** 统一收口 IPC 失败:避免未处理的 rejection 静默丢失,失败原因就地提示 */
@@ -44,9 +61,41 @@ async function run<T>(action: () => Promise<T>, prefix: string): Promise<T | und
 }
 
 function pick(agent: AgentView): void {
-  // P0-1:点击 = 进入与该客户端的对话上下文(发布框同步、新建对话沿用),
-  // 再点一次取消绑定回"全部";任务筛选(filter.agentId)与上下文解耦,由列表头下拉承担
-  store.agentContext.value = store.agentContext.value === agent.id ? '' : agent.id
+  if (!pickable(agent)) {
+    store.showToast(agentPickTitle(agent))
+    return
+  }
+  store.selectAgentContext(agent.id)
+}
+
+/** 「全部对话」:显式清除会话绑定(G1-01:任务列筛选与绑定解耦,不再连带清除) */
+function clearAgentContext(): void {
+  store.agentContext.value = ''
+}
+
+/** 可对话判定(R05):停用/非 headless 客户端置灰禁点 */
+function pickable(agent: AgentView): boolean {
+  return agent.enabled && agent.capabilities.headless !== false
+}
+
+/** 卡片 title(R05):不可对话时说明原因,可对话时展示额度详情 */
+function agentPickTitle(agent: AgentView): string {
+  if (!agent.enabled) return '已停用,启用后可对话'
+  if (!agent.capabilities.headless) return '该客户端不支持对话'
+  return agentDetailTitle(agent)
+}
+
+async function rescanAgents(): Promise<void> {
+  // R05:客户端区空态 CTA,与设置页同通道(agents:rescan + refreshAgents)
+  rescanning.value = true
+  try {
+    await run(async () => {
+      await window.api.agentsRescan()
+      await store.refreshAgents()
+    }, '重新扫描失败')
+  } finally {
+    rescanning.value = false
+  }
 }
 
 /** 选中同一工作区再点一次回到全部(null) */
@@ -119,13 +168,20 @@ async function commitRename(): Promise<void> {
   renameTarget.value = null
 }
 
-async function removeProject(project: Project): Promise<void> {
-  if (!window.confirm(`移除工作区「${project.name}」?目录与历史任务保留,仅解除分组。`)) return
-  if (store.selectedProjectId.value === project.id) store.selectedProjectId.value = null
+/** G1-08:移除工作区改走应用内 GlassModal 确认层,与重命名工作区同口径,不再弹原生 confirm */
+function removeProject(project: Project): void {
+  removeTarget.value = project
+}
+
+async function confirmRemoveProject(): Promise<void> {
+  const target = removeTarget.value
+  if (!target) return
+  if (store.selectedProjectId.value === target.id) store.selectedProjectId.value = null
   await run(async () => {
-    await window.api.projectsRemove(project.id)
+    await window.api.projectsRemove(target.id)
     await store.refreshProjects()
   }, '移除工作区失败')
+  removeTarget.value = null
 }
 
 function pathTail(path: string): string {
@@ -144,10 +200,18 @@ function wsTitle(project: Project): string {
 }
 
 async function toggleEnabled(agent: AgentView): Promise<void> {
-  await run(async () => {
+  // G1-02:停用当前对话客户端时同步清空 agentContext 并 toast,消除
+  // 侧栏高亮/空态横幅仍指向旧客户端、发布框却已回落的 三处矛盾;启用分支无需处理
+  const wasContext = store.agentContext.value === agent.id
+  const disabling = agent.enabled
+  const done = await run(async () => {
     await window.api.agentsSetEnabled(agent.id, !agent.enabled)
     await store.refreshAgents()
+    return true
   }, '切换客户端状态失败')
+  if (!done || !disabling || !wasContext) return
+  store.agentContext.value = ''
+  store.showToast(`${agent.label} 已停用,发布框将回落到可用客户端`)
 }
 
 async function recheck(agent: AgentView): Promise<void> {
@@ -189,54 +253,105 @@ function hasRunningTask(agentId: string): boolean {
 }
 
 
+/**
+ * R04:余量百分比,与余量文字同源同量纲。
+ * 返回 undefined = 未知态(未配置总量且无每日上限),不再虚构满格。
+ */
+function quotaPct(agent: AgentView): number | undefined {
+  if (agent.remainingPercent !== undefined && Number.isFinite(agent.remainingPercent)) {
+    return Math.max(0, Math.min(100, Math.round(agent.remainingPercent)))
+  }
+  if (agent.plan.dailyTaskCap > 0) {
+    return Math.max(0, Math.round(((agent.plan.dailyTaskCap - usageOf(agent)) / agent.plan.dailyTaskCap) * 100))
+  }
+  return undefined
+}
+
+/** R04:余量阈值配色——>50% 绿 / 20%~50% 橙 / ≤20% 深橙 / 0 红 */
+function quotaColor(pct: number): string {
+  if (pct <= 0) return 'var(--err)'
+  if (pct <= 20) return '#ea580c'
+  if (pct <= 50) return 'var(--warn)'
+  return 'var(--ok)'
+}
+
+/** G1-06:客户端本地图标路径 → file:// URL(项目未注册自定义资源协议,生产以 file:// 加载、
+ * CSP img-src 'self' 放行 file: 图片,dev 模式 CSP 被剥离;仅 logoPath 存在时调用,
+ * 无 logo 客户端回落首字母,当前各驱动尚未上报 logoPath,默认渲染与现状一致) */
+function logoUrl(agent: AgentView): string {
+  const p = (agent.logoPath ?? '').replace(/\\/g, '/').replace(/^\/+/, '')
+  return encodeURI(`file:///${p}`)
+}
+
+/** G1-06:轻量额度刷新——只走 usage:get,不触发探活;失败经 run 就地提示 */
+async function refreshUsage(): Promise<void> {
+  await run(() => store.refreshUsage(), '刷新额度失败')
+}
+
+/**
+ * R04:余量文字与进度条同源同量纲——估算值前缀「约」,未配置额度显示「未设置额度」,
+ * credits 取不到数据显示「—」(删除原 217 行的次数兜底,不再出现「余 0/0 次」假象)。
+ */
 function quotaRemainingText(agent: AgentView): string {
+  const cap = agent.plan.dailyTaskCap
+  const used = usageOf(agent)
   if (agent.plan.quotaKind === 'credits') {
+    // totalCredits 为套餐总量估算口径,剩余值统一前缀「约」
     if (agent.remainingCredits !== undefined) {
-      // P0-8:数值格式收口 formatQuotaNumber,消除 "1.2k" 与 "997.53" 并存
-      return `余 ${formatQuotaNumber(agent.remainingCredits)} 点`
-    }
-  } else {
-    if (agent.remainingTokens !== undefined) {
-      return `余 ${formatTokens(agent.remainingTokens)} tok`
-    }
-  }
-  return `余 ${Math.max(0, agent.plan.dailyTaskCap - usageOf(agent))} 次`
-}
-
-function quotaMeterValue(agent: AgentView): number {
-  if (agent.remainingPercent !== undefined) return agent.remainingPercent
-  return Math.max(0, Math.round(((agent.plan.dailyTaskCap - usageOf(agent)) / agent.plan.dailyTaskCap) * 100))
-}
-
-function agentDetailTitle(agent: AgentView): string {
-  const isCredits = agent.plan.quotaKind === 'credits'
-  const parts = [
-    `${agent.label}${agent.version ? ' ' + agent.version : ''}`,
-    `健康: ${agent.health?.ok ? '正常' : agent.health?.reason ?? '未探活'}`,
-    `套餐: ${agent.plan.name}`,
-    `今日已派任务: ${usageOf(agent)}/${agent.plan.dailyTaskCap}`,
-  ]
-  if (agent.remainingPercent !== undefined) {
-    parts.push(`额度余量: ${agent.remainingPercent}%`)
-  }
-  if (isCredits) {
-    if (agent.remainingCredits !== undefined) {
-      parts.push(`剩余点数: ${formatQuotaNumber(agent.remainingCredits)} 点`)
+      return `余约 ${formatQuotaNumber(agent.remainingCredits)} 点`
     }
     if (agent.usedCreditsToday !== undefined) {
-      parts.push(`今日消耗: ${formatQuotaNumber(agent.usedCreditsToday)} 点`)
+      return `今日约 ${formatQuotaNumber(agent.usedCreditsToday)} 点`
     }
-  } else {
-    if (agent.remainingTokens !== undefined) {
-      parts.push(`剩余 Token: ${agent.remainingTokens.toLocaleString()}`)
-    }
-    if (agent.usedTokensToday) {
-      parts.push(`今日消耗: ${agent.usedTokensToday.toLocaleString()} tokens`)
-    }
+    return '—'
   }
+  if (agent.plan.quotaKind === 'daily') {
+    if (cap > 0) return `余 ${Math.max(0, cap - used)}/${cap} 次`
+    return '未设置额度'
+  }
+  // subscription 订阅制:剩余/消耗 Token 均为本应用统计估算;全部缺位 = 未设置额度
+  if (agent.remainingTokens !== undefined) {
+    return `余约 ${formatTokens(agent.remainingTokens)} tok`
+  }
+  if (agent.usedTokensToday) {
+    return `今日约 ${formatTokens(agent.usedTokensToday)} tok`
+  }
+  if (cap > 0) return `余 ${Math.max(0, cap - used)}/${cap} 次`
+  return '未设置额度'
+}
+
+/** R04:余量行文案——余量为 0 时以「额度已用尽」警示替代数值 */
+function quotaStatusText(agent: AgentView): string {
+  if (quotaPct(agent) === 0) return '额度已用尽'
+  return quotaRemainingText(agent)
+}
+
+/** R04:tooltip 与主行同口径;移除恒近总量的「剩余 Token」误导项,标注估算口径 */
+function agentDetailTitle(agent: AgentView): string {
+  const pct = quotaPct(agent)
+  const cap = agent.plan.dailyTaskCap
+  const parts = [
+    `${agent.label}${agent.version ? ' ' + agent.version : ''}`,
+    `状态: ${agent.health?.ok ? '运行正常' : agent.health?.reason ?? '未探活'}`,
+    `模式: ${agent.plan.name || agent.plan.quotaKind}`,
+    `今日已派任务: ${usageOf(agent)}${cap > 0 ? `/${cap}` : ''} 次`,
+    `额度余量: ${pct !== undefined ? `${pct}%` : '未知(未设置额度)'}`,
+  ]
+  if (agent.plan.quotaKind === 'credits') {
+    if (agent.remainingCredits !== undefined) {
+      parts.push(`剩余点数: 约 ${formatQuotaNumber(agent.remainingCredits)} 点`)
+    }
+    if (agent.usedCreditsToday !== undefined) {
+      parts.push(`今日消耗: 约 ${formatQuotaNumber(agent.usedCreditsToday)} 点`)
+    }
+  } else if (agent.usedTokensToday) {
+    parts.push(`今日消耗: 约 ${formatTokens(agent.usedTokensToday)} tok`)
+  }
+  if (pct === 0) parts.push('额度已用尽')
   if (agent.cacheHitRateToday !== undefined && agent.cacheHitRateToday > 0) {
     parts.push(`缓存命中率: ${agent.cacheHitRateToday}%`)
   }
+  parts.push('口径: 约 · 本应用统计(套餐总量为近似值,zcode 另含本地 CLI 用量)')
   return parts.join('\n')
 }
 </script>
@@ -335,6 +450,41 @@ function agentDetailTitle(agent: AgentView): string {
 
       <div class="section-title" v-if="!store.railCollapsed.value">
         <span>客户端</span>
+        <!-- R05/G1-01:显式「全部对话」入口——清除会话绑定(任务列筛选由列头下拉独立控制) -->
+        <GlassButton
+          variant="plain"
+          size="sm"
+          title="取消当前对话绑定,回到全部对话"
+          @click="clearAgentContext"
+        >
+          全部对话
+        </GlassButton>
+      </div>
+      <!-- R05/G1-06:客户端空态两态区分——探测中(agentsLoaded=false)显示脉冲点与「正在探测客户端…」,
+           探测完成仍为空才显示「未发现客户端 + 重新扫描」,加载态不再伪装成异常态 -->
+      <div v-if="store.agents.value.length === 0" class="agents-empty" :class="{ collapsed: store.railCollapsed.value }">
+        <template v-if="!store.railCollapsed.value">
+          <template v-if="!store.agentsLoaded.value">
+            <span class="agents-empty-text"><i class="probe-dot" aria-hidden="true" />正在探测客户端…</span>
+          </template>
+          <template v-else>
+            <span class="agents-empty-text">未发现客户端</span>
+            <GlassButton variant="plain" size="sm" :disabled="rescanning" @click="rescanAgents">
+              {{ rescanning ? '扫描中…' : '重新扫描' }}
+            </GlassButton>
+          </template>
+        </template>
+        <GlassButton
+          v-else-if="store.agentsLoaded.value"
+          variant="plain"
+          size="sm"
+          :disabled="rescanning"
+          title="未发现客户端,点击重新扫描"
+          @click="rescanAgents"
+        >
+          {{ rescanning ? '…' : '⟳' }}
+        </GlassButton>
+        <i v-else class="probe-dot" aria-hidden="true" title="正在探测客户端…" />
       </div>
       <div class="agents">
         <div
@@ -343,43 +493,72 @@ function agentDetailTitle(agent: AgentView): string {
           class="agent spot"
           role="button"
           tabindex="0"
-          :class="{ picked: store.agentContext.value === agent.id }"
-          :title="agentDetailTitle(agent)"
+          :aria-disabled="!pickable(agent)"
+          :class="{
+            picked: store.agentContext.value === agent.id,
+            'is-collapsed': store.railCollapsed.value,
+            'pick-disabled': !pickable(agent),
+          }"
+          :title="agentPickTitle(agent)"
           @click="pick(agent)"
           @keydown.enter="pick(agent)"
           @keydown.space.prevent="pick(agent)"
         >
-          <span class="glyph" aria-hidden="true">{{ agent.label.slice(0, 1) }}</span>
+          <div class="glyph-wrap">
+            <!-- G1-06:客户端上报本地图标时渲染 logo(折叠态亦可辨),否则回落首字母 -->
+            <img v-if="agent.logoPath" :src="logoUrl(agent)" class="glyph logo" alt="" />
+            <span v-else class="glyph" aria-hidden="true">{{ agent.label.slice(0, 1) }}</span>
+            <span class="status-dot" :class="healthClass(agent)" :title="agent.health?.reason ?? '未探活'" />
+            <!-- G1-06:额度余量色点——6px 定位左下,与右下 status-dot 错位叠放,折叠态额度不再完全不可见;
+                 评审取色点而非色环,避免与 running-ring 虚线环视觉冲突 -->
+            <i
+              v-if="quotaPct(agent) !== undefined"
+              class="quota-dot"
+              :style="{ background: quotaColor(quotaPct(agent) ?? 100) }"
+            />
+            <span v-if="hasRunningTask(agent.id)" class="running-ring" aria-hidden="true" />
+          </div>
           <span v-if="!store.railCollapsed.value" class="meta">
             <span class="line1">
               <span class="name">{{ agent.label }}</span>
-              <span class="dot" :class="healthClass(agent)" :title="agent.health?.reason ?? '未探活'" />
+              <span v-if="agent.isOverridden" class="calibrated-tag" title="用户已校准额度">已校准</span>
+              <span v-else-if="hasRunningTask(agent.id)" class="running-tag">运行中</span>
+              <span v-else class="plan-tag">{{ agent.plan.name || agent.plan.quotaKind }}</span>
             </span>
-            <GlassMeter
-              :value="quotaMeterValue(agent)"
-              :max="100"
-              :show-percent="true"
-              :show-spinner="hasRunningTask(agent.id)"
-              :is-busy="hasRunningTask(agent.id)"
-              size="md"
-            />
+            <div class="quota-row">
+              <template v-if="quotaPct(agent) !== undefined">
+                <GlassMeter
+                  :value="quotaPct(agent) ?? 0"
+                  :max="100"
+                  :show-percent="false"
+                  size="sm"
+                  :color="quotaColor(quotaPct(agent) ?? 0)"
+                />
+                <span class="quota-pct num">{{ quotaPct(agent) }}%</span>
+              </template>
+              <span v-else class="quota-unknown">未配置额度</span>
+            </div>
             <div class="quota-meta num">
-              <span class="quota-rem" :title="`余量: ${quotaMeterValue(agent)}%`">
-                {{ quotaRemainingText(agent) }}
+              <span class="quota-rem" :title="quotaInfo(agent).primaryText">
+                {{ quotaInfo(agent).primaryText }}
               </span>
-              <span v-if="agent.cacheHitRateToday" class="cache-badge" title="今日平均缓存命中率">
+              <span v-if="quotaInfo(agent).subText" class="quota-sub" :title="quotaInfo(agent).subText">
+                {{ quotaInfo(agent).subText }}
+              </span>
+              <span v-else-if="agent.cacheHitRateToday" class="cache-badge" title="今日平均缓存命中率">
                 缓存 {{ agent.cacheHitRateToday }}%
               </span>
-              <span v-if="hasRunningTask(agent.id)" class="running-tag">运行中</span>
+              <GlassButton
+                variant="ghost"
+                size="sm"
+                class="quota-refresh"
+                title="刷新额度"
+                @click.stop="refreshUsage"
+              >
+                ⟳
+              </GlassButton>
             </div>
-            <!-- 今日用量: 严格区分点数与 Token, 严禁混淆 -->
-            <div v-if="agent.plan.quotaKind === 'credits' && agent.usedCreditsToday !== undefined" class="today-usage muted">
-              今日 {{ agent.usedCreditsToday }} 点
-            </div>
-            <div v-else-if="agent.usedTokensToday" class="today-usage muted">
-              今日 {{ formatTokens(agent.usedTokensToday) }} tok
-            </div>
-            <span class="ops">
+            <span class="ops hover-ops">
               <GlassButton variant="ghost" size="sm" title="探活(绕过缓存)" @click.stop="recheck(agent)">重查</GlassButton>
               <GlassButton variant="ghost" size="sm" title="唤起客户端" @click.stop="launch(agent)">唤起</GlassButton>
               <GlassButton variant="ghost" size="sm" :class="{ warn: !agent.enabled }" @click.stop="toggleEnabled(agent)">
@@ -395,7 +574,15 @@ function agentDetailTitle(agent: AgentView): string {
       <GlassButton variant="ghost" size="sm" class="btm" :title="`主题:${themeLabel()}(点击切换)`" @click="cycleTheme">
         {{ store.railCollapsed.value ? themeLabel() : `主题:${themeLabel()}` }}
       </GlassButton>
-      <GlassButton variant="ghost" size="sm" class="btm" title="设置" @click="openSettings">
+      <!-- R04:折叠态调度暂停不再凭空消失——以设置钮警示描边 + 角标色点表达 -->
+      <GlassButton
+        variant="ghost"
+        size="sm"
+        class="btm"
+        :class="{ 'paused-warn': store.settings.value?.schedulerPaused }"
+        :title="store.settings.value?.schedulerPaused ? '调度已暂停 · 打开设置恢复' : '设置'"
+        @click="openSettings"
+      >
         设置
       </GlassButton>
       <span v-if="store.settings.value?.schedulerPaused && !store.railCollapsed.value" class="paused">
@@ -419,6 +606,16 @@ function agentDetailTitle(agent: AgentView): string {
       <GlassButton variant="primary" :disabled="!renameText.trim()" @click="commitRename">保存</GlassButton>
     </template>
   </GlassModal>
+
+  <!-- G1-08:移除工作区的应用内确认层(Esc 取消,autofocus 落在确认钮上 Enter 直接确认) -->
+  <GlassModal v-if="removeTarget" open title="移除工作区" width="420px" @close="removeTarget = null">
+    <p class="remove-tip">将移除「{{ removeTarget.name }}」。目录与历史任务保留,仅解除分组。</p>
+    <template #footer>
+      <span class="spacer" />
+      <GlassButton variant="ghost" @click="removeTarget = null">取消</GlassButton>
+      <GlassButton variant="danger" autofocus @click="confirmRemoveProject">确认移除</GlassButton>
+    </template>
+  </GlassModal>
 </template>
 
 <style scoped>
@@ -431,6 +628,8 @@ function agentDetailTitle(agent: AgentView): string {
   gap: 8px;
   padding: 10px;
   transition: width 180ms var(--ease);
+  /* R04:建立行内尺寸查询容器,@container 按侧栏实际宽度隐藏缓存徽章 */
+  container-type: inline-size;
 }
 
 .rail.collapsed {
@@ -542,6 +741,15 @@ function agentDetailTitle(agent: AgentView): string {
   flex: 1;
 }
 
+/* G1-08:移除工作区确认层正文 */
+.remove-tip {
+  margin: 4px 0;
+  font-size: 12.5px;
+  color: var(--muted);
+  line-height: 1.6;
+  word-break: break-word;
+}
+
 .workspaces,
 .agents {
   display: flex;
@@ -593,6 +801,61 @@ function agentDetailTitle(agent: AgentView): string {
   border-color: var(--accent-line);
 }
 
+/* R05:停用/非 headless 卡片置灰禁点,悬停不再给选中暗示 */
+.agent.pick-disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
+.agent.pick-disabled:hover {
+  background: transparent;
+  border-color: transparent;
+}
+
+.agent.pick-disabled .glyph {
+  filter: grayscale(0.6);
+}
+
+/* R05:客户端空态就地闭环 */
+.agents-empty {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 10px 12px;
+  border: 1px dashed var(--line-strong);
+  border-radius: var(--radius-md);
+  font-size: 11.5px;
+  color: var(--muted);
+}
+
+.agents-empty.collapsed {
+  justify-content: center;
+  padding: 8px 6px;
+}
+
+.agents-empty-text {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+}
+
+/* G1-06:探测中空态——脉冲圆点,与「未发现客户端」异常态视觉区分 */
+.probe-dot {
+  flex: none;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--accent);
+  animation: probePulse 1.2s ease-in-out infinite;
+}
+
+@keyframes probePulse {
+  0%, 100% { opacity: 0.35; transform: scale(0.8); }
+  50% { opacity: 1; transform: scale(1.1); }
+}
+
 /* 任务卡拖入时的放置高亮(P0-2) */
 .ws.drop-target {
   background: var(--accent-dim);
@@ -619,6 +882,105 @@ function agentDetailTitle(agent: AgentView): string {
   background: var(--accent-dim);
   border: 1px solid var(--accent-line);
   box-shadow: inset 0 1px 0 var(--glass-specular), 0 2px 8px rgba(0, 0, 0, 0.12);
+}
+
+.glyph-wrap {
+  position: relative;
+  flex: none;
+}
+
+.status-dot {
+  position: absolute;
+  right: -2px;
+  bottom: -2px;
+  width: 9px;
+  height: 9px;
+  border-radius: 50%;
+  border: 1.5px solid var(--glass-bg);
+  background: var(--faint);
+}
+
+.status-dot.ok {
+  background: #10b981;
+  box-shadow: 0 0 6px rgba(16, 185, 129, 0.4);
+}
+
+.status-dot.bad {
+  background: var(--err);
+}
+
+/* G1-06:额度余量色点——6px 定位左下,与右下 status-dot 错位叠放;底色由内联 style 按阈值给 */
+.quota-dot {
+  position: absolute;
+  left: -2px;
+  bottom: -2px;
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  border: 1px solid var(--glass-bg);
+}
+
+/* G1-06:客户端 logo 图标复用 .glyph 玻璃底座,图片内缩留边不顶格 */
+.glyph.logo {
+  object-fit: contain;
+  padding: 3px;
+}
+
+.running-ring {
+  position: absolute;
+  inset: -3px;
+  border-radius: 14px;
+  border: 2px dashed var(--accent);
+  animation: ringSpin 3s linear infinite;
+  pointer-events: none;
+}
+
+@keyframes ringSpin {
+  100% {
+    transform: rotate(360deg);
+  }
+}
+
+.plan-tag {
+  font-size: 10px;
+  color: var(--muted);
+  background: var(--accent-dim);
+  padding: 1px 6px;
+  border-radius: 4px;
+  border: 1px solid var(--accent-line);
+}
+
+.quota-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-top: 2px;
+}
+
+.quota-row :deep(.g-meter) {
+  flex: 1;
+}
+
+.quota-pct {
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--muted);
+  min-width: 28px;
+  text-align: right;
+}
+
+/* R04:额度未知态文字(不渲染满格进度条) */
+.quota-unknown {
+  flex: 1;
+  font-size: 10.5px;
+  color: var(--faint);
+  border: 1px dashed var(--line);
+  border-radius: 4px;
+  padding: 0 6px;
+  line-height: 1.6;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 
 .running-tag {
@@ -701,15 +1063,22 @@ function agentDetailTitle(agent: AgentView): string {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  flex-wrap: wrap;
+  /* R04:余量行单行不折行,窄栏靠省略号收缩,不再错位换行 */
+  flex-wrap: nowrap;
   font-size: 11px;
   gap: 4px;
+  min-width: 0;
 }
 
 .quota-rem {
   font-weight: 600;
   color: var(--text);
   letter-spacing: -0.01em;
+  min-width: 0;
+  flex: 1;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 
 .cache-badge {
@@ -721,6 +1090,22 @@ function agentDetailTitle(agent: AgentView): string {
   padding: 0 4px;
   border-radius: 4px;
   line-height: 1.4;
+  flex: none;
+}
+
+/* G1-06:额度行尾轻量刷新钮,压缩到与缓存徽章同量级,不挤占余量文字 */
+.quota-meta :deep(button.quota-refresh) {
+  flex: none;
+  padding: 0 5px;
+  font-size: 11px;
+  line-height: 1.5;
+}
+
+/* R04:窄侧栏(约 200px 档)缓存徽章隐藏,把宽度让给余量文字;折叠态 meta 本就不渲染 */
+@container (max-width: 219px) {
+  .cache-badge {
+    display: none;
+  }
 }
 
 .today-usage {
@@ -734,13 +1119,38 @@ function agentDetailTitle(agent: AgentView): string {
   color: var(--muted);
 }
 
-.ops {
+.calibrated-tag {
+  font-size: 9.5px;
+  color: var(--accent);
+  background: var(--accent-dim);
+  border: 1px solid var(--accent-line);
+  border-radius: 4px;
+  padding: 0 4px;
+  line-height: 1.4;
+}
+
+.quota-sub {
+  font-size: 10px;
+  color: var(--muted);
+  white-space: nowrap;
+}
+
+/* 现代化悬停操作栏:卡片悬停时平滑浮现,常态半隐不侵占高度 */
+.ops.hover-ops {
   display: flex;
   gap: 4px;
   margin-top: 2px;
+  opacity: 0.25;
+  transform: translateY(1px);
+  transition: opacity 160ms ease, transform 160ms ease;
 }
 
-/* 停用/启用按钮:客户端停用时文字给警示色(覆盖 GlassButton ghost 的 muted) */
+.agent:hover .ops.hover-ops,
+.agent:focus-within .ops.hover-ops {
+  opacity: 1;
+  transform: translateY(0);
+}
+
 .ops :deep(button.warn) {
   color: var(--warn);
 }
@@ -761,6 +1171,25 @@ function agentDetailTitle(agent: AgentView): string {
   font-size: 11px;
   color: var(--warn);
   text-align: center;
+}
+
+/* R04:折叠态「调度已暂停」警示——底部状态钮描边 + 右上角色点,不再凭空消失 */
+.btm.paused-warn {
+  color: var(--warn);
+  border-color: color-mix(in srgb, var(--warn) 55%, transparent);
+  position: relative;
+}
+
+.btm.paused-warn::after {
+  content: '';
+  position: absolute;
+  top: -3px;
+  right: -3px;
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--warn);
+  box-shadow: 0 0 6px color-mix(in srgb, var(--warn) 60%, transparent);
 }
 </style>
 

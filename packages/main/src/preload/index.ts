@@ -73,9 +73,13 @@ const api: AgentDroveApi = {
   healthCheck: (agentId, options) => ipcRenderer.invoke('health:check', agentId, safeClone(options)),
   launchApp: (agentId) => ipcRenderer.invoke('launch:app', agentId),
   usageGet: () => ipcRenderer.invoke('usage:get'),
+  quotaGet: () => ipcRenderer.invoke('quota:get'),
 
   settingsGet: () => ipcRenderer.invoke('settings:get'),
   settingsUpdate: (patch) => ipcRenderer.invoke('settings:update', safeClone(patch)),
+  // G5-02:单客户端套餐校准(含显式剩余值模式);patch=null 清除该校准恢复注册默认
+  settingsSetPlanOverride: (agentId, patch) =>
+    ipcRenderer.invoke('settings:set-plan-override', agentId, safeClone(patch)),
   schedulerPause: (paused) => ipcRenderer.invoke('scheduler:pause', paused),
 
   logsTail: (limit) => ipcRenderer.invoke('logs:tail', limit),

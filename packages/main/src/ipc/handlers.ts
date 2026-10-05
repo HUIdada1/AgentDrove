@@ -1,5 +1,6 @@
 import { BrowserWindow, dialog, ipcMain, shell } from 'electron'
 import { basename, dirname, join } from 'node:path'
+import { createRequire } from 'node:module'
 import { randomUUID } from 'node:crypto'
 import { homedir } from 'node:os'
 import {
@@ -14,6 +15,7 @@ import {
 } from 'node:fs'
 import type {
   AgentView,
+  BatchSubmitResult,
   ContinueOptions,
   EventsPageDto,
   MergeResult,
@@ -30,6 +32,7 @@ import {
   mergeConfig,
   type AgentProfile,
   type AppConfig,
+  type PlanOverrideConfig,
   type TaskRecord,
   type WorkspaceRow,
 } from '@agent-drove/core'
@@ -46,6 +49,122 @@ const EVENTS_PAGE_MAX_LIMIT = 1000
  */
 const REASONING_EFFORT_CAPABLE = new Set(['zcode', 'codex'])
 
+/** zcode 本地用量库的最小查询面(node:sqlite 无 @types 时按此结构断言) */
+interface ZcodeUsageRow {
+  inTok: number | null
+  outTok: number | null
+  cacheTok: number | null
+}
+
+interface ZcodeDatabase {
+  prepare(sql: string): { get(...params: unknown[]): ZcodeUsageRow | undefined }
+  close(): void
+}
+
+/** G5-09:zcode 本地库单次读出的有效用量行;合并进 stats 时随对应口径现算 */
+interface ZcodeUsageRaw {
+  inTok: number
+  outTok: number
+  cacheTok: number
+}
+
+/** G5-09:zcode 单次开库同时取出的两个口径聚合(周期/今日) */
+interface ZcodeUsagePair {
+  cycle: ZcodeUsageRaw | null
+  today: ZcodeUsageRaw | null
+}
+
+/** agentUsageStats 的返回形状(合并 zcode 本地库用量时复用) */
+interface UsageStatsSnapshot {
+  usedTokens: number
+  usedCredits: number
+  cachedTokens: number
+  cacheHitRate: number
+}
+
+/**
+ * G5-09:zcode 本地 sqlite 同步读的短 TTL 缓存。
+ * agents:list 是最高频通道(任务事件 500ms 节流/60s 轮询/聚焦重拉),每拍同步开库
+ * 会阻塞主进程事件循环;5s 内复用上次读取结果(一次开库同时取周期与今日两个聚合)。
+ * null 成员同时表示"该口径无有效行"与"读取失败",TTL 内同样不再重试,失败 warn 也因此按窗口去抖。
+ */
+let zcodeUsageCache: { at: number; raw: ZcodeUsagePair } | null = null
+const ZCODE_USAGE_CACHE_TTL_MS = 5000
+
+/** ZcodeUsageRow → 有效用量行;无行或无消耗返回 null */
+function toZcodeRaw(row: ZcodeUsageRow | undefined): ZcodeUsageRaw | null {
+  if (!row || (!row.inTok && !row.outTok)) return null
+  return {
+    inTok: Number(row.inTok) || 0,
+    outTok: Number(row.outTok) || 0,
+    cacheTok: Number(row.cacheTok) || 0,
+  }
+}
+
+/**
+ * 读 zcode 本地权威库(~/.zcode/cli/db/db.sqlite),一次开库同时取周期与今日两个口径的
+ * 聚合用量;库缺失/读取失败返回双 null(回落本应用派发口径)。
+ */
+function readZcodeLocalUsage(
+  ctx: AppContext,
+  cycleStartMs: number,
+  todayStartMs: number,
+): ZcodeUsagePair {
+  try {
+    const zdbPath = join(homedir(), '.zcode', 'cli', 'db', 'db.sqlite')
+    if (!existsSync(zdbPath)) return { cycle: null, today: null }
+    // R03:globalThis.require 在 ESM 产物里非契约;bundle 成 CJS 后 import.meta.url 由
+    // bundle 脚本垫为 file:// 形式,统一走 createRequire 标准获取 node:sqlite
+    const req = createRequire(import.meta.url)
+    const sqlite = req('node:sqlite') as {
+      DatabaseSync?: new (path: string, options?: { readOnly?: boolean }) => ZcodeDatabase
+    }
+    const DatabaseSync = sqlite?.DatabaseSync
+    if (!DatabaseSync) {
+      throw new Error('node:sqlite.DatabaseSync 不可用(需要 Node 22.5+)')
+    }
+    const zdb = new DatabaseSync(zdbPath, { readOnly: true })
+    try {
+      const stmt = zdb.prepare(
+        `SELECT SUM(input_tokens) as inTok, SUM(output_tokens) as outTok, SUM(cache_read_input_tokens) as cacheTok
+         FROM model_usage
+         WHERE started_at >= ?`,
+      )
+      return {
+        cycle: toZcodeRaw(stmt.get(cycleStartMs)),
+        today: toZcodeRaw(stmt.get(todayStartMs)),
+      }
+    } finally {
+      zdb.close()
+    }
+  } catch (error) {
+    // R03:读取失败留痕不静默——此前整段静默吞掉,排障无从下手
+    ctx.logger.warn('zcode 本地用量库读取失败,Token/点数统计回落到本应用派发口径', {
+      error: error instanceof Error ? error.message : String(error),
+    })
+    return { cycle: null, today: null }
+  }
+}
+
+/** 把 zcode 本地库聚合行合并进口径快照:各值取两者较大者(与 R03 既有合并语义一致) */
+function mergeZcodeRaw(stats: UsageStatsSnapshot, raw: ZcodeUsageRaw): void {
+  stats.usedTokens = Math.max(stats.usedTokens, raw.inTok + raw.outTok + raw.cacheTok)
+  stats.cachedTokens = Math.max(stats.cachedTokens, raw.cacheTok)
+  const totalIn = raw.inTok + raw.cacheTok
+  if (totalIn > 0) {
+    stats.cacheHitRate = Number(((raw.cacheTok / totalIn) * 100).toFixed(1))
+  }
+  stats.usedCredits = Math.max(
+    stats.usedCredits,
+    Number(((raw.inTok + raw.outTok + raw.cacheTok) / 1000).toFixed(2)),
+  )
+}
+
+/**
+ * R03:quota 计算输出统一「展示口径」——remainingPercent 为剩余百分比,
+ * 未配置 totalCredits/totalTokens 且无 dailyTaskCap 时返回 undefined(未知态),
+ * 不再默认 100 虚构满格;值的单位(点/Token/次)与来源标签(套餐名)由渲染层按 plan 推导。
+ */
 function computeAgentQuotaAndUsage(
   ctx: AppContext,
   profile: AgentProfile,
@@ -53,101 +172,116 @@ function computeAgentQuotaAndUsage(
   todayStartMs: number,
 ) {
   const usedToday = ctx.store.countOf(profile.id, day)
-  const stats = ctx.store.agentUsageStats(profile.id, todayStartMs)
+  // G5-02:余量口径修正——套餐总量是周期量,余量按"总量−周期累计"计算
+  // (起点=min(最早任务,今日零点)),不再"总量−仅今日消耗"(跨日累积从不计入,余量系统性虚高)。
+  // 复核修订:今日口径独立保留(usedTokensToday/usedCreditsToday 仍为今日累计),
+  // 与周期口径在 tooltip 中可区分——两个统计各查一次,首任务就在今日时复用同一次查询。
+  const cycleStartMs = Math.min(
+    ctx.store.firstTaskCreatedAt(profile.id) ?? todayStartMs,
+    todayStartMs,
+  )
+  const cycleStats = ctx.store.agentUsageStats(profile.id, cycleStartMs)
+  const todayStats =
+    cycleStartMs === todayStartMs
+      ? cycleStats
+      : ctx.store.agentUsageStats(profile.id, todayStartMs)
 
-  // 若为 zcode，尝试读取本地权威 ~/.zcode/cli/db/db.sqlite
+  // 若为 zcode,叠加本地权威 ~/.zcode/cli/db/db.sqlite 的用量(G5-09:5s TTL 缓存内不再开库,
+  // 一次开库同时取周期与今日两个聚合)
   if (profile.id === 'zcode') {
-    try {
-      const zdbPath = join(homedir(), '.zcode', 'cli', 'db', 'db.sqlite')
-      if (existsSync(zdbPath)) {
-        // eslint-disable-next-line @typescript-eslint/no-explicit-any
-        const req = (globalThis as any).require
-        const { DatabaseSync } = req ? req('node:sqlite') ?? {} : {}
-        if (DatabaseSync) {
-          const zdb = new DatabaseSync(zdbPath, { readOnly: true })
-          try {
-            // eslint-disable-next-line @typescript-eslint/no-explicit-any
-            const row: any = zdb
-              .prepare(
-                `SELECT SUM(input_tokens) as inTok, SUM(output_tokens) as outTok, SUM(cache_read_input_tokens) as cacheTok
-                 FROM model_usage
-                 WHERE started_at >= ?`,
-              )
-              .get(todayStartMs)
-            if (row && (row.inTok || row.outTok)) {
-              const inTok = Number(row.inTok) || 0
-              const outTok = Number(row.outTok) || 0
-              const cacheTok = Number(row.cacheTok) || 0
-              stats.usedTokens = Math.max(stats.usedTokens, inTok + outTok + cacheTok)
-              stats.cachedTokens = Math.max(stats.cachedTokens, cacheTok)
-              const totalIn = inTok + cacheTok
-              if (totalIn > 0) {
-                stats.cacheHitRate = Number(((cacheTok / totalIn) * 100).toFixed(1))
-              }
-              stats.usedCredits = Math.max(
-                stats.usedCredits,
-                Number(((inTok + outTok + cacheTok) / 1000).toFixed(2)),
-              )
-            }
-          } finally {
-            zdb.close()
-          }
-        }
-      }
-    } catch {
-      // 优雅忽略
+    let raw: ZcodeUsagePair
+    if (zcodeUsageCache && Date.now() - zcodeUsageCache.at < ZCODE_USAGE_CACHE_TTL_MS) {
+      raw = zcodeUsageCache.raw
+    } else {
+      raw = readZcodeLocalUsage(ctx, cycleStartMs, todayStartMs)
+      zcodeUsageCache = { at: Date.now(), raw }
     }
+    if (raw.cycle) mergeZcodeRaw(cycleStats, raw.cycle)
+    if (raw.today) mergeZcodeRaw(todayStats, raw.today)
   }
 
-  const plan = profile.plan
+  const config = ctx.getConfig()
+  const override = config.planOverrides?.[profile.id]
+
+  // 1. 基准配置优先应用用户 Plan Override
+  const plan = {
+    ...profile.plan,
+    quotaKind: override?.quotaKind ?? profile.plan.quotaKind,
+    totalCredits: override?.totalCredits ?? profile.plan.totalCredits,
+    totalTokens: override?.totalTokens ?? profile.plan.totalTokens,
+    dailyTaskCap: override?.dailyTaskCap ?? profile.plan.dailyTaskCap,
+  }
+
   let totalCredits = plan.totalCredits
   let totalTokens = plan.totalTokens
 
-  if (!totalTokens) {
-    totalTokens = plan.quotaKind === 'daily' ? 150_000_000 : plan.dailyTaskCap * 100_000
-  }
-  if (!totalCredits) {
-    totalCredits = plan.quotaKind === 'credits' ? 1000 : Math.round(totalTokens / 1000)
-  }
+  let remainingTokens: number | undefined
+  let remainingCredits: number | undefined
+  // R03:未知态 = undefined,不虚构满格
+  let remainingPercent: number | undefined
 
-  const remainingTokens = Math.max(0, totalTokens - stats.usedTokens)
-  const remainingCredits = Math.max(0, Number((totalCredits - stats.usedCredits).toFixed(2)))
-
-  let remainingPercent: number
   if (plan.quotaKind === 'credits') {
-    remainingPercent =
-      totalCredits > 0
-        ? Math.max(0, Math.min(100, Math.round((remainingCredits / totalCredits) * 100)))
-        : 100
+    if (override?.remainingCredits !== undefined) {
+      // G5-02 模式 B:用户直接填当前剩余值,原样展示(启用本应用前的用量无法回溯,
+      // 不再由总量倒推,也不叠加统计消耗重复扣减);校准后可随时再校准
+      remainingCredits = Math.max(0, Number(override.remainingCredits.toFixed(1)))
+      if (totalCredits && totalCredits > 0) {
+        remainingPercent = Math.max(0, Math.min(100, Math.round((remainingCredits / totalCredits) * 100)))
+      }
+    } else if (totalCredits && totalCredits > 0) {
+      remainingCredits = Math.max(0, Number((totalCredits - cycleStats.usedCredits).toFixed(1)))
+      remainingPercent = Math.max(0, Math.min(100, Math.round((remainingCredits / totalCredits) * 100)))
+    } else if (plan.dailyTaskCap > 0) {
+      remainingPercent = Math.max(0, Math.round(((plan.dailyTaskCap - usedToday) / plan.dailyTaskCap) * 100))
+    }
   } else if (plan.quotaKind === 'daily') {
-    remainingPercent =
-      totalTokens > 0
-        ? Math.max(0, Math.min(100, Number(((remainingTokens / totalTokens) * 100).toFixed(1))))
-        : 100
+    // 每日配额核心依据是任务次数 (dailyTaskCap);未设上限时保持未知态
+    if (plan.dailyTaskCap > 0) {
+      remainingPercent = Math.max(0, Math.round(((plan.dailyTaskCap - usedToday) / plan.dailyTaskCap) * 100))
+    }
+    if (override?.remainingTokens !== undefined) {
+      // G5-02 模式 B:显式剩余 Token 值原样展示
+      remainingTokens = Math.max(0, override.remainingTokens)
+    } else if (totalTokens && totalTokens > 0) {
+      remainingTokens = Math.max(0, totalTokens - cycleStats.usedTokens)
+    }
   } else {
-    const taskPercent =
-      plan.dailyTaskCap > 0
-        ? Math.max(0, Math.round(((plan.dailyTaskCap - usedToday) / plan.dailyTaskCap) * 100))
-        : 100
-    remainingPercent =
-      totalTokens > 0
-        ? Math.max(0, Math.min(100, Math.round((remainingTokens / totalTokens) * 100)))
-        : taskPercent
+    // subscription 订阅制:无 Token 总量且无每日上限时保持未知态
+    if (override?.remainingTokens !== undefined) {
+      // G5-02 模式 B:显式剩余 Token 值原样展示
+      remainingTokens = Math.max(0, override.remainingTokens)
+      if (totalTokens && totalTokens > 0) {
+        remainingPercent = Math.max(0, Math.min(100, Math.round((remainingTokens / totalTokens) * 100)))
+      }
+    } else if (totalTokens && totalTokens > 0) {
+      remainingTokens = Math.max(0, totalTokens - cycleStats.usedTokens)
+      remainingPercent = Math.max(0, Math.min(100, Math.round((remainingTokens / totalTokens) * 100)))
+    } else if (plan.dailyTaskCap > 0) {
+      remainingPercent = Math.max(0, Math.round(((plan.dailyTaskCap - usedToday) / plan.dailyTaskCap) * 100))
+    }
   }
 
   return {
     usedToday,
-    usedTokensToday: stats.usedTokens,
-    usedCreditsToday: stats.usedCredits,
-    cachedTokensToday: stats.cachedTokens,
-    cacheHitRateToday: stats.cacheHitRate,
+    // 今日口径(独立保留,tooltip 与渲染层"今日约 X 点"文案的事实源)
+    usedTokensToday: todayStats.usedTokens,
+    usedCreditsToday: todayStats.usedCredits,
+    cachedTokensToday: todayStats.cachedTokens,
+    cacheHitRateToday: todayStats.cacheHitRate,
+    // G5-02:周期口径累计(余量计算的事实源),tooltip 与"今日"口径区分
+    usedTokensCycle: cycleStats.usedTokens,
+    usedCreditsCycle: cycleStats.usedCredits,
     remainingCredits,
     remainingTokens,
     remainingPercent,
     totalCredits,
     totalTokens,
+    isOverridden: !!override,
   }
 }
+
+/** computeAgentQuotaAndUsage 的返回类型(缓存 Map 的值类型复用) */
+type AgentQuotaResult = ReturnType<typeof computeAgentQuotaAndUsage>
 
 /** 按契约注册全部 IPC 通道;handler 只做参数适配,业务规则都在 core */
 export function registerIpcHandlers(ctx: AppContext): void {
@@ -159,6 +293,14 @@ export function registerIpcHandlers(ctx: AppContext): void {
 
   // ---- agents ----
   // 列表组装口径只维护一份:agents:list 与 agents:rescan 共用
+  // R03:buildAgentViews 的 quota 结果按「本地日」缓存;usage:get 命中当日缓存直接复用,
+  // 不再重复执行 computeAgentQuotaAndUsage(zcode 每次都要开本地 sqlite 读模型用量)。
+  // 任务事件触发的 agents:list 重拉会刷新缓存,usage:get 与侧栏展示因此严格同源。
+  let quotaCache: {
+    day: string
+    byAgent: Map<string, AgentQuotaResult>
+  } | null = null
+
   const buildAgentViews = async (): Promise<AgentView[]> => {
     const day = today()
     const now = new Date()
@@ -168,8 +310,10 @@ export function registerIpcHandlers(ctx: AppContext): void {
     const healths = await Promise.all(
       profiles.map((profile) => ctx.health.check(profile.id).catch(() => undefined)),
     )
-    return profiles.map((profile, index) => {
+    const quotaByAgent = new Map<string, AgentQuotaResult>()
+    const views = profiles.map((profile, index) => {
       const quota = computeAgentQuotaAndUsage(ctx, profile, day, todayStartMs)
+      quotaByAgent.set(profile.id, quota)
       return {
         id: profile.id,
         label: profile.label,
@@ -194,11 +338,30 @@ export function registerIpcHandlers(ctx: AppContext): void {
         usedTokensToday: quota.usedTokensToday,
         usedCreditsToday: quota.usedCreditsToday,
         cacheHitRateToday: quota.cacheHitRateToday,
+        // G5-02:周期口径消耗,tooltip 区分"今日/周期"
+        usedTokensCycle: quota.usedTokensCycle,
+        usedCreditsCycle: quota.usedCreditsCycle,
+        isOverridden: quota.isOverridden,
+        totalCredits: quota.totalCredits,
+        totalTokens: quota.totalTokens,
       }
     })
+    // R03:缓存本批 quota(按日失效),供 usage:get 复用免双算
+    quotaCache = { day, byAgent: quotaByAgent }
+    return views
   }
 
   ipcMain.handle('agents:list', (): Promise<AgentView[]> => buildAgentViews())
+
+  ipcMain.handle('quota:get', () => {
+    const day = today()
+    const now = new Date()
+    const todayStartMs = new Date(now.getFullYear(), now.getMonth(), now.getDate()).getTime()
+    return ctx.registry.list().map((profile) => ({
+      agentId: profile.id,
+      ...computeAgentQuotaAndUsage(ctx, profile, day, todayStartMs),
+    }))
+  })
 
   ipcMain.handle('agents:rescan', async (): Promise<AgentView[]> => {
     // 重扫幂等且保留启停状态(以 agents 表落库为准),完成后按最新注册表组装列表
@@ -260,7 +423,13 @@ export function registerIpcHandlers(ctx: AppContext): void {
     // 全局序维持 createdAt 倒序(P0-2 复审):compareTaskOrder 是组内良构序,orderIndex 是组内
     // 连续值——若在此全局应用,任一组拖过一次后其余未排序组的任务会在"全部"视图整体后置,
     // 未手动排序的组将失去创建时间倒序。手动序由渲染层在分组子序列上应用(TaskList.visible)。
-    return tasks.sort((a, b) => b.createdAt - a.createdAt)
+    const sorted = tasks.sort((a, b) => b.createdAt - a.createdAt)
+    // G5-05:附带排队追问数量(契约层此前无数据,渲染层无法在任务列表标识队列)
+    const counts = ctx.orchestrator.getFollowupCounts()
+    return sorted.map((task) => {
+      const followupCount = counts.get(task.id)
+      return followupCount ? { ...task, followupCount } : task
+    })
   })
 
   ipcMain.handle('tasks:get', (_e, taskId: string) => ctx.store.getTask(taskId) ?? null)
@@ -280,13 +449,19 @@ export function registerIpcHandlers(ctx: AppContext): void {
     return submitDedup(ctx, dto)
   })
 
-  ipcMain.handle('tasks:submit-batch', async (_e, dtos: SubmitTaskDto[]): Promise<TaskRecord[]> => {
-    // 同策略批量入队:逐条走同一闸门,超限异常抛给渲染层提示
+  ipcMain.handle('tasks:submit-batch', async (_e, dtos: SubmitTaskDto[]): Promise<BatchSubmitResult> => {
+    // G5-07:per-item 容错——单行失败(参数非法/去重命中)收集进 errors,不中断剩余行;
+    // 返回 {created, errors} 供渲染层汇总"已入队 N 条,失败 M 条"
     const created: TaskRecord[] = []
-    for (const dto of dtos) {
-      created.push(await submitDedup(ctx, dto))
+    const errors: Array<{ index: number; message: string }> = []
+    for (let i = 0; i < dtos.length; i++) {
+      try {
+        created.push(await submitDedup(ctx, dtos[i]!))
+      } catch (e) {
+        errors.push({ index: i, message: e instanceof Error ? e.message : String(e) })
+      }
     }
-    return created
+    return { created, errors }
   })
 
   ipcMain.handle('tasks:retry', (_e, taskId: string): TaskRecord => {
@@ -384,7 +559,9 @@ export function registerIpcHandlers(ctx: AppContext): void {
   })
 
   ipcMain.handle('tasks:cancel', (_e, taskId: string, clearFollowups?: boolean) => {
-    return ctx.orchestrator.cancel(taskId, clearFollowups)
+    // R07:终止只停当前轮——IPC 层缺省按 false 保留排队追问(打断发送显式传 false 不受影响);
+    // 批量删除继续依赖 orchestrator.cancel 签名默认 true 在删除时清队列,防止 followupQueues 留孤儿键
+    return ctx.orchestrator.cancel(taskId, clearFollowups ?? false)
   })
 
   ipcMain.handle('tasks:mark-failed', (_e, taskId: string, reason?: string) => {
@@ -399,7 +576,8 @@ export function registerIpcHandlers(ctx: AppContext): void {
   ipcMain.handle('tasks:batch-cancel', (_e, taskIds: string[]) => {
     let count = 0
     for (const id of taskIds) {
-      if (ctx.orchestrator.cancel(id)) count++
+      // R07:批量终止同样只停任务不清队列(显式 false,不踩 orchestrator.cancel 签名默认 true)
+      if (ctx.orchestrator.cancel(id, false)) count++
     }
     return count
   })
@@ -411,6 +589,7 @@ export function registerIpcHandlers(ctx: AppContext): void {
       if (!task) continue
       if (task.state === 'running') continue // 运行中不可删,先取消
       // queued 必须先出队再删:否则调度器稍后放行会把已删任务重新落库"复活"
+      // (R07:此处依赖 cancel 签名默认 clearFollowups=true,删除时一并清掉追问队列)
       ctx.orchestrator.cancel(id)
       // 派生工作区随任务一并清理,避免删了任务留下孤儿目录等保留期兜底
       for (const row of ctx.workspaces.rowsForTask(id)) {
@@ -438,7 +617,9 @@ export function registerIpcHandlers(ctx: AppContext): void {
       attachments,
       toolPolicy: parent.toolPolicy,
       sessionId: target.id === parent.agentId ? parent.sessionId : undefined,
-      origin: 'failover',
+      // G5-08:右键/详情页的"换客户端重跑"是用户主动操作,origin 记 panel(徽标显示"面板"),
+      // 不再冒充系统自动降级(failover 观察者路径保持显式 'failover')
+      origin: 'panel',
       attempt: parent.attempt + 1,
       retryOf: parent.id,
     })
@@ -458,9 +639,13 @@ export function registerIpcHandlers(ctx: AppContext): void {
     const day = today()
     const now = new Date()
     const todayStartMs = new Date(now.getFullYear(), now.getMonth(), now.getDate()).getTime()
+    // R03:命中当日缓存复用 agents:list 刚算好的 quota,不再重复执行 computeAgentQuotaAndUsage;
+    // 仅在尚无当日缓存(启动后先调 usage)或跨零点(day 失效)时现算
+    const cached = quotaCache?.day === day ? quotaCache.byAgent : null
     return ctx.registry.list().map((profile) => {
       const usage = ctx.store.usageOf(profile.id, day)
-      const quota = computeAgentQuotaAndUsage(ctx, profile, day, todayStartMs)
+      const quota =
+        cached?.get(profile.id) ?? computeAgentQuotaAndUsage(ctx, profile, day, todayStartMs)
       return {
         agentId: profile.id,
         label: profile.label,
@@ -496,6 +681,24 @@ export function registerIpcHandlers(ctx: AppContext): void {
     if (next.hotkey !== prev.hotkey) ctx.applyHotkey(next.hotkey)
     return ctx.getConfig()
   })
+
+  // G5-02:单客户端套餐校准(设置页写入,含"直接填当前剩余值"模式 B);
+  // patch=null 清除该校准恢复注册默认。写入即广播,侧栏余量立即按新校准呈现。
+  ipcMain.handle(
+    'settings:set-plan-override',
+    (_e, agentId: string, patch: PlanOverrideConfig | null): AppConfig => {
+      const prev = ctx.getConfig()
+      const planOverrides: Record<string, PlanOverrideConfig> = { ...(prev.planOverrides ?? {}) }
+      if (patch) {
+        planOverrides[agentId] = { ...planOverrides[agentId], ...patch }
+      } else {
+        delete planOverrides[agentId]
+      }
+      ctx.saveConfig({ ...prev, planOverrides })
+      ctx.notify('agents:changed')
+      return ctx.getConfig()
+    },
+  )
 
   ipcMain.handle('scheduler:pause', (_e, paused: boolean) => {
     ctx.orchestrator.setPaused(paused)
@@ -685,7 +888,14 @@ function matchesFilter(task: TaskRecord, filter?: TaskFilterDto): boolean {
   if (filter.agentId && task.agentId !== filter.agentId) return false
   if (filter.state && task.state !== filter.state) return false
   if (filter.projectId && task.projectId !== filter.projectId) return false
-  if (filter.search && !task.prompt.includes(filter.search)) return false
+  // G5-05:search 口径与渲染层(TaskList toLowerCase+含标题)逐字对齐——
+  // 大小写不敏感且匹配标题,避免有任务运行期重拉时按旧口径收窄列表
+  if (filter.search) {
+    const q = filter.search.toLowerCase()
+    const hit =
+      task.prompt.toLowerCase().includes(q) || (task.title ?? '').toLowerCase().includes(q)
+    if (!hit) return false
+  }
   if (filter.sinceDay) {
     const day = localDayOf(task.createdAt)
     if (day < filter.sinceDay) return false

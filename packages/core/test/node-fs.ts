@@ -4,6 +4,7 @@ import {
   cpSync,
   existsSync,
   mkdirSync,
+  readFileSync,
   readdirSync,
   rmSync,
   statSync,
@@ -49,6 +50,14 @@ export class TempFs implements FileSystem {
 
   remove(path: string): void {
     rmSync(path, { recursive: true, force: true })
+  }
+
+  readTextFile(path: string): string {
+    return readFileSync(path, 'utf8')
+  }
+
+  writeTextFile(path: string, content: string): void {
+    writeFileSync(path, content, 'utf8')
   }
 }
 

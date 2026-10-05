@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, onMounted, ref } from 'vue'
+import { computed, onMounted, ref, watch } from 'vue'
 
 export interface SlashCommand {
   cmd: string
@@ -83,6 +83,12 @@ const filtered = computed(() => {
   )
 })
 
+// G1-05:过滤结果变化即把高亮重置到首项——旧索引在新结果里可能越界,
+// 面板开着(v-if="filtered.length > 0" 仍渲染)但 Enter 静默无效;Esc 重开也不再带回旧索引
+watch(filtered, () => {
+  selectedIndex.value = 0
+})
+
 function onKeydown(event: KeyboardEvent): boolean {
   if (filtered.value.length === 0) return false
   if (event.key === 'ArrowDown') {
@@ -98,7 +104,8 @@ function onKeydown(event: KeyboardEvent): boolean {
   }
   if (event.key === 'Enter' || event.key === 'Tab') {
     event.preventDefault()
-    const item = filtered.value[selectedIndex.value]
+    // G1-05:越界兜底到首项,任何过滤状态下 Enter 恒有确定落点
+    const item = filtered.value[selectedIndex.value] ?? filtered.value[0]
     if (item) emit('select', item)
     return true
   }

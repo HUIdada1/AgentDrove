@@ -17,6 +17,11 @@ export interface AgentCapabilities {
   modelSwitch: ModelSwitchKind
   /** 附件透传能力(不支持的客户端派发前提示,不静默丢弃) */
   attachments: boolean
+  /**
+   * 思考档位能力(P0-4):true = 支持按档位下发(zcode reasoningLevel / codex effort),
+   * false/缺省 = 不支持,渲染层隐藏"思考"下拉;探测登记时按客户端写入,随档案透传。
+   */
+  reasoningEffort?: boolean
 }
 
 export type QuotaKind = 'daily' | 'credits' | 'subscription'
@@ -81,7 +86,7 @@ export type TaskMode = 'build' | 'edit' | 'plan' | 'yolo'
  * (zcode 按 optionSpecs.reasoningLevel.values 取位,codex 映射 model_reasoning_effort);
  * 任务记录只存请求档位,实际生效档位以事件流 warning/info 为准。
  */
-export type ReasoningEffort = 'minimal' | 'low' | 'medium' | 'high'
+export type ReasoningEffort = 'off' | 'minimal' | 'low' | 'medium' | 'high'
 
 export type TaskOrigin =
   | 'panel' // 主面板发布框
@@ -232,4 +237,6 @@ export interface TaskRecord {
   attempt: number
   /** 本次对话消耗统计与缓存命中率 */
   usage?: TaskUsage
+  /** 排队追问数量(G5-05):不参与持久化,仅 tasks:list DTO 组装时附带,供任务列表展示队列标识 */
+  followupCount?: number
 }

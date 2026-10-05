@@ -15,7 +15,9 @@ const modalTitle = computed(() => {
 })
 
 function pinToSidebar(): void {
-  store.detailCollapsed.value = false
+  // G2-05:收起态经 toggle 展开——内部走 expandGuard 阶梯守卫,与会话列「展开详情」
+  // 行为一致(窄窗先收侧栏/压任务列,仍不足则拒绝并 toast);已展开时直接关弹窗即可
+  if (store.detailCollapsed.value) store.toggleDetailCollapsed()
   store.closeDetailModal()
 }
 </script>

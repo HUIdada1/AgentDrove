@@ -12,6 +12,7 @@ import type {
   LaunchChannel,
   ModelPreset,
   PlanInfo,
+  PlanOverrideConfig,
   Project,
   StoredEvent,
   TaskRecord as CoreTaskRecord,
@@ -27,6 +28,7 @@ export type {
   LaunchChannel,
   ModelPreset,
   PlanInfo,
+  PlanOverrideConfig,
   Project,
   StoredEvent,
   TaskUsage,
@@ -38,8 +40,8 @@ export type {
  * 渲染层经 shared 视图先行获得类型;core 落地后两处结构一致(同名可选同型,继承合法)。
  */
 
-/** 思考档位(P0-4):DTO 用通用四档,驱动侧各自映射到 CLI 实际参数(zcode reasoningLevel / codex effort) */
-export type ReasoningEffort = 'minimal' | 'low' | 'medium' | 'high'
+/** 思考档位(P0-4):DTO 用通用五档('off' 显式关闭思考),驱动侧各自映射到 CLI 实际参数 */
+export type ReasoningEffort = 'off' | 'minimal' | 'low' | 'medium' | 'high'
 
 export interface TaskRecord extends CoreTaskRecord {
   /** 组内手动排序位(P0-2):仅由 core 维护;空缺时该组仍按 createdAt 倒序 */
@@ -49,17 +51,22 @@ export interface TaskRecord extends CoreTaskRecord {
 }
 
 /**
- * 分组内展示序(P0-2):orderIndex 有值者按值升序在前(手动区),
- * 空缺者按 createdAt 倒序随后——旧数据零迁移成本,orderIndex 仅在拖过/移过之后产生。
+ * 分组内展示序(P0-2):未手动排序者按 createdAt 倒序置顶在前(新建可见性优先),
+ * 已排定者按 orderIndex 升序随后——旧数据零迁移成本,orderIndex 仅在拖过/移过之后产生。
  * 注意:这是【组内良构序】,orderIndex 是组内连续值;跨分组的全局列表序必须维持
  * createdAt 倒序,手动序只在按组过滤/分组渲染的子序列上应用
  * (main tasks:list 与 renderer TaskList.visible 共用此单一事实源)。
  */
 export function compareTaskOrder(a: TaskRecord, b: TaskRecord): number {
-  return (
-    (a.orderIndex ?? Number.MAX_SAFE_INTEGER) - (b.orderIndex ?? Number.MAX_SAFE_INTEGER) ||
-    b.createdAt - a.createdAt
-  )
+  const aHasOrder = a.orderIndex !== undefined && a.orderIndex !== null
+  const bHasOrder = b.orderIndex !== undefined && b.orderIndex !== null
+  if (aHasOrder && bHasOrder) {
+    return (a.orderIndex! - b.orderIndex!) || (b.createdAt - a.createdAt)
+  }
+  // 新建/未手动排序的任务默认置顶展示在已排定序列之前,按创建时间倒序排
+  if (!aHasOrder && bHasOrder) return -1
+  if (aHasOrder && !bHasOrder) return 1
+  return b.createdAt - a.createdAt
 }
 
 export interface FollowupQueueItem extends CoreFollowupQueueItem {
@@ -241,6 +248,14 @@ export interface AgentView {
   usedCreditsToday?: number
   /** 今日平均缓存命中率 (0-100) */
   cacheHitRateToday?: number
+  /** G5-02:周期累计消耗 Token 数(周期起点=最早任务或今日零点),tooltip 与"今日"口径区分 */
+  usedTokensCycle?: number
+  /** G5-02:周期累计消耗点数 */
+  usedCreditsCycle?: number
+  /** 用户是否手工校准了套餐 (Plan Override) */
+  isOverridden?: boolean
+  totalCredits?: number
+  totalTokens?: number
 }
 
 export interface SubmitTaskDto {
@@ -269,6 +284,16 @@ export interface SubmitTaskDto {
 export interface MoveTaskDto {
   taskId: string
   projectId: string
+}
+
+/**
+ * 批量派发回执(G5-07):per-item 容错——单行失败(参数非法/去重命中)不中断剩余行,
+ * 失败行下标与原因收集进 errors,渲染层据此汇总"已入队 N 条,失败 M 条"。
+ */
+export interface BatchSubmitResult {
+  created: TaskRecord[]
+  /** 失败行清单;index 对应入参 dtos 的下标 */
+  errors: Array<{ index: number; message: string }>
 }
 
 /**
@@ -412,7 +437,7 @@ export interface AgentDroveApi extends PushEvents {
   tasksGet(taskId: string): Promise<TaskRecord | null>
   tasksEventsPage(query: EventsPageDto): Promise<StoredEvent[]>
   tasksSubmit(dto: SubmitTaskDto): Promise<TaskRecord>
-  tasksSubmitBatch(dtos: SubmitTaskDto[]): Promise<TaskRecord[]>
+  tasksSubmitBatch(dtos: SubmitTaskDto[]): Promise<BatchSubmitResult>
   tasksRetry(taskId: string): Promise<TaskRecord>
   tasksContinue(
     taskId: string,
@@ -456,9 +481,19 @@ export interface AgentDroveApi extends PushEvents {
   launchApp(agentId: string): Promise<LaunchChannel>
   // usage:get
   usageGet(): Promise<UsageView[]>
+  /** 极速额度查询(不触发慢速 CLI 探活),用于实时事件增量刷新 */
+  quotaGet?(): Promise<Array<Partial<AgentView> & { agentId: string }>>
   // settings:get/update(含 schedulerPaused)
   settingsGet(): Promise<AppConfig>
   settingsUpdate(patch: Partial<AppConfig>): Promise<AppConfig>
+  /**
+   * settings:set-plan-override(G5-02):单客户端套餐校准,patch=null 清除该校准恢复注册默认;
+   * 支持显式剩余值模式(直接填当前剩余,规避启用前用量漏计),返回最新 AppConfig。
+   */
+  settingsSetPlanOverride(
+    agentId: string,
+    patch: PlanOverrideConfig | null,
+  ): Promise<AppConfig>
   schedulerPause(paused: boolean): Promise<void>
   // logs:tail
   logsTail(limit?: number): Promise<string[]>

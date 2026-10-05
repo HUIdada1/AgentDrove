@@ -157,8 +157,9 @@ export class CodexDriver implements AgentDriver {
       ...this.resolveModelArg(modelId, agent),
     ]
     if (reasoningEffort) {
-      // 覆盖值按 TOML 解析失败时回落字符串,bare 值可避开 shell 引号剥除问题
-      args.push('--config', `model_reasoning_effort=${reasoningEffort}`)
+      // off 显式关闭思考映射为 none;其余档位直通 low/medium/high
+      const effortVal = reasoningEffort === 'off' ? 'none' : reasoningEffort
+      args.push('--config', `model_reasoning_effort=${effortVal}`)
     }
     if (input.sessionId) {
       args.push('resume', input.sessionId)

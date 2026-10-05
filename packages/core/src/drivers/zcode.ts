@@ -247,7 +247,11 @@ export function pickReasoningLevel(
 ): string | undefined {
   if (!values || values.length === 0) return undefined
   if (effort === undefined) return values.at(-1)
-  const position: Record<ReasoningEffort, number> = {
+  if (effort === 'off') {
+    const noneOpt = values.find((v) => /^(off|none|false|disabled)$/i.test(v))
+    return noneOpt ?? undefined
+  }
+  const position: Record<Exclude<ReasoningEffort, 'off'>, number> = {
     minimal: 0,
     low: 1 / 3,
     medium: 2 / 3,

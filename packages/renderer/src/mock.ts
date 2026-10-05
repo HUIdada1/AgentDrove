@@ -195,9 +195,17 @@ export function installDevMock(): void {
       return task
     },
     tasksSubmitBatch: async (dtos) => {
-      const out: TaskRecord[] = []
-      for (const dto of dtos) out.push(await mock.tasksSubmit(dto))
-      return out
+      // G5-07:per-item 容错,与主进程 handlers 同构——单行失败收集进 errors,不中断剩余行
+      const created: TaskRecord[] = []
+      const errors: Array<{ index: number; message: string }> = []
+      for (let i = 0; i < dtos.length; i++) {
+        try {
+          created.push(await mock.tasksSubmit(dtos[i]!))
+        } catch (e) {
+          errors.push({ index: i, message: e instanceof Error ? e.message : String(e) })
+        }
+      }
+      return { created, errors }
     },
     tasksRetry: async (taskId) => {
       const parent = findTask(taskId)
@@ -356,6 +364,15 @@ export function installDevMock(): void {
     settingsGet: async () => currentConfig,
     settingsUpdate: async (patch) => {
       currentConfig = { ...currentConfig, ...patch }
+      return currentConfig
+    },
+    // G5-02/G4-06:套餐校准,语义与 main handlers 一致——patch 合并进该客户端校准,
+    // null 删除恢复注册默认;mock 只落 planOverrides,余量折算由真实链路(core)计算
+    settingsSetPlanOverride: async (agentId, patch) => {
+      const overrides = { ...(currentConfig.planOverrides ?? {}) }
+      if (patch) overrides[agentId] = { ...overrides[agentId], ...patch }
+      else delete overrides[agentId]
+      currentConfig = { ...currentConfig, planOverrides: overrides }
       return currentConfig
     },
     schedulerPause: async (paused) => {

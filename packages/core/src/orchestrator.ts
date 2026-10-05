@@ -121,6 +121,8 @@ export class Orchestrator {
   private readonly controllers = new Map<string, AbortController>()
   /** 任务运行中/排队中的追问消息队列(任务完成后自动接续派发) */
   private readonly followupQueues = new Map<string, FollowupQueueItem[]>()
+  /** 已提示过 daily-cap 阻塞的任务(G5-04):任务记录随终态回收,重复入队允许再提示一次 */
+  private readonly capNotified = new WeakSet<TaskRecord>()
   /** 已放行但还没进入 running 的任务(健康闸/基线钩子窗口);此窗口内仍算占槽 */
   private readonly starting = new Set<string>()
   private readonly seqCursors = new Map<string, number>()
@@ -295,7 +297,7 @@ export class Orchestrator {
       }
       throw new Error('任务运行中:请等待完成或先取消,再继续对话')
     }
-    return this.submit({
+    const next = this.submit({
       agentId: parent.agentId,
       prompt,
       cwd: parent.cwd,
@@ -310,6 +312,15 @@ export class Orchestrator {
       origin: 'panel',
       skills: options?.skills ?? parent.skills,
     })
+    // 降级续接标注(G5-06):父任务无会话 id 时按 -c 续接工作区最近会话,
+    // 接到的可能完全是别的任务的上下文——写一条落库信息事件明示,与"接续自"同构呈现
+    if (next.resumeLatest && !next.sessionId) {
+      this.recordEvent(next.id, {
+        kind: 'info',
+        text: '未携带会话记录,已续接该工作区最近会话(可能与预期会话不同,请核对上下文)',
+      })
+    }
+    return next
   }
 
   /** 加入排队消息:当父任务完成后自动接续执行;overrides 为本轮覆盖参数(P0-6),缺省沿用父任务 */
@@ -335,6 +346,7 @@ export class Orchestrator {
     const queue = this.followupQueues.get(taskId) ?? []
     queue.push(item)
     this.followupQueues.set(taskId, queue)
+    this.persistFollowups(taskId)
     this.journal.record('task.followup.enqueue', parent.origin, {
       agentId: parent.agentId,
       taskId: parent.id,
@@ -349,6 +361,7 @@ export class Orchestrator {
     const item = queue?.find((i) => i.id === followupId)
     if (!item) throw new Error(`unknown followup: ${followupId} on task ${taskId}`)
     item.prompt = prompt.trim()
+    this.persistFollowups(taskId)
     const parent = this.taskOf(taskId)
     if (parent) {
       this.journal.record('task.followup.update', parent.origin, {
@@ -378,6 +391,7 @@ export class Orchestrator {
     } else {
       queue.splice(queue.findIndex((i) => i.id === beforeFollowupId), 0, item!)
     }
+    this.persistFollowups(taskId)
     const parent = this.taskOf(taskId)
     if (parent) {
       this.journal.record('task.followup.reorder', parent.origin, {
@@ -392,6 +406,15 @@ export class Orchestrator {
     return [...(this.followupQueues.get(taskId) ?? [])]
   }
 
+  /** 各任务的排队追问数量(G5-05):tasks:list DTO 组装用,空队列不计入 */
+  getFollowupCounts(): Map<string, number> {
+    const counts = new Map<string, number>()
+    for (const [taskId, queue] of this.followupQueues) {
+      if (queue.length > 0) counts.set(taskId, queue.length)
+    }
+    return counts
+  }
+
   removeFollowup(taskId: string, followupId: string): boolean {
     const queue = this.followupQueues.get(taskId)
     if (!queue) return false
@@ -399,6 +422,8 @@ export class Orchestrator {
     if (idx >= 0) {
       queue.splice(idx, 1)
       if (queue.length === 0) this.followupQueues.delete(taskId)
+      // 队列空时落库空数组,防止重启后已删项复活(G5-01)
+      this.persistFollowups(taskId)
       return true
     }
     return false
@@ -406,6 +431,8 @@ export class Orchestrator {
 
   clearFollowups(taskId: string): void {
     this.followupQueues.delete(taskId)
+    // 落库空数组,防止重启后已清空队列复活(G5-01)
+    this.persistFollowups(taskId)
   }
 
   /**
@@ -423,6 +450,9 @@ export class Orchestrator {
     target.push(...queue)
     this.followupQueues.set(toTaskId, target)
     this.followupQueues.delete(fromTaskId)
+    // 双端同步落库:from 清空防复活,to 写入防丢失(G5-01)
+    this.persistFollowups(toTaskId)
+    this.persistFollowups(fromTaskId)
     return queue.length
   }
 
@@ -477,6 +507,14 @@ export class Orchestrator {
     return this.live.get(taskId) ?? this.deps.repo.getTask(taskId)
   }
 
+  /**
+   * 追问队列同步落库(G5-01):每个内存变更点后调用,以"当前内存态"全量替换该任务的库行;
+   * repo 未实现(内存仓库测试)时经可选链跳过。队列不存在落空数组,防止重启复活。
+   */
+  private persistFollowups(taskId: string): void {
+    this.deps.repo.replaceFollowups?.(taskId, this.followupQueues.get(taskId) ?? [])
+  }
+
   private recover(): void {
     const resumedAgents: AgentId[] = []
     for (const task of this.deps.repo.allTasks()) {
@@ -487,6 +525,13 @@ export class Orchestrator {
       } else if (task.state === 'queued') {
         this.enqueue(task)
         if (!resumedAgents.includes(task.agentId)) resumedAgents.push(task.agentId)
+      }
+    }
+    // 崩溃恢复内存队列(G5-01):任务记录已重载,排队追问随之复位,原序继续自动接续
+    const persisted = this.deps.repo.allFollowups?.()
+    if (persisted) {
+      for (const [taskId, items] of persisted) {
+        this.followupQueues.set(taskId, items)
       }
     }
     if (resumedAgents.length > 0) {
@@ -540,6 +585,15 @@ export class Orchestrator {
           decision.reason === 'interval' ||
           decision.reason === 'daily-cap'
         ) {
+          // daily-cap 是客户端级阻塞:任务将长时间停留"排队中",写一条去重的用户可见
+          // 原因(信息事件中性呈现),避免误判应用卡死或反复点击(G5-04)
+          if (decision.reason === 'daily-cap' && !this.capNotified.has(task)) {
+            this.capNotified.add(task)
+            this.recordEvent(task.id, {
+              kind: 'info',
+              text: '今日派发额度已满,任务保持排队,零点后自动派发',
+            })
+          }
           // 客户端级阻塞:整队让位,并安排节拍到期后的重试
           if (decision.retryInMs !== undefined) {
             scan.earliestRetryMs =
@@ -817,10 +871,14 @@ export class Orchestrator {
       this.followupQueues.set(nextTask.id, queue)
     }
     this.followupQueues.delete(completedTask.id)
-    // 在新任务事件流头部写一条"接续自"message 事件落库,会话链可回溯(P0-6/D2)
+    // 内联迁移同步落库(G5-01):completedTask 传 [] 防止已消费队列重启后复活(重复执行),
+    // nextTask 传剩余 queue 防止新任务队列丢失;两处缺一不可
+    this.persistFollowups(completedTask.id)
+    this.persistFollowups(nextTask.id)
+    // 在新任务事件流头部写一条"接续自"info 事件落库,会话链可回溯(P0-6/D2);
+    // R16:系统提示改 kind:'info' 中性呈现,不再借 message/agent 渠道冒充 Agent 正式发言
     this.recordEvent(nextTask.id, {
-      kind: 'message',
-      channel: 'agent',
+      kind: 'info',
       text: `接续自 #${completedTask.id}`,
     })
     // 接续可见推送(P0-6/D2):渲染层据此切换选中并提示去处

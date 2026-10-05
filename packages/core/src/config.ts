@@ -33,6 +33,21 @@ export interface UpdateConfig {
   autoDownload: boolean
 }
 
+/**
+ * 单客户端套餐校准(G5-02):用户在设置页对注册默认值的覆盖。
+ * remainingCredits/remainingTokens 为"显式剩余值"模式——zcode 等本地口径
+ * 无法对齐启用本应用之前的用量时,由用户直接填当前剩余,余量按此展示。
+ */
+export interface PlanOverrideConfig {
+  quotaKind?: 'credits' | 'daily' | 'subscription'
+  totalCredits?: number
+  totalTokens?: number
+  dailyTaskCap?: number
+  remainingCredits?: number
+  remainingTokens?: number
+  calibratedAt?: number
+}
+
 export interface AppConfig {
   task: {
     defaultTimeoutMs: number
@@ -53,6 +68,8 @@ export interface AppConfig {
   /** --mode yolo 默认禁止,Danger 区二次确认后开启 */
   danger: { allowYolo: boolean }
   update: UpdateConfig
+  /** 按 agentId 的套餐校准(G5-02);设置页写入,组装档案与额度计算时优先应用 */
+  planOverrides?: Record<string, PlanOverrideConfig>
 }
 
 export const DEFAULT_CONFIG: AppConfig = {
