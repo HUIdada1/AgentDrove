@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, ref } from 'vue'
+import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
 import { useAppStore, setTheme } from '../stores/app'
 import GlassButton from '../ui/GlassButton.vue'
 import GlassMeter from '../ui/GlassMeter.vue'
@@ -21,6 +21,20 @@ const renameText = ref('')
 const removeTarget = ref<Project | null>(null)
 /** 客户端空态「重新扫描」进行中标记(R05) */
 const rescanning = ref(false)
+
+/** 工作区顶部切换胶囊弹层状态 */
+const showWsDropdown = ref(false)
+const railRef = ref<HTMLElement | null>(null)
+
+function onGlobalClick(e: MouseEvent): void {
+  const target = e.target as HTMLElement
+  if (!target.closest('.workspace-bar')) {
+    showWsDropdown.value = false
+  }
+}
+
+onMounted(() => window.addEventListener('click', onGlobalClick))
+onBeforeUnmount(() => window.removeEventListener('click', onGlobalClick))
 
 /** 任务卡拖到工作区项上的悬停高亮(P0-2) */
 const dragOverProjectId = ref('')
@@ -386,82 +400,91 @@ function agentDetailTitle(agent: AgentView): string {
 
     <div class="scroll">
       <div v-if="notice" class="notice" @click="notice = ''">{{ notice }}</div>
-      <div class="section-title" v-if="!store.railCollapsed.value">
-        <span>工作区</span>
-        <GlassButton variant="plain" size="sm" title="选择文件夹登记为项目工作区" @click="addProject">
-          ＋ 添加
-        </GlassButton>
-      </div>
-      <div class="workspaces" :class="{ 'has-title': !store.railCollapsed.value }">
+
+      <!-- 顶部工作区环境胶囊:将工作区从平铺列表中剥离，侧栏空间全量让渡给智能体主航道 -->
+      <div class="workspace-bar" :class="{ collapsed: store.railCollapsed.value }">
         <div
-          v-for="project in store.projects.value"
-          :key="project.id"
-          class="ws spot"
-          role="button"
-          tabindex="0"
+          class="ws-capsule glass"
           :class="{
-            picked: store.selectedProjectId.value === project.id,
-            'drop-target': dragOverProjectId === project.id,
+            active: Boolean(store.selectedProjectId.value),
+            'drop-target': dragOverProjectId === (store.selectedProjectId.value ?? DAILY_PROJECT_ID),
           }"
-          :title="wsTitle(project)"
-          @click="pickProject(project)"
-          @keydown.enter="pickProject(project)"
-          @keydown.space.prevent="pickProject(project)"
-          @dragover="onWsDragOver(project, $event)"
-          @dragleave="onWsDragLeave(project, $event)"
-          @drop="onWsDrop(project, $event)"
+          :title="store.selectedProject.value ? `当前工作区: ${store.selectedProject.value.name} (点击切换)` : '全部工作区 (点击切换或投放卡片)'"
+          @click="showWsDropdown = !showWsDropdown"
+          @dragover="onWsDragOver(store.selectedProject.value ?? store.projects.value[0] ?? ({ id: DAILY_PROJECT_ID, name: '日常' } as any), $event)"
+          @dragleave="onWsDragLeave(store.selectedProject.value ?? store.projects.value[0] ?? ({ id: DAILY_PROJECT_ID, name: '日常' } as any), $event)"
+          @drop="onWsDrop(store.selectedProject.value ?? store.projects.value[0] ?? ({ id: DAILY_PROJECT_ID, name: '日常' } as any), $event)"
         >
-          <span class="glyph ws" aria-hidden="true">{{ wsGlyph(project) }}</span>
-          <span v-if="!store.railCollapsed.value" class="meta">
-            <span class="line1">
-              <span class="name">{{ project.name }}</span>
-            </span>
-            <span class="plan" :class="{ unbound: !project.path }">
-              {{ project.path ? pathTail(project.path) : '未绑定 · 默认目录' }}
-            </span>
-            <span class="ops">
-              <GlassButton
-                v-if="project.id === DAILY_PROJECT_ID"
-                variant="ghost"
-                size="sm"
-                :title="project.path ? '解绑目录,回到默认工作区' : '选择文件夹绑定'"
-                @click.stop="toggleDailyBind(project)"
-              >
-                {{ project.path ? '解绑' : '选目录' }}
-              </GlassButton>
-              <template v-if="project.id !== DAILY_PROJECT_ID">
-                <GlassButton variant="ghost" size="sm" title="重命名" @click.stop="startRename(project)">改名</GlassButton>
-                <GlassButton variant="ghost" size="sm" title="移除分组(保留目录)" @click.stop="removeProject(project)">移除</GlassButton>
-              </template>
-            </span>
+          <span class="ws-ico" aria-hidden="true">📁</span>
+          <span v-if="!store.railCollapsed.value" class="ws-label">
+            {{ store.selectedProject.value ? store.selectedProject.value.name : '全部工作区' }}
           </span>
+          <span v-if="!store.railCollapsed.value" class="ws-arrow" :class="{ rotated: showWsDropdown }">▾</span>
         </div>
-        <GlassButton
-          v-if="store.railCollapsed.value"
-          variant="plain"
-          size="sm"
-          class="add-collapsed"
-          title="添加项目工作区"
-          @click="addProject"
-        >
-          ＋
-        </GlassButton>
+
+        <!-- 工作区下拉管理菜单 -->
+        <Transition name="fade-slide">
+          <div v-if="showWsDropdown && !store.railCollapsed.value" class="ws-dropdown glass custom-scroll" @click.stop>
+            <div class="ws-dropdown-header">
+              <span>工作区切换</span>
+              <button class="ws-add-link" type="button" @click="addProject">＋ 新增</button>
+            </div>
+            <div
+              class="ws-drop-item"
+              :class="{ active: store.selectedProjectId.value === null }"
+              @click="store.selectedProjectId.value = null; showWsDropdown = false"
+            >
+              <span class="p-name">📁 全部工作区</span>
+            </div>
+            <div
+              v-for="project in store.projects.value"
+              :key="project.id"
+              class="ws-drop-item"
+              :class="{
+                active: store.selectedProjectId.value === project.id,
+                'drop-target': dragOverProjectId === project.id,
+              }"
+              @click="pickProject(project); showWsDropdown = false"
+              @dragover="onWsDragOver(project, $event)"
+              @dragleave="onWsDragLeave(project, $event)"
+              @drop="onWsDrop(project, $event); showWsDropdown = false"
+            >
+              <div class="p-info">
+                <span class="p-name">{{ project.name }}</span>
+                <span class="p-path">{{ project.path ? pathTail(project.path) : '未绑定目录' }}</span>
+              </div>
+              <div class="p-ops" @click.stop>
+                <button
+                  v-if="project.id === DAILY_PROJECT_ID"
+                  type="button"
+                  class="op-mini"
+                  @click="toggleDailyBind(project)"
+                >
+                  {{ project.path ? '解绑' : '绑定' }}
+                </button>
+                <template v-else>
+                  <button type="button" class="op-mini" @click="startRename(project)">改名</button>
+                  <button type="button" class="op-mini danger" @click="removeProject(project)">移除</button>
+                </template>
+              </div>
+            </div>
+          </div>
+        </Transition>
       </div>
 
       <div class="section-title" v-if="!store.railCollapsed.value">
-        <span>客户端</span>
-        <!-- R05/G1-01:显式「全部对话」入口——清除会话绑定(任务列筛选由列头下拉独立控制) -->
+        <span>智能体列表</span>
         <GlassButton
           variant="plain"
           size="sm"
-          title="取消当前对话绑定,回到全部对话"
+          title="取消当前对话绑定,回到全局对话"
           @click="clearAgentContext"
         >
           全部对话
         </GlassButton>
       </div>
-      <!-- R05/G1-06:客户端空态两态区分——探测中(agentsLoaded=false)显示脉冲点与「正在探测客户端…」,
-           探测完成仍为空才显示「未发现客户端 + 重新扫描」,加载态不再伪装成异常态 -->
+
+      <!-- 客户端空态 -->
       <div v-if="store.agents.value.length === 0" class="agents-empty" :class="{ collapsed: store.railCollapsed.value }">
         <template v-if="!store.railCollapsed.value">
           <template v-if="!store.agentsLoaded.value">
@@ -486,6 +509,8 @@ function agentDetailTitle(agent: AgentView): string {
         </GlassButton>
         <i v-else class="probe-dot" aria-hidden="true" title="正在探测客户端…" />
       </div>
+
+      <!-- 智能体列表主航道 -->
       <div class="agents">
         <div
           v-for="agent in store.agents.value"
@@ -505,66 +530,90 @@ function agentDetailTitle(agent: AgentView): string {
           @keydown.space.prevent="pick(agent)"
         >
           <div class="glyph-wrap">
-            <!-- G1-06:客户端上报本地图标时渲染 logo(折叠态亦可辨),否则回落首字母 -->
+            <!-- 现代 SVG 环形进度光环:折叠/展开均清晰展示额度百分比 -->
+            <svg class="avatar-ring" viewBox="0 0 44 44" aria-hidden="true">
+              <circle class="ring-bg" cx="22" cy="22" r="18" />
+              <circle
+                v-if="quotaPct(agent) !== undefined"
+                class="ring-progress"
+                cx="22"
+                cy="22"
+                r="18"
+                :stroke="quotaColor(quotaPct(agent) ?? 100)"
+                :stroke-dasharray="113.1"
+                :stroke-dashoffset="113.1 * (1 - (quotaPct(agent) ?? 100) / 100)"
+              />
+            </svg>
             <img v-if="agent.logoPath" :src="logoUrl(agent)" class="glyph logo" alt="" />
             <span v-else class="glyph" aria-hidden="true">{{ agent.label.slice(0, 1) }}</span>
             <span class="status-dot" :class="healthClass(agent)" :title="agent.health?.reason ?? '未探活'" />
-            <!-- G1-06:额度余量色点——6px 定位左下,与右下 status-dot 错位叠放,折叠态额度不再完全不可见;
-                 评审取色点而非色环,避免与 running-ring 虚线环视觉冲突 -->
-            <i
-              v-if="quotaPct(agent) !== undefined"
-              class="quota-dot"
-              :style="{ background: quotaColor(quotaPct(agent) ?? 100) }"
-            />
             <span v-if="hasRunningTask(agent.id)" class="running-ring" aria-hidden="true" />
           </div>
+
           <span v-if="!store.railCollapsed.value" class="meta">
+            <!-- 阶梯 1: 名称与标签 -->
             <span class="line1">
               <span class="name">{{ agent.label }}</span>
               <span v-if="agent.isOverridden" class="calibrated-tag" title="用户已校准额度">已校准</span>
               <span v-else-if="hasRunningTask(agent.id)" class="running-tag">运行中</span>
               <span v-else class="plan-tag">{{ agent.plan.name || agent.plan.quotaKind }}</span>
             </span>
-            <div class="quota-row">
-              <template v-if="quotaPct(agent) !== undefined">
-                <GlassMeter
-                  :value="quotaPct(agent) ?? 0"
-                  :max="100"
-                  :show-percent="false"
-                  size="sm"
-                  :color="quotaColor(quotaPct(agent) ?? 0)"
+
+            <!-- 阶梯 2: 独立极简进度槽 + 百分比 -->
+            <div class="quota-progress-row">
+              <div class="quota-track">
+                <i
+                  class="quota-fill"
+                  :style="{
+                    width: `${quotaPct(agent) ?? 0}%`,
+                    background: quotaColor(quotaPct(agent) ?? 100),
+                  }"
                 />
-                <span class="quota-pct num">{{ quotaPct(agent) }}%</span>
-              </template>
-              <span v-else class="quota-unknown">未配置额度</span>
+              </div>
+              <span
+                v-if="quotaPct(agent) !== undefined"
+                class="quota-pct-text num"
+                :style="{ color: quotaColor(quotaPct(agent) ?? 100) }"
+              >
+                {{ quotaPct(agent) }}%
+              </span>
+              <span v-else class="quota-pct-text unknown">未配置</span>
             </div>
-            <div class="quota-meta num">
-              <span class="quota-rem" :title="quotaInfo(agent).primaryText">
-                {{ quotaInfo(agent).primaryText }}
+
+            <!-- 阶梯 3: 结构化余量 vs 今日消耗对比 与 刷新 -->
+            <div class="quota-stats-row num">
+              <span class="quota-primary-val" :title="quotaInfo(agent).primaryText">
+                {{ quotaInfo(agent).primaryValue }} {{ quotaInfo(agent).primaryUnit }}
               </span>
-              <span v-if="quotaInfo(agent).subText" class="quota-sub" :title="quotaInfo(agent).subText">
-                {{ quotaInfo(agent).subText }}
+              <span
+                v-if="quotaInfo(agent).dailyValue"
+                class="quota-daily-val"
+                :title="`今日消耗: ${quotaInfo(agent).dailyValue} ${quotaInfo(agent).dailyUnit ?? ''}`"
+              >
+                今日 {{ quotaInfo(agent).dailyValue }}
               </span>
-              <span v-else-if="agent.cacheHitRateToday" class="cache-badge" title="今日平均缓存命中率">
+              <span v-else-if="agent.cacheHitRateToday" class="cache-badge" title="今日缓存命中率">
                 缓存 {{ agent.cacheHitRateToday }}%
               </span>
-              <GlassButton
-                variant="ghost"
-                size="sm"
-                class="quota-refresh"
+              <span class="spacer" />
+              <button
+                type="button"
+                class="refresh-icon-btn"
                 title="刷新额度"
                 @click.stop="refreshUsage"
               >
                 ⟳
-              </GlassButton>
+              </button>
             </div>
-            <span class="ops hover-ops">
-              <GlassButton variant="ghost" size="sm" title="探活(绕过缓存)" @click.stop="recheck(agent)">重查</GlassButton>
-              <GlassButton variant="ghost" size="sm" title="唤起客户端" @click.stop="launch(agent)">唤起</GlassButton>
-              <GlassButton variant="ghost" size="sm" :class="{ warn: !agent.enabled }" @click.stop="toggleEnabled(agent)">
+
+            <!-- 悬浮操作胶囊:悬停卡片右上角时浮出,不遮挡内容 -->
+            <div class="action-capsule" @click.stop>
+              <button type="button" class="act-btn" title="健康探活" @click="recheck(agent)">探活</button>
+              <button type="button" class="act-btn" title="唤起客户端应用" @click="launch(agent)">唤起</button>
+              <button type="button" class="act-btn" :class="{ warn: !agent.enabled }" @click="toggleEnabled(agent)">
                 {{ agent.enabled ? '停用' : '启用' }}
-              </GlassButton>
-            </span>
+              </button>
+            </div>
           </span>
         </div>
       </div>
@@ -634,6 +683,7 @@ function agentDetailTitle(agent: AgentView): string {
 
 .rail.collapsed {
   width: 64px;
+  padding: 10px 8px;
 }
 
 .brand-row {
@@ -641,6 +691,15 @@ function agentDetailTitle(agent: AgentView): string {
   align-items: center;
   justify-content: space-between;
   padding: 2px 2px 6px;
+  transition: all 180ms var(--ease);
+}
+
+.rail.collapsed .brand-row {
+  flex-direction: column;
+  gap: 8px;
+  align-items: center;
+  justify-content: center;
+  padding: 2px 0 6px;
 }
 
 /* 折叠钮在 64px 窄栏里比 GlassButton sm 默认更紧凑(加元素选择器压过 .g-btn.sm) */
@@ -789,19 +848,43 @@ function agentDetailTitle(agent: AgentView): string {
   outline-offset: -2px;
 }
 
-.ws:hover,
-.agent:hover {
-  background: var(--glass-bg);
-  border-color: var(--glass-edge);
+.agent {
+  position: relative;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 8px 10px;
+  border-radius: var(--radius-md);
+  border: 1px solid transparent;
+  background: transparent;
+  cursor: pointer;
+  transition: all var(--fast) var(--ease);
 }
 
-.ws.picked,
+.agent:hover:not(.pick-disabled) {
+  background: var(--surface-dim);
+  border-color: var(--line);
+}
+
+/* 激活态高亮导轨与背板微光 */
 .agent.picked {
-  background: var(--accent-dim);
+  background: linear-gradient(90deg, var(--accent-dim) 0%, transparent 100%);
   border-color: var(--accent-line);
 }
 
-/* R05:停用/非 headless 卡片置灰禁点,悬停不再给选中暗示 */
+.agent.picked::before {
+  content: '';
+  position: absolute;
+  left: 0;
+  top: 6px;
+  bottom: 6px;
+  width: 3px;
+  border-radius: 2px;
+  background: var(--accent-strong);
+  box-shadow: 0 0 8px var(--accent);
+}
+
+/* R05:停用/非 headless 卡片置灰禁点 */
 .agent.pick-disabled {
   opacity: 0.45;
   cursor: not-allowed;
@@ -816,7 +899,7 @@ function agentDetailTitle(agent: AgentView): string {
   filter: grayscale(0.6);
 }
 
-/* R05:客户端空态就地闭环 */
+/* 客户端空态就地闭环 */
 .agents-empty {
   display: flex;
   align-items: center;
@@ -841,7 +924,6 @@ function agentDetailTitle(agent: AgentView): string {
   min-width: 0;
 }
 
-/* G1-06:探测中空态——脉冲圆点,与「未发现客户端」异常态视觉区分 */
 .probe-dot {
   flex: none;
   width: 8px;
@@ -856,48 +938,74 @@ function agentDetailTitle(agent: AgentView): string {
   50% { opacity: 1; transform: scale(1.1); }
 }
 
-/* 任务卡拖入时的放置高亮(P0-2) */
-.ws.drop-target {
-  background: var(--accent-dim);
-  border-color: var(--accent);
-  box-shadow: 0 0 0 2px var(--accent-dim);
-}
-
-.rail.collapsed .ws,
 .rail.collapsed .agent {
   justify-content: center;
   padding: 10px 6px;
 }
 
-.glyph {
-  flex: none;
-  width: 36px;
-  height: 36px;
-  border-radius: 11px;
-  display: grid;
-  place-items: center;
-  font-weight: 600;
-  font-size: 15px;
-  color: var(--accent-strong);
-  background: var(--accent-dim);
-  border: 1px solid var(--accent-line);
-  box-shadow: inset 0 1px 0 var(--glass-specular), 0 2px 8px rgba(0, 0, 0, 0.12);
-}
-
 .glyph-wrap {
   position: relative;
   flex: none;
+  width: 38px;
+  height: 38px;
+  display: grid;
+  place-items: center;
+}
+
+/* 现代 SVG 环形进度光环 */
+.avatar-ring {
+  position: absolute;
+  inset: -3px;
+  width: 44px;
+  height: 44px;
+  transform: rotate(-90deg);
+  pointer-events: none;
+}
+
+.ring-bg {
+  fill: none;
+  stroke: var(--line);
+  stroke-width: 2;
+  opacity: 0.35;
+}
+
+.ring-progress {
+  fill: none;
+  stroke-width: 2.2;
+  stroke-linecap: round;
+  transition: stroke-dashoffset 300ms ease, stroke 300ms ease;
+}
+
+.glyph {
+  flex: none;
+  width: 32px;
+  height: 32px;
+  border-radius: 9px;
+  display: grid;
+  place-items: center;
+  font-weight: 600;
+  font-size: 14px;
+  color: var(--accent-strong);
+  background: var(--accent-dim);
+  border: 1px solid var(--accent-line);
+  box-shadow: inset 0 1px 0 var(--glass-specular);
+}
+
+.glyph.logo {
+  object-fit: contain;
+  padding: 3px;
 }
 
 .status-dot {
   position: absolute;
-  right: -2px;
-  bottom: -2px;
+  right: -1px;
+  bottom: -1px;
   width: 9px;
   height: 9px;
   border-radius: 50%;
   border: 1.5px solid var(--glass-bg);
   background: var(--faint);
+  z-index: 2;
 }
 
 .status-dot.ok {
@@ -909,36 +1017,17 @@ function agentDetailTitle(agent: AgentView): string {
   background: var(--err);
 }
 
-/* G1-06:额度余量色点——6px 定位左下,与右下 status-dot 错位叠放;底色由内联 style 按阈值给 */
-.quota-dot {
-  position: absolute;
-  left: -2px;
-  bottom: -2px;
-  width: 6px;
-  height: 6px;
-  border-radius: 50%;
-  border: 1px solid var(--glass-bg);
-}
-
-/* G1-06:客户端 logo 图标复用 .glyph 玻璃底座,图片内缩留边不顶格 */
-.glyph.logo {
-  object-fit: contain;
-  padding: 3px;
-}
-
 .running-ring {
   position: absolute;
-  inset: -3px;
-  border-radius: 14px;
+  inset: -4px;
+  border-radius: 50%;
   border: 2px dashed var(--accent);
   animation: ringSpin 3s linear infinite;
   pointer-events: none;
 }
 
 @keyframes ringSpin {
-  100% {
-    transform: rotate(360deg);
-  }
+  100% { transform: rotate(360deg); }
 }
 
 .plan-tag {
@@ -950,38 +1039,290 @@ function agentDetailTitle(agent: AgentView): string {
   border: 1px solid var(--accent-line);
 }
 
-.quota-row {
+/* 阶梯 2: 独立极简进度槽 */
+.quota-progress-row {
   display: flex;
   align-items: center;
   gap: 8px;
-  margin-top: 2px;
+  margin: 1px 0;
 }
 
-.quota-row :deep(.g-meter) {
+.quota-track {
   flex: 1;
+  height: 4px;
+  background: var(--line);
+  border-radius: 2px;
+  overflow: hidden;
 }
 
-.quota-pct {
+.quota-fill {
+  display: block;
+  height: 100%;
+  border-radius: 2px;
+  transition: width 300ms ease;
+}
+
+.quota-pct-text {
   font-size: 11px;
-  font-weight: 600;
-  color: var(--muted);
+  font-weight: 700;
   min-width: 28px;
   text-align: right;
+  line-height: 1;
 }
 
-/* R04:额度未知态文字(不渲染满格进度条) */
-.quota-unknown {
-  flex: 1;
-  font-size: 10.5px;
+.quota-pct-text.unknown {
   color: var(--faint);
-  border: 1px dashed var(--line);
-  border-radius: 4px;
-  padding: 0 6px;
-  line-height: 1.6;
-  white-space: nowrap;
+  font-size: 10px;
+}
+
+/* 阶梯 3: 结构化余量 vs 今日消耗对比 */
+.quota-stats-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 11px;
+  color: var(--muted);
+  line-height: 1.2;
+}
+
+.quota-primary-val {
+  font-weight: 600;
+  color: var(--text);
   overflow: hidden;
   text-overflow: ellipsis;
+  white-space: nowrap;
 }
+
+.quota-daily-val {
+  color: var(--faint);
+  font-size: 10px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.refresh-icon-btn {
+  background: none;
+  border: none;
+  color: var(--faint);
+  cursor: pointer;
+  font-size: 12px;
+  padding: 0 2px;
+  transition: color 140ms;
+}
+
+.refresh-icon-btn:hover {
+  color: var(--accent-strong);
+}
+
+/* 悬浮操作微胶囊 */
+.action-capsule {
+  position: absolute;
+  right: 6px;
+  top: 6px;
+  display: none;
+  align-items: center;
+  gap: 3px;
+  background: var(--surface);
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  padding: 2px 4px;
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.25);
+  z-index: 10;
+}
+
+.agent:hover .action-capsule {
+  display: flex;
+}
+
+.act-btn {
+  background: transparent;
+  border: none;
+  color: var(--muted);
+  font-size: 10px;
+  padding: 1px 5px;
+  border-radius: 4px;
+  cursor: pointer;
+  font-family: inherit;
+  transition: all 120ms;
+}
+
+.act-btn:hover {
+  background: var(--surface-dim);
+  color: var(--text);
+}
+
+.act-btn.warn {
+  color: var(--warn);
+}
+
+/* 顶部工作区环境胶囊样式 */
+.workspace-bar {
+  position: relative;
+  margin-bottom: 4px;
+}
+
+.ws-capsule {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  height: 32px;
+  padding: 0 10px;
+  border-radius: var(--radius-md);
+  border: 1px solid var(--line);
+  background: var(--surface-dim);
+  cursor: pointer;
+  user-select: none;
+  transition: all 140ms ease;
+}
+
+.ws-capsule:hover {
+  border-color: var(--accent-line);
+  background: var(--surface);
+}
+
+.ws-capsule.active {
+  border-color: var(--accent);
+  background: var(--accent-dim);
+}
+
+.ws-capsule.drop-target {
+  box-shadow: 0 0 0 2px var(--accent);
+}
+
+.ws-ico {
+  font-size: 13px;
+  flex-shrink: 0;
+}
+
+.ws-label {
+  flex: 1;
+  font-size: 12px;
+  font-weight: 600;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.ws-arrow {
+  font-size: 9px;
+  color: var(--muted);
+  transition: transform 140ms ease;
+}
+
+.ws-arrow.rotated {
+  transform: rotate(180deg);
+}
+
+.workspace-bar.collapsed .ws-capsule {
+  justify-content: center;
+  padding: 0;
+  width: 38px;
+  height: 38px;
+  border-radius: 50%;
+  margin: 0 auto;
+}
+
+.ws-dropdown {
+  position: absolute;
+  top: calc(100% + 4px);
+  left: 0;
+  right: 0;
+  z-index: 2200;
+  background: var(--surface);
+  border: 1px solid var(--accent-line);
+  border-radius: var(--radius-md);
+  padding: 6px;
+  box-shadow: 0 12px 32px rgba(0, 0, 0, 0.4);
+  max-height: 260px;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+}
+
+.ws-dropdown-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 4px 6px;
+  font-size: 10.5px;
+  font-weight: 600;
+  color: var(--muted);
+  border-bottom: 1px solid var(--line);
+  margin-bottom: 4px;
+}
+
+.ws-add-link {
+  background: none;
+  border: none;
+  color: var(--accent-strong);
+  font-size: 11px;
+  cursor: pointer;
+  padding: 0;
+  font-weight: 600;
+}
+
+.ws-drop-item {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 6px 8px;
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+  transition: all 120ms;
+}
+
+.ws-drop-item:hover {
+  background: var(--surface-dim);
+}
+
+.ws-drop-item.active {
+  background: var(--accent-dim);
+  color: var(--accent-strong);
+  font-weight: 600;
+}
+
+.ws-drop-item .p-info {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+}
+
+.ws-drop-item .p-name {
+  font-size: 12px;
+}
+
+.ws-drop-item .p-path {
+  font-size: 10px;
+  color: var(--faint);
+}
+
+.ws-drop-item .p-ops {
+  display: flex;
+  gap: 4px;
+}
+
+.op-mini {
+  background: transparent;
+  border: 1px solid var(--line);
+  border-radius: 4px;
+  color: var(--muted);
+  font-size: 10px;
+  padding: 1px 5px;
+  cursor: pointer;
+}
+
+.op-mini:hover {
+  background: var(--surface);
+  color: var(--text);
+}
+
+.op-mini.danger:hover {
+  color: var(--err);
+  border-color: var(--err);
+}
+
 
 .running-tag {
   margin-left: 6px;

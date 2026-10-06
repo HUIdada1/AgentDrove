@@ -21,12 +21,20 @@ export const STATE_TEXT: Record<TaskState, string> = {
   interrupted: '已中断',
 }
 
-/** 档位选项:发布框与设置页共用同一份(yolo 需设置页显式放行,不入常规下拉) */
+/** 模式选项:发布框与设置页共用同一份(全中文展示，value 保持兼容) */
 export const MODE_OPTIONS: Array<{ value: string; label: string }> = [
-  { value: 'build', label: 'build' },
-  { value: 'edit', label: 'edit' },
-  { value: 'plan', label: 'plan' },
+  { value: 'build', label: '构建模式' },
+  { value: 'edit', label: '编辑模式' },
+  { value: 'plan', label: '规划模式' },
 ]
+
+/** 模式枚举中文映射字典 */
+export const MODE_LABEL: Record<string, string> = {
+  build: '构建模式',
+  edit: '编辑模式',
+  plan: '规划模式',
+  yolo: '自主放行',
+}
 
 /** 状态筛选下拉(含"全部"),文案与 STATE_TEXT 同源 */
 export const STATE_FILTER_OPTIONS: Array<{ value: string; label: string }> = [
@@ -142,6 +150,13 @@ export interface FormattedQuotaMetric {
   subText?: string
   percent?: number
   isOverridden?: boolean
+  kind?: 'credits' | 'tokens' | 'daily' | 'unlimited'
+  colorVar?: string
+  primaryValue?: string
+  primaryUnit?: string
+  dailyValue?: string
+  dailyUnit?: string
+  statusBadge?: string
 }
 
 /** 统一卡片与列表展示口径的标准工厂函数 */
@@ -157,35 +172,83 @@ export function formatAgentQuotaDisplay(agent: {
 }): FormattedQuotaMetric {
   const cap = agent.plan?.dailyTaskCap ?? 0
   const used = agent.usedToday ?? 0
+  const pct = agent.remainingPercent !== undefined && Number.isFinite(agent.remainingPercent)
+    ? Math.max(0, Math.min(100, Math.round(agent.remainingPercent)))
+    : cap > 0
+      ? Math.max(0, Math.round(((cap - used) / cap) * 100))
+      : undefined
+
+  const colorVar =
+    pct === undefined
+      ? 'var(--accent)'
+      : pct <= 0
+        ? 'var(--err)'
+        : pct <= 20
+          ? '#ea580c'
+          : pct <= 50
+            ? 'var(--warn)'
+            : 'var(--ok)'
 
   if (agent.plan?.quotaKind === 'credits') {
     if (agent.remainingCredits !== undefined) {
       return {
         primaryText: `余 ${formatQuotaNumber(agent.remainingCredits)} 点`,
         subText: agent.usedCreditsToday ? `今日 ${formatQuotaNumber(agent.usedCreditsToday)} 点` : undefined,
-        percent: agent.remainingPercent,
+        percent: pct,
         isOverridden: agent.isOverridden,
+        kind: 'credits',
+        colorVar,
+        primaryValue: formatQuotaNumber(agent.remainingCredits),
+        primaryUnit: '点',
+        dailyValue: agent.usedCreditsToday ? formatQuotaNumber(agent.usedCreditsToday) : undefined,
+        dailyUnit: '点',
+        statusBadge: pct === 0 ? '已用尽' : agent.isOverridden ? '已校准' : undefined,
       }
     }
     if (agent.usedCreditsToday !== undefined) {
       return {
         primaryText: `今日 ${formatQuotaNumber(agent.usedCreditsToday)} 点`,
-        percent: agent.remainingPercent,
+        percent: pct,
         isOverridden: agent.isOverridden,
+        kind: 'credits',
+        colorVar,
+        primaryValue: formatQuotaNumber(agent.usedCreditsToday),
+        primaryUnit: '点(今日)',
+        statusBadge: agent.isOverridden ? '已校准' : undefined,
       }
     }
-    return { primaryText: '—', percent: agent.remainingPercent }
+    return {
+      primaryText: '—',
+      percent: pct,
+      kind: 'credits',
+      colorVar,
+      primaryValue: '—',
+      primaryUnit: '',
+    }
   }
 
   if (agent.plan?.quotaKind === 'daily') {
     if (cap > 0) {
+      const remainingCount = Math.max(0, cap - used)
       return {
-        primaryText: `余 ${Math.max(0, cap - used)}/${cap} 次`,
-        percent: agent.remainingPercent,
+        primaryText: `余 ${remainingCount}/${cap} 次`,
+        percent: pct,
         isOverridden: agent.isOverridden,
+        kind: 'daily',
+        colorVar,
+        primaryValue: `${remainingCount}/${cap}`,
+        primaryUnit: '次',
+        statusBadge: remainingCount === 0 ? '已用尽' : undefined,
       }
     }
-    return { primaryText: '未设上限', percent: undefined }
+    return {
+      primaryText: '未设上限',
+      percent: undefined,
+      kind: 'unlimited',
+      colorVar: 'var(--ok)',
+      primaryValue: '无限制',
+      primaryUnit: '',
+    }
   }
 
   // subscription
@@ -193,25 +256,49 @@ export function formatAgentQuotaDisplay(agent: {
     return {
       primaryText: `余 ${formatTokens(agent.remainingTokens)} tok`,
       subText: agent.usedTokensToday ? `今日 ${formatTokens(agent.usedTokensToday)} tok` : undefined,
-      percent: agent.remainingPercent,
+      percent: pct,
       isOverridden: agent.isOverridden,
+      kind: 'tokens',
+      colorVar,
+      primaryValue: formatTokens(agent.remainingTokens),
+      primaryUnit: 'tok',
+      dailyValue: agent.usedTokensToday ? formatTokens(agent.usedTokensToday) : undefined,
+      dailyUnit: 'tok',
+      statusBadge: pct === 0 ? '已用尽' : undefined,
     }
   }
   if (agent.usedTokensToday) {
     return {
       primaryText: `今日 ${formatTokens(agent.usedTokensToday)} tok`,
-      percent: agent.remainingPercent,
+      percent: pct,
       isOverridden: agent.isOverridden,
+      kind: 'tokens',
+      colorVar,
+      primaryValue: formatTokens(agent.usedTokensToday),
+      primaryUnit: 'tok(今日)',
     }
   }
   if (cap > 0) {
+    const remainingCount = Math.max(0, cap - used)
     return {
-      primaryText: `余 ${Math.max(0, cap - used)}/${cap} 次`,
-      percent: agent.remainingPercent,
+      primaryText: `余 ${remainingCount}/${cap} 次`,
+      percent: pct,
       isOverridden: agent.isOverridden,
+      kind: 'daily',
+      colorVar,
+      primaryValue: `${remainingCount}/${cap}`,
+      primaryUnit: '次',
+      statusBadge: remainingCount === 0 ? '已用尽' : undefined,
     }
   }
-  return { primaryText: '未配置额度', percent: undefined }
+  return {
+    primaryText: '未配置额度',
+    percent: undefined,
+    kind: 'unlimited',
+    colorVar: 'var(--accent)',
+    primaryValue: '未配置',
+    primaryUnit: '',
+  }
 }
 
 export interface ChannelGroup {

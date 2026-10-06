@@ -3,7 +3,7 @@ import { computed, onUnmounted, ref, watch } from 'vue'
 import { useAppStore } from '../stores/app'
 import GlassButton from '../ui/GlassButton.vue'
 import GlassModal from '../ui/GlassModal.vue'
-import { CLIENT_FOLLOW_MODEL, STATE_TEXT, formatModelDisplay, formatTokens, getAgentBillingType } from '../labels'
+import { CLIENT_FOLLOW_MODEL, MODE_LABEL, STATE_TEXT, formatModelDisplay, formatTokens, getAgentBillingType } from '../labels'
 import type { MergeResult, TaskRecord, WorkspaceRow } from '@agent-drove/shared'
 
 const props = withDefaults(
@@ -304,7 +304,7 @@ function fmt(ts?: number): string {
           </dd>
         </div>
         <div><dt>模型</dt><dd>{{ displayModel }}</dd></div>
-        <div><dt>档位</dt><dd>{{ task.mode }}</dd></div>
+        <div><dt>模式</dt><dd>{{ MODE_LABEL[task.mode] ?? task.mode }}</dd></div>
         <div v-if="effortDisplay">
           <dt>思考档位</dt>
           <dd :title="actualReasoningLevel ? '实际下发档位(以事件流为准)' : '请求档位(实际以会话流运行反馈为准)'">

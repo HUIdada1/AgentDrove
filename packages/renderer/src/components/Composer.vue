@@ -6,6 +6,8 @@ import GlassInput from '../ui/GlassInput.vue'
 import GlassSelect from '../ui/GlassSelect.vue'
 import SkillSelector from './SkillSelector.vue'
 import SlashCommandPopup, { type SlashCommand } from './SlashCommandPopup.vue'
+import ModelSelector from './ModelSelector.vue'
+import ReasoningEffortPicker from './ReasoningEffortPicker.vue'
 import {
   CLIENT_FOLLOW_MODEL,
   MODE_OPTIONS,
@@ -617,28 +619,16 @@ function onKeydown(event: KeyboardEvent): void {
           :title="agentTitle"
           :options="activeAgents.map((a) => ({ value: a.id, label: `🤖 ${a.label}` }))"
         />
-        <!-- 级联渠道选择器:多渠道时展示,选择特定渠道如官方/自定义中转;
-             G3-15:单渠道时以只读徽标保留渠道可见性(渠道决定消耗哪个套餐,流量走向可确认) -->
-        <GlassSelect
-          v-if="channelOptions.length > 1"
-          v-model="selectedChannelId"
-          class="channel"
-          :title="channelTitle"
-          :options="channelOptions"
+        <!-- 现代化一体式模型选择器:单胶囊即可呼出带搜索与分类面板，告别渠道模型割裂 -->
+        <ModelSelector
+          :channel-groups="channelGroups"
+          :current-channel-id="selectedChannelId"
+          :current-model-id="modelId"
           :disabled="modelLocked"
-        />
-        <span
-          v-else-if="currentChannelGroup"
-          class="channel-badge"
-          :title="`当前渠道: ${currentChannelGroup.name}(单渠道无需选择)`"
-        >{{ currentChannelGroup.name }}</span>
-        <!-- 联动模型选择器:只展示当前渠道下的合法模型 -->
-        <GlassSelect
-          v-model="modelId"
-          class="model"
-          :title="modelTitle"
-          :options="modelOptions"
-          :disabled="modelLocked"
+          @select="({ channelId, modelId: mId }) => {
+            selectedChannelId = channelId
+            modelId = mId
+          }"
         />
         <GlassSelect
           v-model="mode"
@@ -646,23 +636,11 @@ function onKeydown(event: KeyboardEvent): void {
           :title="modeTitle"
           :options="MODE_OPTIONS"
         />
-        <!-- 思考档位(R18):支持 = 可调 GlassSelect;不支持 = disabled 置灰 + .effort-off 说明徽标,
-             位置稳定不跳动,能力可见而非整块消失 -->
-        <GlassSelect
-          v-if="supportsReasoning"
+        <!-- 现代化思考强度分段胶囊:支持时展示微调器，不支持时自然隐藏，零残缺破损占位 -->
+        <ReasoningEffortPicker
           v-model="reasoningEffort"
-          class="effort"
-          :title="effortTitle"
-          :options="reasoningOptions"
+          :supported="supportsReasoning"
         />
-        <span v-else-if="selectedAgent" class="effort effort-off" :title="effortTitle">
-          <GlassSelect
-            class="effort-off-select"
-            :model-value="REASONING_UNSUPPORTED"
-            :options="REASONING_UNSUPPORTED_OPTIONS"
-            disabled
-          />
-        </span>
       </div>
       <div class="actions-group">
         <GlassButton variant="ghost" size="sm" @click="pickAttachment">
@@ -687,7 +665,7 @@ function onKeydown(event: KeyboardEvent): void {
         <GlassInput v-model="denyList" placeholder="如 Bash,Write" />
       </label>
       <label>
-        max-turns
+        最大轮数 (max-turns)
         <GlassInput v-model="maxTurns" placeholder="不限" />
       </label>
       <div v-if="selectedAgent && !selectedAgent.capabilities.attachments" class="hint">
@@ -724,6 +702,10 @@ function onKeydown(event: KeyboardEvent): void {
   flex-direction: column;
   gap: 10px;
   padding: 14px 16px 12px;
+  width: 100%;
+  max-width: 100%;
+  min-width: 0;
+  box-sizing: border-box;
 }
 
 .toolbar {
@@ -732,6 +714,8 @@ function onKeydown(event: KeyboardEvent): void {
   justify-content: space-between;
   gap: 8px;
   flex-wrap: wrap;
+  width: 100%;
+  box-sizing: border-box;
 }
 
 .selectors-group {
@@ -768,8 +752,8 @@ function onKeydown(event: KeyboardEvent): void {
 }
 
 .mode {
-  min-width: 75px;
-  max-width: 95px;
+  min-width: 85px;
+  max-width: 140px;
 }
 
 .effort {
@@ -883,11 +867,16 @@ function onKeydown(event: KeyboardEvent): void {
   display: flex;
   align-items: center;
   gap: 8px;
+  flex-wrap: wrap;
+  width: 100%;
+  max-width: 100%;
+  box-sizing: border-box;
 }
 
 .ws {
-  flex: 1;
-  min-width: 100px;
+  flex: 1 1 140px;
+  min-width: 0;
+  max-width: 100%;
 }
 
 .ws-chip {
@@ -923,8 +912,11 @@ function onKeydown(event: KeyboardEvent): void {
 
 .advanced {
   display: grid;
-  grid-template-columns: 1fr 1fr 110px;
+  grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
   gap: 8px;
+  width: 100%;
+  max-width: 100%;
+  box-sizing: border-box;
 }
 
 .advanced label {
@@ -1009,5 +1001,9 @@ function onKeydown(event: KeyboardEvent): void {
 
 .input-pos {
   position: relative;
+  width: 100%;
+  max-width: 100%;
+  min-width: 0;
+  box-sizing: border-box;
 }
 </style>

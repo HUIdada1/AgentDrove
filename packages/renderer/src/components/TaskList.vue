@@ -13,11 +13,24 @@ import { compareTaskOrder, type AgentView, type TaskRecord } from '@agent-drove/
 const store = useAppStore()
 const searchRef = ref<{ focus: () => void } | null>(null)
 
-// 搜索框占位承诺了 Ctrl+K,这里兑现;Cmd+K 一并支持(Mac)
+// 快捷键: Ctrl/Cmd+K 搜索，Alt+↑/↓ 微调当前任务顺序
 function onHotkey(event: KeyboardEvent): void {
   if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === 'k') {
     event.preventDefault()
     searchRef.value?.focus()
+  } else if (event.altKey && (event.key === 'ArrowUp' || event.key === 'ArrowDown')) {
+    const selId = store.selectedTaskId.value
+    if (!selId) return
+    const idx = visible.value.findIndex((t) => t.id === selId)
+    if (idx < 0) return
+    event.preventDefault()
+    if (event.key === 'ArrowUp' && idx > 0) {
+      const prev = visible.value[idx - 1]
+      void store.reorderTask(selId, prev ? prev.id : null).then(() => store.showToast('已上移'))
+    } else if (event.key === 'ArrowDown' && idx < visible.value.length - 1) {
+      const nextNext = visible.value[idx + 2]
+      void store.reorderTask(selId, nextNext ? nextNext.id : null).then(() => store.showToast('已下移'))
+    }
   }
 }
 
@@ -257,10 +270,50 @@ function toggleSelectAll(): void {
  */
 const dropBeforeId = ref<string | null>(null)
 const dropAtEnd = ref(false)
+const dragOverGroupId = ref<string | null>(null)
 
 function clearDropMark(): void {
   dropBeforeId.value = null
   dropAtEnd.value = false
+  dragOverGroupId.value = null
+}
+
+function onGroupDragOver(projectId: string, event: DragEvent): void {
+  if (!store.draggingTaskId.value) return
+  event.preventDefault()
+  if (event.dataTransfer) event.dataTransfer.dropEffect = 'move'
+  dragOverGroupId.value = projectId
+}
+
+function onGroupDragLeave(projectId: string, event: DragEvent): void {
+  const to = event.relatedTarget as Node | null
+  if (to && (event.currentTarget as HTMLElement).contains(to)) return
+  if (dragOverGroupId.value === projectId) dragOverGroupId.value = null
+}
+
+async function onGroupDrop(projectId: string, event: DragEvent): Promise<void> {
+  event.preventDefault()
+  dragOverGroupId.value = null
+  const dragId = store.draggingTaskId.value
+  if (!dragId) return
+  store.draggingTaskId.value = null
+  clearDropMark()
+
+  const batchIds = store.selection.value.has(dragId) && store.selection.value.size > 1
+    ? [...store.selection.value]
+    : [dragId]
+
+  let moved = 0
+  for (const id of batchIds) {
+    const t = store.tasks.value.find((item) => item.id === id)
+    if (t && (t.projectId ?? 'daily') !== projectId) {
+      await store.moveTask(id, projectId)
+      moved++
+    }
+  }
+  if (moved > 0) {
+    store.showToast(`已归类 ${moved} 条任务到目标工作区`)
+  }
 }
 
 /**
@@ -625,12 +678,21 @@ const ctxItems = computed<ContextMenuItem[]>(() => {
       @drop="onListDrop"
       @dragleave="onListDragLeave"
     >
-      <!-- G2-01:按工作区分组的组头+组块;单组视图(侧栏选中/仅剩一组)不显示组头 -->
-      <section v-for="group in groupedVisible" :key="group.projectId" class="task-group">
+      <!-- G2-01:按工作区分组的组头+组块，支持整组容器作为 Drop Target 接收拖拽归类 -->
+      <section
+        v-for="group in groupedVisible"
+        :key="group.projectId"
+        class="task-group"
+        :class="{ 'group-drag-active': dragOverGroupId === group.projectId }"
+        @dragover="onGroupDragOver(group.projectId, $event)"
+        @dragleave="onGroupDragLeave(group.projectId, $event)"
+        @drop="onGroupDrop(group.projectId, $event)"
+      >
         <header v-if="showGroupHeaders" class="group-head">
           <span class="band" aria-hidden="true" />
           <span class="g-name">{{ group.name }}</span>
           <span class="g-count num">{{ group.tasks.length }} 条</span>
+          <span v-if="dragOverGroupId === group.projectId" class="drop-hint-tag">松手归类至此</span>
         </header>
         <template v-for="task in group.tasks" :key="task.id">
           <div v-if="dropBeforeId === task.id" class="drop-line" aria-hidden="true" />
@@ -723,18 +785,22 @@ const ctxItems = computed<ContextMenuItem[]>(() => {
   align-items: center;
   gap: 6px;
   padding-bottom: 10px;
-  /* P0-7:允许换行,任何列宽下都不再横向裁切(窄列时下拉折行显示) */
   flex-wrap: wrap;
+  width: 100%;
+  max-width: 100%;
+  box-sizing: border-box;
 }
 
 .filters > :first-child {
-  flex: 1;
-  min-width: 120px;
+  flex: 1 1 120px;
+  min-width: 0;
+  max-width: 100%;
 }
 
 .filters :deep(.g-select-wrap) {
-  flex: none;
-  min-width: 88px;
+  flex: 1 1 88px;
+  min-width: 0;
+  max-width: 100%;
 }
 
 .batch {
@@ -798,11 +864,35 @@ const ctxItems = computed<ContextMenuItem[]>(() => {
   min-height: 0;
 }
 
-/* G2-01:工作区分组结构——组块内部沿用 8px 卡间距,组头不参与拖放落点 */
+/* G2-01:工作区分组结构——支持整组拖拽接收与高亮 */
 .task-group {
   display: flex;
   flex-direction: column;
   gap: 8px;
+  border-radius: var(--radius-md);
+  padding: 2px;
+  transition: background 160ms var(--ease), outline 160ms var(--ease);
+}
+
+.task-group.group-drag-active {
+  background: var(--accent-dim);
+  outline: 2px dashed var(--accent-strong);
+}
+
+.drop-hint-tag {
+  font-size: 10px;
+  padding: 1px 6px;
+  border-radius: 999px;
+  background: var(--accent);
+  color: #fff;
+  font-weight: 600;
+  margin-left: auto;
+  animation: pulseHint 0.8s ease infinite alternate;
+}
+
+@keyframes pulseHint {
+  from { opacity: 0.8; transform: scale(0.98); }
+  to { opacity: 1; transform: scale(1.02); }
 }
 
 .group-head {
@@ -882,15 +972,15 @@ const ctxItems = computed<ContextMenuItem[]>(() => {
   min-width: 104px;
 }
 
-/* 拖拽插入指示线(P0-2):负 margin 抵消自身高度,整体骑在 8px 卡片间距中央不顶开布局 */
+/* 拖拽插入指示线:发光槽指示，醒目且不顶开卡片布局 */
 .drop-line {
-  height: 2px;
-  margin: -5px 0;
-  border-radius: 1px;
-  background: var(--accent);
-  box-shadow: 0 0 6px var(--accent-line);
+  height: 3px;
+  margin: -5.5px 0;
+  border-radius: 2px;
+  background: var(--accent-strong);
+  box-shadow: 0 0 10px var(--accent), 0 0 4px var(--accent-line);
   position: relative;
-  z-index: 1;
+  z-index: 10;
   flex: none;
 }
 </style>

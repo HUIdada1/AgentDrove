@@ -758,8 +758,11 @@ async function runExport(kind: 'data' | 'report'): Promise<void> {
 
 .grid {
   display: grid;
-  grid-template-columns: 1fr 1fr;
-  gap: 8px;
+  grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+  gap: 10px;
+  width: 100%;
+  max-width: 100%;
+  box-sizing: border-box;
 }
 
 .grid label,
@@ -769,6 +772,8 @@ async function runExport(kind: 'data' | 'report'): Promise<void> {
   gap: 4px;
   font-size: 12px;
   color: var(--muted);
+  min-width: 0;
+  max-width: 100%;
 }
 
 .inline {

@@ -264,6 +264,8 @@ select {
   font: inherit;
   color: var(--text);
   outline: none;
+  box-sizing: border-box;
+  max-width: 100%;
 }
 
 :focus-visible {

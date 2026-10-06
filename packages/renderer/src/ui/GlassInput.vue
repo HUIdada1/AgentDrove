@@ -107,11 +107,19 @@ defineExpose({ focus })
 /* 定位上下文:内嵌发送按钮以此为锚 */
 .wrap {
   position: relative;
+  width: 100%;
+  max-width: 100%;
+  min-width: 0;
+  box-sizing: border-box;
 }
 
 /* 液态玻璃输入面:下凹感(内侧上暗下亮反转) */
 .g-field {
   width: 100%;
+  max-width: 100%;
+  min-width: 0;
+  box-sizing: border-box;
+  display: block;
   background: var(--field-bg);
   backdrop-filter: var(--glass-blur);
   border: 1px solid var(--line);

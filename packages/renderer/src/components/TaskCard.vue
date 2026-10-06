@@ -147,63 +147,75 @@ function onDragEnd(): void {
     @drop="$emit('drop', $event)"
     @contextmenu.prevent="$emit('context', $event)"
   >
-    <!-- G2-01:draggable 收窄到卡头——摘要/错误文本恢复原生选择复制,拖拽热区=卡头 -->
-    <div class="top" :draggable="canDrag" @dragstart="onDragStart" @dragend="onDragEnd">
-      <span class="drag-handle" title="按住拖拽调整顺序或归类" @click.stop>⋮⋮</span>
-      <span class="agent">{{ agentLabel ?? task.agentId }}</span>
-      <span class="ws-tag" :title="`工作区:${workspaceLabel}`">{{ workspaceLabel }}</span>
-      <span class="badge" :class="{ 'is-running': task.state === 'running' }">
-        <span v-if="task.state === 'running'" class="card-spin" aria-hidden="true" />
-        {{ STATE_TEXT[task.state] }}
-      </span>
-      <!-- G2-02:排队追问常驻计数徽标——给 A 排了消息切到 B 后也能在列表里找回 -->
-      <span v-if="followupCount > 0" class="fu-badge num" :title="`${followupCount} 条排队追问`">
-        ⏳{{ followupCount }}
-      </span>
-      <span v-if="task.skills?.length" class="card-skills">
-        <span v-for="s in task.skills.slice(0, 3)" :key="s" class="s-dot" :title="s">{{ s.slice(0, 1) }}</span>
-      </span>
-      <span v-if="duration" class="num dur">{{ duration }}</span>
-      <span class="num time">{{ time }}</span>
+    <!-- 独立左侧抓取把手:按住拖拽以重排或移动归类，不影响右侧卡身文本复制与点击 -->
+    <div
+      class="grip-handle"
+      :draggable="canDrag"
+      title="按住拖拽调整顺序或归类到工作区"
+      @dragstart="onDragStart"
+      @dragend="onDragEnd"
+      @click.stop
+    >
+      <span class="grip-dots">⋮⋮</span>
     </div>
-    <div class="body">
-      <span v-if="task.title" class="custom-title-tag">标</span>
-      {{ summary }}
-    </div>
-    <div v-if="task.error" class="err">{{ task.error.slice(0, 90) }}</div>
 
-    <!-- 真实消耗与缓存命中率 (严格区分点数与 Token, 无 emoji) -->
-    <div v-if="task.usage" class="card-usage num">
-      <template v-if="billingType === 'credits'">
-        <span class="usage-item" title="对话消耗点数">点数: {{ task.usage.credits }} 点</span>
-      </template>
-      <template v-else>
-        <span class="usage-item" title="总消耗 Tokens">Token: {{ formatTokens(totalTokens) }}</span>
-      </template>
-      <span v-if="task.usage.cacheHitRate" class="usage-cache" title="Prompt 缓存命中率">
-        缓存 {{ task.usage.cacheHitRate }}%
-      </span>
-    </div>
-    <div class="foot">
-      <span v-if="ORIGIN_MARK[task.origin]" class="origin">{{ ORIGIN_MARK[task.origin] }}</span>
-      <!-- G2-09:重试/重跑链路可视化——↻N 徽标悬停可见父任务 id 与尝试次数 -->
-      <span
-        v-if="task.attempt > 1"
-        class="origin"
-        :title="`源自任务 #${task.retryOf ?? '?'} · 第 ${task.attempt} 次尝试`"
-      >↻{{ task.attempt }}</span>
-      <span class="spacer" />
-      <button
-        type="button"
-        class="card-detail-btn"
-        title="弹窗查看任务详情与操作"
-        @click.stop="store.openDetailModal(task.id)"
-      >
-        详情
-      </button>
-      <label class="pick" @click.stop>
-        <input type="checkbox" :checked="checked" @change="$emit('check')" />
-      </label>
+    <div class="card-content">
+      <div class="top">
+        <span class="agent">{{ agentLabel ?? task.agentId }}</span>
+        <span class="ws-tag" :title="`工作区:${workspaceLabel}`">{{ workspaceLabel }}</span>
+        <span class="badge" :class="{ 'is-running': task.state === 'running' }">
+          <span v-if="task.state === 'running'" class="card-spin" aria-hidden="true" />
+          {{ STATE_TEXT[task.state] }}
+        </span>
+        <!-- G2-02:排队追问常驻计数徽标——给 A 排了消息切到 B 后也能在列表里找回 -->
+        <span v-if="followupCount > 0" class="fu-badge num" :title="`${followupCount} 条排队追问`">
+          ⏳{{ followupCount }}
+        </span>
+        <span v-if="task.skills?.length" class="card-skills">
+          <span v-for="s in task.skills.slice(0, 3)" :key="s" class="s-dot" :title="s">{{ s.slice(0, 1) }}</span>
+        </span>
+        <span v-if="duration" class="num dur">{{ duration }}</span>
+        <span class="num time">{{ time }}</span>
+      </div>
+      <div class="body line-clamp-2">
+        <span v-if="task.title" class="custom-title-tag">标</span>
+        {{ summary }}
+      </div>
+      <div v-if="task.error" class="err">{{ task.error.slice(0, 90) }}</div>
+
+      <!-- 真实消耗与缓存命中率 (严格区分点数与 Token, 无 emoji) -->
+      <div v-if="task.usage" class="card-usage num">
+        <template v-if="billingType === 'credits'">
+          <span class="usage-item" title="对话消耗点数">点数: {{ task.usage.credits }} 点</span>
+        </template>
+        <template v-else>
+          <span class="usage-item" title="总消耗 Tokens">Token: {{ formatTokens(totalTokens) }}</span>
+        </template>
+        <span v-if="task.usage.cacheHitRate" class="usage-cache" title="Prompt 缓存命中率">
+          缓存 {{ task.usage.cacheHitRate }}%
+        </span>
+      </div>
+      <div class="foot">
+        <span v-if="ORIGIN_MARK[task.origin]" class="origin">{{ ORIGIN_MARK[task.origin] }}</span>
+        <!-- G2-09:重试/重跑链路可视化——↻N 徽标悬停可见父任务 id 与尝试次数 -->
+        <span
+          v-if="task.attempt > 1"
+          class="origin"
+          :title="`源自任务 #${task.retryOf ?? '?'} · 第 ${task.attempt} 次尝试`"
+        >↻{{ task.attempt }}</span>
+        <span class="spacer" />
+        <button
+          type="button"
+          class="card-detail-btn"
+          title="弹窗查看任务详情与操作"
+          @click.stop="store.openDetailModal(task.id)"
+        >
+          详情
+        </button>
+        <label class="pick" @click.stop>
+          <input type="checkbox" :checked="checked" @change="$emit('check')" />
+        </label>
+      </div>
     </div>
   </article>
 </template>
@@ -211,17 +223,71 @@ function onDragEnd(): void {
 <style scoped>
 .card {
   position: relative;
+  display: flex;
+  align-items: stretch;
+  gap: 6px;
   border-radius: var(--radius-md);
   background: var(--glass-bg);
   backdrop-filter: var(--glass-blur);
   border: 1px solid var(--glass-edge);
   box-shadow: inset 0 1px 0 var(--glass-specular);
-  padding: 12px 14px;
+  padding: 10px 12px 10px 6px;
   cursor: pointer;
-  /* R24/G2-01:user-select 收窄到卡头拖拽热区(.top),摘要与错误文本可选中复制;
-     draggable 同样收窄到 .top,article 不再整体可拖,按住摘要拖动是文本选择而非元素拖拽 */
   transition: transform var(--fast) var(--ease), border-color var(--fast) var(--ease),
-    background var(--fast) var(--ease);
+    background var(--fast) var(--ease), box-shadow var(--fast) var(--ease);
+}
+
+.grip-handle {
+  width: 14px;
+  flex: none;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  cursor: grab;
+  color: var(--faint);
+  border-radius: 4px;
+  opacity: 0.35;
+  transition: opacity 140ms ease, background 140ms ease, color 140ms ease;
+  user-select: none;
+}
+
+.grip-dots {
+  font-size: 11px;
+  line-height: 1;
+  letter-spacing: -1px;
+}
+
+.card:hover .grip-handle {
+  opacity: 0.85;
+  color: var(--accent-strong);
+  background: var(--accent-dim);
+}
+
+.grip-handle:active {
+  cursor: grabbing;
+}
+
+.card-content {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  container-type: inline-size;
+  container-name: taskcard;
+}
+
+.line-clamp-2 {
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+  overflow: hidden;
+}
+
+@container taskcard (max-width: 270px) {
+  .dur { display: none; }
+  .ws-tag { max-width: 60px; }
+  .card-skills { display: none; }
 }
 
 .card::after {

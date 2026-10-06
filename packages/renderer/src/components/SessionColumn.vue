@@ -10,6 +10,8 @@ import SkillSelector from './SkillSelector.vue'
 import FollowupQueueBar from './FollowupQueueBar.vue'
 import GuidanceHub from './GuidanceHub.vue'
 import SlashCommandPopup, { type SlashCommand } from './SlashCommandPopup.vue'
+import ModelSelector from './ModelSelector.vue'
+import ReasoningEffortPicker from './ReasoningEffortPicker.vue'
 import {
   CLIENT_FOLLOW_MODEL,
   EFFORT_LABEL,
@@ -1468,6 +1470,25 @@ function timeOf(at: number): string {
           </div>
         </div>
 
+        <!-- 流内排队追问气泡:自然融入对话时间线，告别遮挡视线的顶部悬浮条 -->
+        <div v-for="fq in store.activeFollowups.value" :key="fq.id" class="row mine queue-bubble-row">
+          <div class="bubble queue-bubble glass">
+            <div class="queue-status-tag">
+              <span class="queue-spin" aria-hidden="true" />
+              <span>⏳ 排队追问中 · 当前轮完成后自动接续</span>
+            </div>
+            <div class="text">{{ fq.prompt }}</div>
+            <div class="queue-quick-actions" @click.stop>
+              <button type="button" class="q-btn primary" title="立即打断当前任务并插队执行" @click="onQueueInterrupt(fq.id)">
+                ⚡ 立即插队执行
+              </button>
+              <button type="button" class="q-btn danger" title="从队列中取消此追问" @click="store.removeFollowup(task.id, fq.id)">
+                × 取消
+              </button>
+            </div>
+          </div>
+        </div>
+
         <!-- 回到最新悬浮按钮(R15):离底超过阈值出现,sticky 悬浮于流区右下 -->
         <button v-if="showJumpLatest" type="button" class="jump-latest" @click="jumpToLatest">
           ↓ 回到最新
@@ -1502,65 +1523,49 @@ function timeOf(at: number): string {
         <!-- 排队反馈(R09②):setTurnNote 写入后在此渲染,8 秒自灭 -->
         <div v-if="turnNote" class="turn-note">{{ turnNote }}</div>
 
-        <!-- 现代化操作胶囊条 (Agent/渠道/模式/模型/思考档位/技能选择器)
-             G3-05:hasTurnOverrides 驱动覆盖态描边高亮 + 「已覆盖」角标(持续可见) + 一键复位 -->
+        <!-- 现代化操作胶囊条: 一体化模型选择器与思考强度分段控制 -->
         <div class="bottom-action-bar">
           <div class="pills-group" :class="{ overridden: hasTurnOverrides }">
-            <span v-if="hasTurnOverrides" class="ov-indicator">已覆盖·随下一轮生效</span>
             <span class="pill-chip agent-chip" :title="`当前对话客户端: ${agentLabel}`">
               🤖 {{ agentLabel }}
             </span>
-            <!-- 级联渠道选择器(R10):多渠道时先选渠道再选模型,与发布框同一套规则;
-                 G3-15:单渠道时以只读徽标保留渠道可见性,池化额度场景可确认流量走向 -->
-            <GlassSelect
-              v-if="turnChannelOptions.length > 1"
-              v-model="turnChannelId"
-              class="pill-select channel-pill"
-              title="模型渠道"
-              :options="turnChannelOptions"
+            <!-- 现代化一体式模型选择器:单胶囊呼出搜索面板，渠道模型不再割裂 -->
+            <ModelSelector
+              :channel-groups="turnChannelGroups"
+              :current-channel-id="turnChannelId"
+              :current-model-id="turnModelId || (task.modelId ?? '')"
               :disabled="turnModelLocked"
+              @select="({ channelId, modelId: mId }) => {
+                turnChannelId = channelId
+                turnModelId = mId
+              }"
             />
-            <span
-              v-else-if="turnCurrentGroup"
-              class="channel-badge"
-              :title="`当前渠道: ${turnCurrentGroup.name}(单渠道无需选择)`"
-            >{{ turnCurrentGroup.name }}</span>
-            <!-- G3-04:本轮模式(mode/build-edit-plan),''=跟随父任务;斜杠指令推荐模式也落此 -->
             <GlassSelect
               v-model="turnMode"
               class="pill-select mode-pill"
               title="本轮模式,缺省跟随父任务"
               :options="turnModeOptions"
             />
-            <GlassSelect
-              v-model="turnModelId"
-              class="pill-select model-pill"
-              title="切换当前对话模型"
-              :options="turnModelOptions"
-              :disabled="turnModelLocked"
-            />
-            <GlassSelect
-              v-if="effortSupported"
+            <!-- 现代化思考强度分段控制胶囊:支持时展示，不支持时自然隐藏 -->
+            <ReasoningEffortPicker
               v-model="turnEffort"
-              class="pill-select effort-pill"
-              title="思考强度档位"
-              :options="turnEffortOptions"
+              :supported="effortSupported"
             />
             <div class="skills-pill" :class="{ overridden: turnSkills !== null }">
               <SkillSelector
                 compact
                 :deny-supported="turnAgent ? !['codex', 'qoder', 'trae'].includes(turnAgent.id) : true"
               />
-              <span v-if="turnSkills !== null" class="ov-tag">技能已覆盖</span>
+              <span v-if="turnSkills !== null" class="ov-tag">技能定制</span>
             </div>
             <GlassButton
               v-if="hasTurnOverrides"
               variant="ghost"
               size="sm"
-              title="恢复跟随父任务"
+              title="恢复跟随父任务配置"
               @click="resetTurnOverrides"
             >
-              复位
+              还原默认
             </GlassButton>
           </div>
 
@@ -1580,13 +1585,13 @@ function timeOf(at: number): string {
       </footer>
     </template>
 
-    <!-- 未选中任何任务: 呈现 Agent 智能引导中心 + 常驻底部发布工作台(R12⑥:内容独立滚动,发布框不滚出视野) -->
+    <!-- 未选中任何任务: 呈现 Agent 智能引导中心 + 常驻底部发布工作台(内容独立滚动,发布框不滚出视野) -->
     <div v-else class="guidance-view">
       <div v-if="contextAgentLabel" class="ctx-bar glass">
         正在与 <b>{{ contextAgentLabel }}</b> 对话 · 发布框已绑定该客户端
       </div>
       <div class="guidance-scroll">
-        <GuidanceHub @select-scenario="onScenarioSelected" />
+        <GuidanceHub />
       </div>
       <div class="center-composer-card">
         <Composer />
@@ -2113,6 +2118,10 @@ function timeOf(at: number): string {
   flex-direction: column;
   gap: 6px;
   margin-top: 8px;
+  width: 100%;
+  max-width: 100%;
+  min-width: 0;
+  box-sizing: border-box;
 }
 
 .skills-wrapper {
@@ -2121,6 +2130,10 @@ function timeOf(at: number): string {
 
 .input-wrapper {
   position: relative;
+  width: 100%;
+  max-width: 100%;
+  min-width: 0;
+  box-sizing: border-box;
 }
 
 .send-err {
@@ -2356,6 +2369,10 @@ function timeOf(at: number): string {
   gap: 8px;
   flex-wrap: wrap;
   padding: 4px 0 2px;
+  width: 100%;
+  max-width: 100%;
+  min-width: 0;
+  box-sizing: border-box;
 }
 
 .pills-group {
@@ -2364,6 +2381,8 @@ function timeOf(at: number): string {
   gap: 8px;
   flex-wrap: wrap;
   flex: 1;
+  min-width: 0;
+  max-width: 100%;
 }
 
 .pill-chip {
@@ -2381,28 +2400,28 @@ function timeOf(at: number): string {
 }
 
 .pill-select {
-  min-width: 120px;
+  min-width: 100px;
 }
 
 .model-pill {
   max-width: 220px;
 }
 
-/* R10:续聊渠道选择器,与发布框 .channel 同款宽度约束 */
+/* 续聊渠道选择器 */
 .channel-pill {
-  min-width: 100px;
+  min-width: 90px;
   max-width: 140px;
 }
 
 .effort-pill {
-  min-width: 110px;
+  min-width: 90px;
   max-width: 140px;
 }
 
-/* G3-04:本轮模式下拉,与 effort-pill 同宽约束 */
+/* 本轮模式下拉 */
 .mode-pill {
   min-width: 90px;
-  max-width: 130px;
+  max-width: 140px;
 }
 
 /* G3-05:覆盖态胶囊组——描边高亮 + 「已覆盖」角标持续可见,R10 跨会话沿用不再无感 */
@@ -2496,5 +2515,83 @@ function timeOf(at: number): string {
   font-size: 12.5px;
   line-height: 1.6;
   color: var(--text);
+}
+
+/* 流内排队追问气泡样式 */
+.queue-bubble-row {
+  margin-top: 8px;
+}
+
+.queue-bubble {
+  border: 1px dashed var(--accent-line);
+  background: var(--surface-dim);
+  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.2);
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  max-width: 85%;
+}
+
+.queue-status-tag {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--accent-strong);
+}
+
+.queue-spin {
+  width: 10px;
+  height: 10px;
+  border-radius: 50%;
+  border: 1.5px solid var(--accent-line);
+  border-top-color: var(--accent-strong);
+  animation: probeSpin 0.8s linear infinite;
+}
+
+@keyframes probeSpin {
+  to { transform: rotate(360deg); }
+}
+
+.queue-quick-actions {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-top: 4px;
+  padding-top: 4px;
+  border-top: 1px solid var(--line);
+}
+
+.q-btn {
+  background: transparent;
+  border: 1px solid var(--line);
+  border-radius: 4px;
+  font-size: 11px;
+  padding: 2px 8px;
+  cursor: pointer;
+  color: var(--muted);
+  font-family: inherit;
+  transition: all 120ms;
+}
+
+.q-btn:hover {
+  background: var(--surface);
+  color: var(--text);
+  border-color: var(--accent-line);
+}
+
+.q-btn.primary {
+  color: var(--accent-strong);
+  border-color: var(--accent-line);
+  background: var(--accent-dim);
+}
+
+.q-btn.danger {
+  color: var(--err);
+}
+
+.q-btn.danger:hover {
+  border-color: var(--err);
 }
 </style>

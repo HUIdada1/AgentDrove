@@ -214,7 +214,8 @@ function newChat(): void {
  */
 function selectAgentContext(agentId: string): void {
   if (agentContext.value === agentId) {
-    agentContext.value = ''
+    // 再次点击同个 Agent：保持绑定并直接聚焦输入框就绪对话
+    window.dispatchEvent(new CustomEvent('focus-composer'))
     return
   }
   agentContext.value = agentId
