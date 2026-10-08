@@ -2,7 +2,14 @@
 import { computed, onBeforeUnmount, ref, watch } from 'vue'
 import { useAppStore } from '../stores/app'
 import type { TaskRecord } from '@agent-drove/shared'
-import { CLIENT_FOLLOW_MODEL, STATE_TEXT, formatModelDisplay, formatTokens, getAgentBillingType } from '../labels'
+import {
+  CLIENT_FOLLOW_MODEL,
+  STATE_TEXT,
+  formatModelDisplay,
+  formatTokens,
+  getAgentBillingType,
+  projectGroupLabel,
+} from '../labels'
 
 const props = defineProps<{
   task: TaskRecord
@@ -13,7 +20,8 @@ const props = defineProps<{
 }>()
 
 const emit = defineEmits<{
-  click: []
+  /** A-09:透出原始事件——外层据此识别 Shift 范围选 */
+  click: [event: MouseEvent]
   check: []
   'drag-over': [event: DragEvent]
   drop: [event: DragEvent]
@@ -61,6 +69,7 @@ watch(
 
 onBeforeUnmount(() => {
   if (durationTimer) clearInterval(durationTimer)
+  clearDragGhost()
 })
 
 const duration = computed(() => {
@@ -74,14 +83,9 @@ const duration = computed(() => {
 
 /**
  * 常驻工作区徽标(R22):按 projects 映射 projectId→名称,移动后即时可见;
- * daily 固定显「日常」,归属为空(或项目已删)显「未分组」。
+ * A-06:空归属与 daily 同为「日常」组,经 labels 单一口径取名(不再出现「未分组」)
  */
-const workspaceLabel = computed(() => {
-  const pid = props.task.projectId
-  if (!pid) return '未分组'
-  if (pid === 'daily') return '日常'
-  return store.projects.value.find((p) => p.id === pid)?.name ?? '未分组'
-})
+const workspaceLabel = computed(() => projectGroupLabel(props.task.projectId, store.projects.value))
 const time = computed(() => {
   const d = new Date(props.task.createdAt)
   return `${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}`
@@ -103,10 +107,49 @@ const totalTokens = computed(() => {
 })
 
 // ---- 拖拽归类/排序(P0-2) ----
-const canDrag = computed(() => true)
-
 /** G2-01:拖拽源视觉反馈——dragstart 置位、dragend 复位,原位卡呈半透明虚线轮廓 */
 const dragging = ref(false)
+
+/** A-10:刚被归类/排序的任务——依 store.lastMovedTaskIds 挂 accent 描边脉冲 */
+const justMoved = computed(() => store.lastMovedTaskIds.value.has(props.task.id))
+
+/** A-04:多选拖影的离屏元素(拖结束即摘除,不留残节点) */
+let dragGhost: HTMLElement | null = null
+
+function clearDragGhost(): void {
+  dragGhost?.remove()
+  dragGhost = null
+}
+
+/**
+ * A-04:拖影以整卡呈现(不再只显示把手),鼠标抓点作为拖影锚点;
+ * 多选拖拽叠 ×N 角标,离屏元素挂 body 以免被列表滚动容器裁切。
+ */
+function makeDragImage(card: HTMLElement, count: number): HTMLElement {
+  const ghost = document.createElement('div')
+  ghost.style.cssText = 'position:fixed;top:-10000px;left:-10000px;pointer-events:none;'
+  const clone = card.cloneNode(true) as HTMLElement
+  clone.style.width = `${card.offsetWidth}px`
+  clone.style.margin = '0'
+  ghost.appendChild(clone)
+  const badge = document.createElement('span')
+  badge.textContent = `×${count}`
+  badge.style.cssText = [
+    'position:absolute',
+    'right:-6px',
+    'top:-8px',
+    'padding:1px 7px',
+    'border-radius:999px',
+    'background:var(--accent)',
+    'color:#0c131d',
+    'font-size:11px',
+    'font-weight:700',
+    'box-shadow:0 2px 8px rgba(0, 0, 0, 0.35)',
+  ].join(';')
+  ghost.appendChild(badge)
+  document.body.appendChild(ghost)
+  return ghost
+}
 
 /** G2-02:排队追问数徽标——契约字段由 G5-05 随 tasks:list 附带,先按可选字段消费,缺失即不渲染 */
 const followupCount = computed(
@@ -119,19 +162,32 @@ const superseded = computed(() => store.tasks.value.some((t) => t.retryOf === pr
 function onDragStart(event: DragEvent): void {
   dragging.value = true
   store.draggingTaskId.value = props.task.id
-  if (event.dataTransfer) {
-    event.dataTransfer.effectAllowed = 'move'
-    const payload = store.selection.value.has(props.task.id)
-      ? [...store.selection.value]
-      : [props.task.id]
-    event.dataTransfer.setData('text/plain', props.task.id)
-    event.dataTransfer.setData('application/json', JSON.stringify(payload))
+  const dataTransfer = event.dataTransfer
+  if (!dataTransfer) return
+  dataTransfer.effectAllowed = 'move'
+  const payload = store.selection.value.has(props.task.id)
+    ? [...store.selection.value]
+    : [props.task.id]
+  dataTransfer.setData('text/plain', props.task.id)
+  dataTransfer.setData('application/json', JSON.stringify(payload))
+  const card = (event.currentTarget as HTMLElement | null)?.closest('.card') as HTMLElement | null
+  if (!card) return
+  const rect = card.getBoundingClientRect()
+  const offsetX = Math.max(0, Math.min(event.clientX - rect.left, rect.width))
+  const offsetY = Math.max(0, Math.min(event.clientY - rect.top, rect.height))
+  clearDragGhost()
+  if (payload.length > 1) {
+    dragGhost = makeDragImage(card, payload.length)
+    dataTransfer.setDragImage(dragGhost, offsetX, offsetY)
+  } else {
+    dataTransfer.setDragImage(card, offsetX, offsetY)
   }
 }
 
 function onDragEnd(): void {
   dragging.value = false
   store.draggingTaskId.value = null
+  clearDragGhost()
   emit('drag-end')
 }
 </script>
@@ -139,10 +195,10 @@ function onDragEnd(): void {
 <template>
   <article
     class="card spot"
-    :class="[`s-${task.state}`, { selected, dragging, superseded }]"
+    :class="[`s-${task.state}`, { selected, dragging, superseded, checked, 'just-moved': justMoved }]"
     :title="superseded ? '已有更新尝试' : undefined"
     :data-task-id="task.id"
-    @click="$emit('click')"
+    @click="$emit('click', $event)"
     @dragover="$emit('drag-over', $event)"
     @drop="$emit('drop', $event)"
     @contextmenu.prevent="$emit('context', $event)"
@@ -150,8 +206,8 @@ function onDragEnd(): void {
     <!-- 独立左侧抓取把手:按住拖拽以重排或移动归类，不影响右侧卡身文本复制与点击 -->
     <div
       class="grip-handle"
-      :draggable="canDrag"
-      title="按住拖拽调整顺序或归类到工作区"
+      draggable="true"
+      title="拖动排序 · 多选时拖动整批"
       @dragstart="onDragStart"
       @dragend="onDragEnd"
       @click.stop
@@ -237,16 +293,18 @@ function onDragEnd(): void {
     background var(--fast) var(--ease), box-shadow var(--fast) var(--ease);
 }
 
+/* A-04:把手命中区扩到约 20px,用负 margin 外扩不占卡身布局 */
 .grip-handle {
-  width: 14px;
+  width: 20px;
   flex: none;
+  margin: 0 -3px;
   display: flex;
   align-items: center;
   justify-content: center;
   cursor: grab;
-  color: var(--faint);
+  color: var(--muted);
   border-radius: 4px;
-  opacity: 0.35;
+  opacity: 0.6;
   transition: opacity 140ms ease, background 140ms ease, color 140ms ease;
   user-select: none;
 }
@@ -258,7 +316,7 @@ function onDragEnd(): void {
 }
 
 .card:hover .grip-handle {
-  opacity: 0.85;
+  opacity: 1;
   color: var(--accent-strong);
   background: var(--accent-dim);
 }
@@ -350,35 +408,29 @@ function onDragEnd(): void {
   background: var(--faint);
 }
 
+/* A-10:刚归类/排序的卡片——accent 描边脉冲,让「卡片去哪了」一眼可见 */
+.card.just-moved {
+  border-color: var(--accent);
+  animation: justMovedPulse 1.2s var(--ease);
+}
+
+@keyframes justMovedPulse {
+  0% {
+    box-shadow: 0 0 0 0 color-mix(in srgb, var(--accent) 45%, transparent);
+  }
+  45% {
+    box-shadow: 0 0 0 4px color-mix(in srgb, var(--accent) 22%, transparent);
+  }
+  100% {
+    box-shadow: 0 0 0 0 transparent;
+  }
+}
+
 .top {
   display: flex;
   align-items: center;
   gap: 8px;
   font-size: 12px;
-  /* 卡头=拖拽热区(P0-2/R24/G2-01):draggable 在此生效,禁文本原生选择,
-     避免按住卡头拖动时误触发文本 drag;卡身文本不受影响 */
-  user-select: none;
-}
-
-.drag-handle {
-  cursor: grab;
-  color: var(--faint);
-  font-size: 11px;
-  line-height: 1;
-  padding: 0 2px;
-  letter-spacing: -1px;
-  opacity: 0.35;
-  transition: opacity 140ms ease, color 140ms ease;
-  user-select: none;
-}
-
-.card:hover .drag-handle {
-  opacity: 0.85;
-  color: var(--muted);
-}
-
-.drag-handle:active {
-  cursor: grabbing;
 }
 
 .agent {
@@ -495,6 +547,20 @@ function onDragEnd(): void {
   flex: 1;
 }
 
+/* A-09:多选勾选框 hover 显现、已选中常驻,平时不抢卡身视线 */
+.pick {
+  display: inline-flex;
+  align-items: center;
+  opacity: 0;
+  transition: opacity 140ms ease;
+}
+
+.card:hover .pick,
+.card.checked .pick,
+.pick:focus-within {
+  opacity: 1;
+}
+
 .pick input {
   accent-color: var(--accent);
 }
@@ -582,12 +648,13 @@ function onDragEnd(): void {
   gap: 2px;
 }
 
+/* B15:缓存徽标色走主题令牌(--ok),不再写死 #10b981,亮/暗主题下同源同色 */
 .usage-cache {
   font-weight: 700;
   font-size: 10px;
-  color: #10b981;
-  background: color-mix(in srgb, #10b981 12%, transparent);
-  border: 1px solid color-mix(in srgb, #10b981 25%, transparent);
+  color: var(--ok);
+  background: color-mix(in srgb, var(--ok) 12%, transparent);
+  border: 1px solid color-mix(in srgb, var(--ok) 25%, transparent);
   padding: 0 4px;
   border-radius: 4px;
   line-height: 1.4;

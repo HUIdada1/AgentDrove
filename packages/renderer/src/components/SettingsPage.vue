@@ -48,6 +48,32 @@ async function loadUsage(): Promise<void> {
   }
 }
 
+/**
+ * K-06:余量列补绝对值——credits 类「X 点 / Y%」,token 类「X / Y%」,
+ * 仅剩百分比(按每日任务上限计算)时只示百分比,无额度配置示「未知」。
+ * 口径:余量按周期(总量−周期累计消耗;模式 B 校准值随后续消耗递减),表头已标注「余量(周期)」。
+ */
+function remainingText(row: UsageView): string {
+  const percent = row.remainingPercent !== undefined ? `${row.remainingPercent}%` : ''
+  if (row.remainingCredits !== undefined) {
+    return `${formatQuotaNumber(row.remainingCredits)} 点${percent ? ` / ${percent}` : ''}`
+  }
+  if (row.remainingTokens !== undefined) {
+    return `${formatTokens(row.remainingTokens)}${percent ? ` / ${percent}` : ''}`
+  }
+  return percent || '未知'
+}
+
+/** 余量列 tooltip:口径 + 绝对值来源(绝对值被列宽省略时由此读全) */
+function remainingTitle(row: UsageView): string {
+  const parts = ['余量按周期口径(总量−周期累计消耗;校准值随后续消耗递减)']
+  if (row.remainingCredits !== undefined) parts.push(`剩 ${formatQuotaNumber(row.remainingCredits)} 点`)
+  if (row.remainingTokens !== undefined) parts.push(`剩 ${formatTokens(row.remainingTokens)} Token`)
+  if (row.remainingPercent !== undefined) parts.push(`剩余百分比 ${row.remainingPercent}%`)
+  else parts.push('未设置额度,绝对值未知')
+  return parts.join(' · ')
+}
+
 const appVersion = __APP_VERSION__
 
 function checkUpdate(): void {
@@ -65,13 +91,16 @@ const phaseClass = computed(() => {
   return ''
 })
 
-/** 统一收口 IPC 失败:更新链路出错时不静默,提示留在弹窗内;返回是否成功 */
+/**
+ * 统一收口 IPC 失败:更新链路出错时不静默,提示留在应用内轻提示(K-06:不再用原生 alert 打断);
+ * 返回是否成功
+ */
 async function run(action: () => Promise<void>, prefix: string): Promise<boolean> {
   try {
     await action()
     return true
   } catch (error) {
-    window.alert(`${prefix}:${error instanceof Error ? error.message : String(error)}`)
+    store.showToast(`${prefix}:${error instanceof Error ? error.message : String(error)}`)
     return false
   }
 }
@@ -237,12 +266,24 @@ const calibTotalTokens = ref('')
 const calibDailyTaskCap = ref('')
 const calibRemainingCredits = ref('')
 const calibRemainingTokens = ref('')
+/** K-03:周期天数(空=自首次任务累计口径);回显值由周期窗口反推,不额外扩契约 */
+const calibCycleDays = ref('')
 const calibSaving = ref(false)
 const calibError = ref('')
 
 // G4-06:提交通道 settings:set-plan-override 由组 5(G5-02)提供,shared AgentDroveApi
 // 已正式声明 settingsSetPlanOverride(agentId, patch|null);patch=null 清除校准恢复注册默认。
 // 失败提示留在弹窗内,不伪造成功反馈。
+
+/**
+ * K-03:从周期窗口(cycleStartAt/cycleResetAt,本地日 YYYY-MM-DD)反推当前周期天数;
+ * 无窗口 = 累计口径,回显空。两个日串同口径解析,差值是整天数。
+ */
+function cycleDaysOf(row: UsageView): string {
+  if (row.cycleStartAt === undefined || row.cycleResetAt === undefined) return ''
+  const days = Math.round((Date.parse(row.cycleResetAt) - Date.parse(row.cycleStartAt)) / 86_400_000)
+  return days > 0 ? String(days) : ''
+}
 
 /** 打开校准表单并回显当前生效值(usageGet 返回值,主进程合并覆盖后即生效值) */
 function openCalibration(row: UsageView): void {
@@ -254,6 +295,7 @@ function openCalibration(row: UsageView): void {
   calibRemainingCredits.value =
     row.remainingCredits !== undefined ? String(row.remainingCredits) : ''
   calibRemainingTokens.value = row.remainingTokens !== undefined ? String(row.remainingTokens) : ''
+  calibCycleDays.value = cycleDaysOf(row)
   calibError.value = ''
 }
 
@@ -266,12 +308,20 @@ function setCalibMode(mode: string): void {
   if (mode === 'total' || mode === 'remaining') calibMode.value = mode
 }
 
-/** 表单数字串→数值;空串=null,该字段不进入 patch(主进程为合并语义,不覆盖已有校准) */
+/**
+ * 表单数字串→数值;空串=null,该字段不进入 patch(主进程为合并语义,不覆盖已有校准)
+ */
 function numOrNull(text: string): number | null {
   const t = text.trim()
   if (!t) return null
   const n = Number(t)
   return Number.isNaN(n) ? null : n
+}
+
+/** K-03:周期天数串→天数;空/非正数落 0 = 自首次任务累计口径(显式覆盖,否则改不回累计口径) */
+function cycleDaysPatch(text: string): number {
+  const n = numOrNull(text)
+  return n !== null && n > 0 ? Math.round(n) : 0
 }
 
 async function submitCalibration(clear = false): Promise<void> {
@@ -282,7 +332,7 @@ async function submitCalibration(clear = false): Promise<void> {
     // patch=null:主进程删除该校准,恢复注册默认
     patch = null
   } else if (calibMode.value === 'total') {
-    // 模式 A:填套餐总量,余量由主进程按 总量 − 累计消耗 倒推;
+    // 模式 A:填套餐总量,余量由主进程按 总量 − 周期累计消耗 倒推;
     // 只提交填写的维度(主进程为合并语义,空字段不得覆盖已有校准)
     const patchObj: PlanOverrideConfig = {}
     const totalCredits = numOrNull(calibTotalCredits.value)
@@ -295,6 +345,8 @@ async function submitCalibration(clear = false): Promise<void> {
       calibError.value = '请至少填写一项;要恢复默认请点「清除校准」'
       return
     }
+    // K-03:周期天数随校准提交(空=0=累计口径);周期天数不计入"至少填一项"的判定
+    patchObj.cycleDays = cycleDaysPatch(calibCycleDays.value)
     patch = patchObj
   } else {
     // 模式 B:直接填当前剩余,与套餐后台数字对齐
@@ -307,6 +359,8 @@ async function submitCalibration(clear = false): Promise<void> {
       calibError.value = '请至少填写一项;要恢复默认请点「清除校准」'
       return
     }
+    // K-03:周期天数随校准提交(空=0=累计口径)
+    patchObj.cycleDays = cycleDaysPatch(calibCycleDays.value)
     patch = patchObj
   }
   calibSaving.value = true
@@ -350,10 +404,10 @@ async function runExport(kind: 'data' | 'report'): Promise<void> {
   try {
     const result =
       kind === 'data' ? await window.api.exportData() : await window.api.exportWeeklyReport()
-    window.alert(`已导出:${result.path}`)
+    store.showToast(`已导出:${result.path}`)
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error)
-    if (message !== '已取消导出') window.alert(`导出失败:${message}`)
+    if (message !== '已取消导出') store.showToast(`导出失败:${message}`)
   }
 }
 </script>
@@ -401,11 +455,11 @@ async function runExport(kind: 'data' | 'report'): Promise<void> {
           <div class="usage-row usage-head" aria-hidden="true">
             <span>客户端</span>
             <span>任务</span>
-            <span>Token</span>
+            <span title="今日输入+输出 Token 合计">Token(今日)</span>
             <span>缓存</span>
             <span>估算点数</span>
             <span>命中率</span>
-            <span>余量</span>
+            <span title="余量=周期口径:总量−周期累计消耗;模式 B 校准值随后续消耗递减">余量(周期)</span>
             <span class="u-op">操作</span>
           </div>
           <div v-for="row in usageRows" :key="row.agentId" class="usage-row">
@@ -428,9 +482,9 @@ async function runExport(kind: 'data' | 'report'): Promise<void> {
             <span
               class="num"
               :class="{ 'u-low': row.remainingPercent !== undefined && row.remainingPercent <= 20 }"
-              :title="row.remainingPercent !== undefined ? `余量 ${row.remainingPercent}%` : '未设置额度,余量未知'"
+              :title="remainingTitle(row)"
             >
-              {{ row.remainingPercent !== undefined ? `${row.remainingPercent}%` : '未知' }}
+              {{ remainingText(row) }}
             </span>
             <!-- G4-06:每行校准入口——双模式套餐校准表单,修正硬编码虚构总量 -->
             <span class="u-op">
@@ -601,7 +655,8 @@ async function runExport(kind: 'data' | 'report'): Promise<void> {
       </label>
       <template v-if="calibMode === 'total'">
         <p class="calib-hint">
-          模式 A:填套餐总量,余量按「总量 − 本应用累计消耗」倒推。留空表示该维度不覆盖。
+          模式 A:填套餐总量,余量按「总量 − 本应用累计消耗」倒推(周期天数非空时按该周期累计)。
+          留空表示该维度不覆盖。
         </p>
         <div class="grid">
           <label>
@@ -620,7 +675,8 @@ async function runExport(kind: 'data' | 'report'): Promise<void> {
       </template>
       <template v-else>
         <p class="calib-hint">
-          模式 B:直接填当前剩余,与套餐后台数字对齐(免于本地累计漏计启用前用量)。
+          模式 B:直接填当前剩余,与套餐后台数字对齐(免于本地累计漏计启用前用量);
+          此后余量将按后续消耗自动递减,无需反复校准。
         </p>
         <div class="grid">
           <label>
@@ -633,6 +689,11 @@ async function runExport(kind: 'data' | 'report'): Promise<void> {
           </label>
         </div>
       </template>
+      <!-- K-03:周期口径——填天数时周期起点按固定窗口对齐(边界在本地零点),空=自首次任务累计(近似) -->
+      <label class="calib-cycle">
+        周期天数(空=自首次任务累计)
+        <GlassInput v-model="calibCycleDays" />
+      </label>
       <div v-if="calibError" class="conflict">{{ calibError }}</div>
     </div>
     <template #footer>
@@ -840,7 +901,8 @@ async function runExport(kind: 'data' | 'report'): Promise<void> {
 
 .usage-row {
   display: grid;
-  grid-template-columns: minmax(80px, 1.3fr) repeat(6, minmax(56px, 1fr)) 52px;
+  /* K-06:余量列承载「绝对值 / 百分比」,比其余数值列宽一档,避免绝对值被省略号截断 */
+  grid-template-columns: minmax(80px, 1.3fr) repeat(5, minmax(56px, 1fr)) minmax(86px, 1.25fr) 52px;
   gap: 6px;
   align-items: center;
   padding: 4px 8px;
@@ -911,7 +973,8 @@ async function runExport(kind: 'data' | 'report'): Promise<void> {
   gap: 10px;
 }
 
-.calib-mode {
+.calib-mode,
+.calib-cycle {
   display: flex;
   flex-direction: column;
   gap: 4px;

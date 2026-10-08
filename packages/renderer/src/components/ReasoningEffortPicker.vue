@@ -1,23 +1,34 @@
 <script setup lang="ts">
 import type { ReasoningEffort } from '@agent-drove/shared'
-import { EFFORT_HINT_TEXT } from '../labels'
+import { EFFORT_HINT_TEXT, REASONING_EFFORT_OPTIONS } from '../labels'
 
-defineProps<{
+const props = defineProps<{
   modelValue: ReasoningEffort | ''
   supported: boolean
+  /** 哨兵项('')的场景化文案:发布框「跟随客户端」/ 续聊「跟随父任务（当前X档）」 */
+  sentinelLabel?: string
+  /** 哨兵项的场景化说明;缺省用 labels.EFFORT_HINT_TEXT[''] */
+  sentinelHint?: string
 }>()
 
 const emit = defineEmits<{
   (e: 'update:modelValue', val: ReasoningEffort | ''): void
 }>()
 
-const options: Array<{ value: ReasoningEffort | ''; label: string; icon?: string }> = [
-  { value: '', label: '自动' },
-  { value: 'off', label: '关' },
-  { value: 'low', label: '低' },
-  { value: 'medium', label: '中' },
-  { value: 'high', label: '高' },
-]
+/** 选项与说明单一来源 labels.ts(R06/S-01):六档含极简,禁止本地再维护一份 */
+const options = REASONING_EFFORT_OPTIONS
+
+/** 哨兵项文案:场景化覆盖,缺省回落 labels 的「跟随」 */
+function labelOf(value: ReasoningEffort | ''): string {
+  if (value === '') return props.sentinelLabel || options.find((o) => o.value === '')?.label || '跟随'
+  return options.find((o) => o.value === value)?.label ?? value
+}
+
+/** 悬停说明:哨兵用场景化 hint(缺省 EFFORT_HINT_TEXT['']),其余档位取 labels 常量 */
+function hintOf(value: ReasoningEffort | ''): string {
+  if (value === '') return props.sentinelHint || EFFORT_HINT_TEXT['']
+  return EFFORT_HINT_TEXT[value]
+}
 
 function select(val: ReasoningEffort | ''): void {
   emit('update:modelValue', val)
@@ -26,7 +37,11 @@ function select(val: ReasoningEffort | ''): void {
 
 <template>
   <!-- 当不支持时完全隐藏，绝不留 disabled 破损占位框 -->
-  <div v-if="supported" class="reasoning-picker glass" title="思考推理深度控制">
+  <div
+    v-if="supported"
+    class="reasoning-picker glass"
+    :title="hintOf(modelValue)"
+  >
     <span class="picker-ico" aria-hidden="true">🧠</span>
     <div class="pills-track">
       <button
@@ -35,10 +50,10 @@ function select(val: ReasoningEffort | ''): void {
         type="button"
         class="pill-btn"
         :class="{ active: modelValue === opt.value }"
-        :title="EFFORT_HINT_TEXT[opt.value]"
+        :title="hintOf(opt.value)"
         @click="select(opt.value)"
       >
-        {{ opt.label }}
+        {{ labelOf(opt.value) }}
       </button>
     </div>
   </div>
@@ -59,7 +74,7 @@ function select(val: ReasoningEffort | ''): void {
 
 .picker-ico {
   font-size: 11px;
-  color: #c084fc;
+  color: var(--accent-strong);
 }
 
 .pills-track {
@@ -80,6 +95,7 @@ function select(val: ReasoningEffort | ''): void {
   cursor: pointer;
   transition: all 140ms var(--ease);
   line-height: 20px;
+  white-space: nowrap;
 }
 
 .pill-btn:hover {

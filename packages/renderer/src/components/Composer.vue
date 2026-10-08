@@ -10,8 +10,9 @@ import ModelSelector from './ModelSelector.vue'
 import ReasoningEffortPicker from './ReasoningEffortPicker.vue'
 import {
   CLIENT_FOLLOW_MODEL,
+  EFFORT_HINT_TEXT,
   MODE_OPTIONS,
-  REASONING_EFFORT_OPTIONS,
+  isModelLocked,
   parseChannelsAndModels,
   type ChannelGroup,
 } from '../labels'
@@ -53,48 +54,33 @@ const supportsReasoning = computed(() => selectedAgent.value?.capabilities.reaso
 const modelId = ref('')
 const selectedChannelId = ref('default')
 
-// 思考档位不支持态的哨兵值(R18):disabled GlassSelect 只作展示,值恒为「不支持」
-const REASONING_UNSUPPORTED = 'unsupported'
-const REASONING_UNSUPPORTED_OPTIONS = [{ value: REASONING_UNSUPPORTED, label: '不支持' }]
-
-/**
- * 思考档位选项(R18):value/label 集合取 labels.ts 的 REASONING_EFFORT_OPTIONS 单一来源(R06),
- * 仅对缺省项做展示层改写「跟随→跟随模型」;档位含义说明经触发器 title 呈现
- * (GlassSelect options 无 per-option title,说明统一挂容器 title,随选中值切换)。
- */
-const reasoningOptions = computed(() =>
-  REASONING_EFFORT_OPTIONS.map((o) => ({
-    value: o.value,
-    label: o.value === '' ? '跟随模型' : o.label,
-  })),
-)
-
-// 思考控件 title(R18):不支持/跟随模型/具体档位三种语义,悬停即见诚实说明
-const effortTitle = computed(() => {
-  if (!supportsReasoning.value) return '该客户端不支持调节思考强度'
-  if (!reasoningEffort.value) {
-    return '跟随模型:zcode 等缺省取该模型支持的最高档,实际档位以运行反馈为准'
-  }
-  return '思考档位:按模型支持档位就近映射(实际生效档位以运行反馈为准)'
-})
-
 // 触发器 title 全名(R19):选择器收窄省略后,悬停触发器可读选中项完整名称
 const agentTitle = computed(() => `客户端: ${selectedAgent.value?.label ?? '未选择'}`)
-const channelTitle = computed(() => `渠道: ${currentChannelGroup.value?.name ?? '默认渠道'}`)
-const modelTitle = computed(() => {
-  const label = modelOptions.value.find((o) => o.value === modelId.value)?.label
-  return `模型: ${label ?? '未选择'}`
-})
 const modeTitle = computed(() => `模式: ${mode.value}`)
 
-// 仅当客户端无可用模型或明确声明无切换能力且只有默认跟随项时才锁定
-const modelLocked = computed(() => {
-  const agent = selectedAgent.value
-  if (!agent) return true
-  if (agent.models.length === 0) return true
-  if (agent.capabilities.modelSwitch === 'none' && agent.models.length <= 1) return true
-  return false
+/** 锁定单一口径(B-11/S-10):客户端/发布框/迷你条三处共用 labels.isModelLocked */
+const modelLocked = computed(() => isModelLocked(selectedAgent.value))
+
+/** disabled 触发器 title 的诚实原因(S-10):区分「无可用模型」与「不支持切换」 */
+const modelDisabledHint = computed(() =>
+  selectedAgent.value && selectedAgent.value.models.length === 0
+    ? '无可用模型'
+    : '该客户端不支持切换模型',
+)
+
+/** S-13:客户端能力点徽标(思考/附件/续聊),悬停 title 逐项说明 */
+const capBadges = computed<Array<{ key: string; short: string; label: string }>>(() => {
+  const caps = selectedAgent.value?.capabilities
+  if (!caps) return []
+  const list: Array<{ key: string; short: string; label: string }> = []
+  if (caps.reasoningEffort) list.push({ key: 'think', short: '思', label: '可调思考档位' })
+  if (caps.attachments) list.push({ key: 'att', short: '附', label: '支持附件透传' })
+  if (caps.sessionResume) list.push({ key: 'cont', short: '续', label: '支持会话续聊' })
+  return list
 })
+const capTitle = computed(() =>
+  capBadges.value.length > 0 ? `能力: ${capBadges.value.map((c) => c.label).join(' / ')}` : '',
+)
 
 // 客户端拥有的可用模型列表(取套餐覆盖交集)
 const effectiveModels = computed(() => {
@@ -110,20 +96,6 @@ const channelGroups = computed<ChannelGroup[]>(() => {
   return parseChannelsAndModels(effectiveModels.value)
 })
 
-const channelOptions = computed(() => {
-  return channelGroups.value.map((g) => ({ value: g.id, label: g.name }))
-})
-
-const currentChannelGroup = computed(() => {
-  return channelGroups.value.find((g) => g.id === selectedChannelId.value) ?? channelGroups.value[0]
-})
-
-// 级联模型选项:严格只展示当前渠道下的有效模型
-const modelOptions = computed(() => {
-  if (modelLocked.value) return [{ value: CLIENT_FOLLOW_MODEL, label: '跟随客户端' }]
-  return currentChannelGroup.value?.models ?? []
-})
-
 // 仅在客户端支持切模型且已选中时随 DTO 透传;其余情况省略字段
 const resolvedModelId = computed(() =>
   selectedAgent.value && !modelLocked.value && modelId.value ? modelId.value : undefined,
@@ -133,6 +105,30 @@ const resolvedModelId = computed(() =>
 const resolvedReasoningEffort = computed(() =>
   supportsReasoning.value && reasoningEffort.value ? reasoningEffort.value : undefined,
 )
+
+/**
+ * 记忆落盘时机(S-17/R19):只在用户交互事件里 writeModelPref,
+ * 合法性同步(级联回正/记忆恢复)一律不落盘——避免程序化赋值冒充用户选择。
+ */
+function persistModelPref(): void {
+  if (!agentId.value) return
+  writeModelPref(agentId.value, {
+    channelId: selectedChannelId.value,
+    modelId: modelId.value,
+    ...(reasoningEffort.value ? { reasoningEffort: reasoningEffort.value } : {}),
+  })
+}
+
+function onModelSelect(payload: { channelId: string; modelId: string }): void {
+  selectedChannelId.value = payload.channelId
+  modelId.value = payload.modelId
+  persistModelPref()
+}
+
+function onEffortUpdate(val: ReasoningEffort | ''): void {
+  reasoningEffort.value = val
+  persistModelPref()
+}
 
 // 级联同步:保障渠道与模型严格合法
 function syncCascadingModel() {
@@ -259,22 +255,9 @@ function restoreLastChannel(): void {
   queueMicrotask(() => {
     restoringPref = false
   })
+  // S-17:一键还原属用户交互,还原结果立即成为该客户端的新记忆
+  persistModelPref()
 }
-
-// 选择即持久(R19):渠道/模型/档位任一变更立刻写记忆,不再等提交成功才 writeModelPref,
-// 避免改好没发就切走被旧记忆静默覆盖;未选中客户端时无记忆主体,跳过
-watch(
-  [selectedChannelId, modelId, reasoningEffort],
-  () => {
-    if (!agentId.value) return
-    writeModelPref(agentId.value, {
-      channelId: selectedChannelId.value,
-      modelId: modelId.value,
-      ...(reasoningEffort.value ? { reasoningEffort: reasoningEffort.value } : {}),
-    })
-  },
-  { immediate: true },
-)
 
 watch(channelGroups, () => {
   syncCascadingModel()
@@ -308,9 +291,45 @@ watch(
   },
 )
 
+// ---- B-04/S-04:发布框草稿持久化——切换视图/会话/新任务都不销毁正在输入的内容 ----
+const DRAFT_DEBOUNCE_MS = 300
+let draftTimer: ReturnType<typeof setTimeout> | null = null
+
+function saveDraft(): void {
+  store.saveComposerDraft({
+    prompt: prompt.value,
+    attachments: attachments.value.map((a) => ({ path: a.path, kind: a.kind })),
+    mode: mode.value,
+    workspace: workspace.value,
+    workspaceSource: workspaceSource.value,
+    batchMode: batchMode.value,
+  })
+}
+
+/** 正文逐字输入走 300ms debounce,避免每次按键都写 store */
+function scheduleSaveDraft(): void {
+  if (draftTimer) clearTimeout(draftTimer)
+  draftTimer = setTimeout(saveDraft, DRAFT_DEBOUNCE_MS)
+}
+
+watch(prompt, scheduleSaveDraft)
+watch([mode, workspace, workspaceSource, batchMode, attachments], saveDraft, { deep: true })
+
 onMounted(() => {
+  // 取走即清:只恢复一次,不残留草稿反复覆盖用户新输入
+  const draft = store.takeComposerDraft()
+  if (draft) {
+    prompt.value = draft.prompt
+    attachments.value = draft.attachments.map((a) => ({ path: a.path, kind: a.kind }))
+    if (draft.mode === 'build' || draft.mode === 'edit' || draft.mode === 'plan') mode.value = draft.mode
+    workspace.value = draft.workspace
+    workspaceSource.value = draft.workspaceSource
+    batchMode.value = draft.batchMode
+  }
   window.addEventListener('focus-composer', focusPrompt)
   window.addEventListener('fill-composer', onFillComposer)
+  document.addEventListener('click', onMoreOutsideClick)
+  document.addEventListener('keydown', onMoreKeydown)
 })
 
 // ---- P0-10:引导中心空态点场景卡 → 草稿填入常驻发布框,聚焦并短暂高亮 ----
@@ -358,6 +377,12 @@ watch(
 )
 
 onBeforeUnmount(() => {
+  if (draftTimer) clearTimeout(draftTimer)
+  if (prefilledTimer) clearTimeout(prefilledTimer)
+  // 离开发布框(切会话/视图/新任务)前落最后一次草稿
+  saveDraft()
+  document.removeEventListener('click', onMoreOutsideClick)
+  document.removeEventListener('keydown', onMoreKeydown)
   window.removeEventListener('focus-composer', focusPrompt)
   window.removeEventListener('fill-composer', onFillComposer)
 })
@@ -395,6 +420,11 @@ function onDrop(event: DragEvent): void {
   addFiles(event.dataTransfer?.files ?? null)
 }
 
+/** S-06:GlassInput 剪贴板文件转发 → 与拖拽/选文件同一条入附件路径 */
+function onPaste(files: FileList): void {
+  addFiles(files)
+}
+
 /** 附件路径去重后唯一,可作稳定 key;移除按路径而非数组下标 */
 function removeAttachment(path: string): void {
   attachments.value = attachments.value.filter((a) => a.path !== path)
@@ -425,6 +455,37 @@ async function rescanAgents(): Promise<void> {
   }
 }
 
+// ---- S-14:「更多」弹层(批量/高级参数收拢于此),点外部/Esc 关闭 ----
+const moreOpen = ref(false)
+const moreWrap = ref<HTMLElement | null>(null)
+
+/** B13:弹层估高——用于判定下方是否放得下(简单翻转思路,不引第三方翻转库) */
+const MORE_PANEL_EST_H = 320
+/** B13:下方放不下且上方更宽裕时上翻;默认向下弹出,不压住正在编辑的输入框 */
+const moreOpenUp = ref(false)
+
+function measureMorePanel(): void {
+  const rect = moreWrap.value?.getBoundingClientRect()
+  if (!rect) return
+  const spaceBelow = window.innerHeight - rect.bottom - 8
+  const spaceAbove = rect.top - 8
+  moreOpenUp.value = spaceBelow < MORE_PANEL_EST_H && spaceAbove > spaceBelow
+}
+
+function toggleMore(): void {
+  if (!moreOpen.value) measureMorePanel()
+  moreOpen.value = !moreOpen.value
+}
+
+function onMoreOutsideClick(event: MouseEvent): void {
+  if (!moreOpen.value) return
+  if (moreWrap.value && !moreWrap.value.contains(event.target as Node)) moreOpen.value = false
+}
+
+function onMoreKeydown(event: KeyboardEvent): void {
+  if (event.key === 'Escape' && moreOpen.value) moreOpen.value = false
+}
+
 const showSlashPopup = ref(false)
 const slashQuery = ref('')
 const slashPopupRef = ref<{ onKeydown: (e: KeyboardEvent) => boolean } | null>(null)
@@ -439,8 +500,9 @@ function handlePromptChange(val: string): void {
   }
 }
 
+/** S-16:斜杠命令只替换首个斜杠词并追加模板,已在框内的其余内容不再被整框覆盖 */
 function applySlashCommand(cmd: SlashCommand): void {
-  prompt.value = cmd.template
+  prompt.value = prompt.value.replace(/^\S*/, '') + cmd.template
   if (cmd.recommendedMode) {
     mode.value = cmd.recommendedMode
   }
@@ -519,9 +581,10 @@ async function submit(): Promise<void> {
       store.filter.value.agentId = ''
       store.showToast('已清除客户端筛选以显示新任务')
     }
-    // 渠道/模型/档位记忆已由 watch 即时写入(R19),提交成功仅清理草稿与附件
+    // 渠道/模型/档位记忆已由用户交互事件即时写入(S-17),提交成功仅清理草稿与附件
     prompt.value = ''
     attachments.value = []
+    saveDraft()
   } catch (error) {
     // 批量入队可能部分成功,失败后仍要刷新列表,避免界面漏掉已入队的任务
     setNotice(error instanceof Error ? error.message : String(error))
@@ -567,32 +630,133 @@ function onKeydown(event: KeyboardEvent): void {
       </GlassButton>
     </div>
 
-    <div class="input-pos" :class="{ prefilled }">
-      <SlashCommandPopup
-        v-if="showSlashPopup"
-        ref="slashPopupRef"
-        :query="slashQuery"
-        @select="applySlashCommand"
-        @close="showSlashPopup = false"
-      />
+    <!-- S-14:输入卡片 = 上输入框 + 紧贴底边的内嵌胶囊行(控件逻辑与事件不变,仅重排 DOM 与样式) -->
+    <div class="input-card" :class="{ prefilled }">
+      <div class="input-pos">
+        <SlashCommandPopup
+          v-if="showSlashPopup"
+          ref="slashPopupRef"
+          :query="slashQuery"
+          @select="applySlashCommand"
+          @close="showSlashPopup = false"
+        />
 
-      <GlassInput
-        ref="promptBox"
-        :model-value="prompt"
-        multiline
-        :rows="3"
-        auto-grow
-        send-label="派发"
-        :send-disabled="submitting || !prompt.trim() || noClients"
-        :placeholder="noClients
-          ? '暂无可用客户端,先在左侧启用或重新扫描'
-          : batchMode
-            ? '每行一条任务,批量入队…(Enter 提交 / Shift+Enter 换行)'
-            : '下达 Agent 任务,键入 / 呼出快捷技能…(Enter 提交 / Shift+Enter 换行)'"
-        @update:model-value="handlePromptChange"
-        @keydown="onKeydown"
-        @send="submit"
-      />
+        <GlassInput
+          ref="promptBox"
+          :model-value="prompt"
+          multiline
+          :rows="3"
+          auto-grow
+          send-label="派发"
+          :send-disabled="submitting || !prompt.trim() || noClients"
+          :placeholder="noClients
+            ? '暂无可用客户端,先在左侧启用或重新扫描'
+            : batchMode
+              ? '每行一条任务,批量入队…(Enter 提交 / Shift+Enter 换行)'
+              : '下达 Agent 任务,键入 / 呼出快捷技能…(Enter 提交 / Shift+Enter 换行)'"
+          @update:model-value="handlePromptChange"
+          @keydown="onKeydown"
+          @send="submit"
+          @paste="onPaste"
+        />
+      </div>
+
+      <div class="input-pills">
+        <div class="pills-left">
+          <!-- R19:触发器带名称前缀(样式 ::before),title 悬停见选中项全名;
+               S-13:客户端可选项多时支持即时搜索 + 能力点徽标 -->
+          <GlassSelect
+            v-model="agentId"
+            class="who"
+            searchable
+            :title="agentTitle"
+            :options="activeAgents.map((a) => ({ value: a.id, label: `🤖 ${a.label}` }))"
+          />
+          <span v-if="capBadges.length > 0" class="cap-badges" :title="capTitle">
+            <i v-for="c in capBadges" :key="c.key" class="cap-dot">{{ c.short }}</i>
+          </span>
+          <!-- 现代化一体式模型选择器:单胶囊即可呼出带搜索与分类面板，告别渠道模型割裂 -->
+          <ModelSelector
+            :channel-groups="channelGroups"
+            :current-channel-id="selectedChannelId"
+            :current-model-id="modelId"
+            :disabled="modelLocked"
+            :disabled-hint="modelDisabledHint"
+            @select="onModelSelect"
+          />
+          <!-- 现代化思考强度分段胶囊:支持时展示微调器，不支持时自然隐藏，零残缺破损占位;
+               S-02:发布框哨兵「跟随客户端」+ hint 取 labels.EFFORT_HINT_TEXT[''] -->
+          <ReasoningEffortPicker
+            :model-value="reasoningEffort"
+            :supported="supportsReasoning"
+            sentinel-label="跟随客户端"
+            :sentinel-hint="EFFORT_HINT_TEXT['']"
+            @update:model-value="onEffortUpdate"
+          />
+        </div>
+
+        <div class="pills-right">
+          <GlassSelect
+            v-model="mode"
+            class="mode"
+            :title="modeTitle"
+            :options="MODE_OPTIONS"
+          />
+          <GlassButton variant="ghost" size="sm" @click="pickAttachment">
+            附件{{ attachments.length ? ` ${attachments.length}` : '' }}
+          </GlassButton>
+          <!-- S-14:批量/高级参数收进「更多」弹层,窄窗折行时胶囊行优先 -->
+          <div ref="moreWrap" class="more-wrap">
+            <GlassButton
+              variant="ghost"
+              size="sm"
+              :class="{ on: moreOpen || batchMode || advanced }"
+              title="批量派发与高级参数"
+              @click="toggleMore"
+            >
+              更多{{ batchMode ? ' · 批量' : '' }}{{ advanced ? ' · 高级' : '' }}
+            </GlassButton>
+            <div v-if="moreOpen" class="more-pop glass" :class="{ 'open-up': moreOpenUp }" @click.stop>
+              <div class="more-toggles">
+                <button
+                  type="button"
+                  class="more-toggle"
+                  :class="{ on: batchMode }"
+                  @click="batchMode = !batchMode"
+                >
+                  批量派发
+                </button>
+                <button
+                  type="button"
+                  class="more-toggle"
+                  :class="{ on: advanced }"
+                  @click="advanced = !advanced"
+                >
+                  高级参数
+                </button>
+              </div>
+              <div v-if="batchMode" class="more-hint">批量模式：每行一条任务，Enter 提交</div>
+              <div v-if="advanced" class="advanced">
+                <label>
+                  派生工作区源目录(git → worktree / 其他 → 整拷)
+                  <GlassInput v-model="workspaceSource" mono placeholder="留空=直接使用上面的工作目录" />
+                </label>
+                <label>
+                  禁用工具(逗号分隔,工具级)
+                  <GlassInput v-model="denyList" placeholder="如 Bash,Write" />
+                </label>
+                <label>
+                  最大轮数 (max-turns)
+                  <GlassInput v-model="maxTurns" placeholder="不限" />
+                </label>
+                <div v-if="selectedAgent && !selectedAgent.capabilities.attachments" class="hint">
+                  {{ selectedAgent.label }} 附件能力待核实,附件不会透传。
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
     </div>
 
     <div class="ws-row">
@@ -608,69 +772,6 @@ function onKeydown(event: KeyboardEvent): void {
       <GlassButton variant="ghost" size="sm" title="选择目录填入工作区" @click="pickWorkspace">
         选目录
       </GlassButton>
-    </div>
-
-    <div class="toolbar">
-      <div class="selectors-group">
-        <!-- R19:触发器带名称前缀(样式 ::before),title 悬停见选中项全名 -->
-        <GlassSelect
-          v-model="agentId"
-          class="who"
-          :title="agentTitle"
-          :options="activeAgents.map((a) => ({ value: a.id, label: `🤖 ${a.label}` }))"
-        />
-        <!-- 现代化一体式模型选择器:单胶囊即可呼出带搜索与分类面板，告别渠道模型割裂 -->
-        <ModelSelector
-          :channel-groups="channelGroups"
-          :current-channel-id="selectedChannelId"
-          :current-model-id="modelId"
-          :disabled="modelLocked"
-          @select="({ channelId, modelId: mId }) => {
-            selectedChannelId = channelId
-            modelId = mId
-          }"
-        />
-        <GlassSelect
-          v-model="mode"
-          class="mode"
-          :title="modeTitle"
-          :options="MODE_OPTIONS"
-        />
-        <!-- 现代化思考强度分段胶囊:支持时展示微调器，不支持时自然隐藏，零残缺破损占位 -->
-        <ReasoningEffortPicker
-          v-model="reasoningEffort"
-          :supported="supportsReasoning"
-        />
-      </div>
-      <div class="actions-group">
-        <GlassButton variant="ghost" size="sm" @click="pickAttachment">
-          附件{{ attachments.length ? ` ${attachments.length}` : '' }}
-        </GlassButton>
-        <GlassButton variant="ghost" size="sm" :class="{ on: batchMode }" @click="batchMode = !batchMode">
-          批量
-        </GlassButton>
-        <GlassButton variant="ghost" size="sm" :class="{ on: advanced }" @click="advanced = !advanced">
-          高级
-        </GlassButton>
-      </div>
-    </div>
-
-    <div v-if="advanced" class="advanced">
-      <label>
-        派生工作区源目录(git → worktree / 其他 → 整拷)
-        <GlassInput v-model="workspaceSource" mono placeholder="留空=直接使用上面的工作目录" />
-      </label>
-      <label>
-        禁用工具(逗号分隔,工具级)
-        <GlassInput v-model="denyList" placeholder="如 Bash,Write" />
-      </label>
-      <label>
-        最大轮数 (max-turns)
-        <GlassInput v-model="maxTurns" placeholder="不限" />
-      </label>
-      <div v-if="selectedAgent && !selectedAgent.capabilities.attachments" class="hint">
-        {{ selectedAgent.label }} 附件能力待核实,附件不会透传。
-      </div>
     </div>
 
     <div v-if="attachments.length" class="chips">
@@ -708,30 +809,74 @@ function onKeydown(event: KeyboardEvent): void {
   box-sizing: border-box;
 }
 
-.toolbar {
+/* S-14:输入卡片——上输入框、下胶囊行同卡片;聚焦态由 :focus-within 统一表达。
+   B13:「更多」弹层以此为定位基准(width: min(320px, 100%) 的 100% = 卡片内宽) */
+.input-card {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  width: 100%;
+  max-width: 100%;
+  min-width: 0;
+  box-sizing: border-box;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-md);
+  background: var(--field-bg);
+  backdrop-filter: var(--glass-blur);
+  transition: border-color var(--fast) var(--ease), box-shadow var(--fast) var(--ease);
+}
+
+.input-card:focus-within {
+  border-color: var(--accent-line);
+  box-shadow: 0 0 0 3px var(--accent-dim);
+}
+
+/* 卡片已承载边框与底色:仅内层主输入面去壳,避免双重描边。
+   B12:选择器必须收紧到 .input-pos 之外的直接子链——否则「更多」弹层内的
+   workspaceSource/denyList/maxTurns 输入框会被一并去壳,失去边框与聚焦环 */
+.input-card > .input-pos :deep(.g-field) {
+  border: none;
+  background: transparent;
+  box-shadow: none;
+  border-radius: var(--radius-md) var(--radius-md) 0 0;
+}
+
+.input-card > .input-pos :deep(.g-field:focus) {
+  box-shadow: none;
+}
+
+/* S-14:紧贴输入框底边的内嵌胶囊行:左=客户端/模型/思考,右=模式/附件/更多 */
+.input-pills {
   display: flex;
   align-items: center;
   justify-content: space-between;
   gap: 8px;
   flex-wrap: wrap;
   width: 100%;
+  max-width: 100%;
+  min-width: 0;
   box-sizing: border-box;
+  padding: 5px 8px 6px;
+  border-top: 1px solid var(--line);
 }
 
-.selectors-group {
+.pills-left {
   display: flex;
   align-items: center;
   gap: 6px;
   flex-wrap: wrap;
-  flex: 1;
+  flex: 1 1 auto;
   min-width: 0;
 }
 
-.actions-group {
+.pills-right {
   display: flex;
   align-items: center;
   gap: 6px;
-  flex-shrink: 0;
+  flex-wrap: wrap;
+  flex: none;
+  /* 窄窗折行时整组落到胶囊行第二行,仍优先于「更多」内的参数面板 */
+  margin-left: auto;
 }
 
 .who {
@@ -740,15 +885,26 @@ function onKeydown(event: KeyboardEvent): void {
   max-width: 210px;
 }
 
-.channel {
-  min-width: 100px;
-  max-width: 140px;
+/* S-13:紧随触发器展示的能力点徽标(思考/附件/续聊),title 逐项说明 */
+.cap-badges {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+  flex: none;
+  margin-left: -3px;
+  cursor: help;
 }
 
-.model {
-  min-width: 120px;
-  /* R19:放宽上限,容纳「模型: 」前缀与较长模型名 */
-  max-width: 280px;
+.cap-dot {
+  font-style: normal;
+  font-size: 9.5px;
+  line-height: 14px;
+  width: 14px;
+  text-align: center;
+  border-radius: 3px;
+  border: 1px solid var(--line);
+  background: var(--surface-dim);
+  color: var(--muted);
 }
 
 .mode {
@@ -756,17 +912,9 @@ function onKeydown(event: KeyboardEvent): void {
   max-width: 140px;
 }
 
-.effort {
-  min-width: 75px;
-  max-width: 95px;
-}
-
 /* R19:触发器名称前缀(仅入口显示,下拉选项保持纯选项);省略时悬停 title 见全名 */
 .who :deep(.g-select-text)::before,
-.channel :deep(.g-select-text)::before,
-.model :deep(.g-select-text)::before,
-.mode :deep(.g-select-text)::before,
-.effort :deep(.g-select-text)::before {
+.mode :deep(.g-select-text)::before {
   color: var(--muted);
   white-space: nowrap;
 }
@@ -775,20 +923,8 @@ function onKeydown(event: KeyboardEvent): void {
   content: '客户端: ';
 }
 
-.channel :deep(.g-select-text)::before {
-  content: '渠道: ';
-}
-
-.model :deep(.g-select-text)::before {
-  content: '模型: ';
-}
-
 .mode :deep(.g-select-text)::before {
   content: '模式: ';
-}
-
-.effort :deep(.g-select-text)::before {
-  content: '思考: ';
 }
 
 /* R17:无可用客户端空态,内联于输入区上方 */
@@ -819,50 +955,14 @@ function onKeydown(event: KeyboardEvent): void {
   to { transform: rotate(360deg); }
 }
 
-/* R18:思考档位不支持说明徽标——disabled GlassSelect 承载「不支持」值,
-   外层徽标提供虚线外观与可悬停的 title(GlassSelect disabled 态 pointer-events:none 无法悬停) */
-.effort-off {
-  display: inline-flex;
-  align-items: center;
-  font-size: 11px;
-  color: var(--faint);
-  border: 1px dashed var(--line);
-  border-radius: var(--radius-sm);
-  padding: 5px 8px;
-  white-space: nowrap;
-  cursor: help;
-}
-
-.effort-off :deep(.g-select-wrap) {
-  min-width: 0;
-}
-
-/* disabled 的 0.55 透明度与徽标本就偏淡的 --faint 叠加会难以阅读,恢复不透明 */
-.effort-off :deep(.g-select-wrap.disabled) {
-  opacity: 1;
-}
-
-.effort-off :deep(.g-select-trigger) {
-  height: auto;
-  padding: 0;
-  border: none;
-  background: none;
-  box-shadow: none;
-  cursor: help;
-}
-
-.effort-off :deep(.g-arrow) {
-  display: none;
-}
-
 /* P0-10:场景卡预填高亮,品牌色边框 1.2s 内自行消退 */
-.input-pos.prefilled :deep(.g-field) {
+.input-card.prefilled {
   border-color: var(--accent-line);
   box-shadow: 0 0 0 3px var(--accent-dim);
   transition: border-color 400ms var(--ease), box-shadow 900ms var(--ease);
 }
 
-/* 工作区行:目录输入占主导 */
+/* 工作区行:目录输入占主导(独立一行,不随胶囊行折叠) */
 .ws-row {
   display: flex;
   align-items: center;
@@ -910,9 +1010,68 @@ function onKeydown(event: KeyboardEvent): void {
   border-color: var(--accent-line);
 }
 
+/* B13:「更多」弹层默认向下弹出,不再覆盖正在编辑的输入框;空间不足时上翻。
+   定位基准取输入卡片(.input-card,见其 position: relative),宽度 min(320px, 100%)
+   随卡片收窄,窄列不横向溢出 */
+.more-wrap {
+  display: inline-flex;
+}
+
+.more-pop {
+  position: absolute;
+  right: 0;
+  top: calc(100% + 6px);
+  z-index: var(--z-popover);
+  width: min(320px, 100%);
+  max-width: 100%;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 10px;
+  border-radius: var(--radius-md);
+  border: 1px solid var(--accent-line);
+  box-shadow: 0 14px 34px rgba(0, 0, 0, 0.4), var(--glass-shadow);
+  box-sizing: border-box;
+}
+
+.more-pop.open-up {
+  top: auto;
+  bottom: calc(100% + 6px);
+}
+
+.more-toggles {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.more-toggle {
+  flex: 1;
+  font-size: 11.5px;
+  font-family: inherit;
+  padding: 4px 8px;
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--line);
+  background: var(--surface-dim);
+  color: var(--muted);
+  cursor: pointer;
+  transition: all var(--fast) var(--ease);
+}
+
+.more-toggle.on {
+  color: var(--accent-strong);
+  border-color: var(--accent-line);
+  background: var(--accent-dim);
+}
+
+.more-hint {
+  font-size: 11px;
+  color: var(--muted);
+}
+
 .advanced {
   display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+  grid-template-columns: 1fr;
   gap: 8px;
   width: 100%;
   max-width: 100%;
@@ -956,19 +1115,6 @@ function onKeydown(event: KeyboardEvent): void {
   padding: 0 2px;
   color: var(--muted);
   cursor: pointer;
-}
-
-/* G3-15:单渠道只读渠道徽标,仿 effort-off 说明徽标(虚线边框、--faint 色、悬停说明) */
-.channel-badge {
-  display: inline-flex;
-  align-items: center;
-  font-size: 11px;
-  color: var(--faint);
-  border: 1px dashed var(--line);
-  border-radius: var(--radius-sm);
-  padding: 5px 8px;
-  white-space: nowrap;
-  cursor: help;
 }
 
 /* G3-07:notice 分级(info=中性操作提示/warn=回落提示/err=失败),不再全部呈错误红 */

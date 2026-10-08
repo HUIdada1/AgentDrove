@@ -140,6 +140,15 @@ async function bootstrap(): Promise<void> {
     })
   })
 
+  // A18:外链一律交系统浏览器,渲染层不得"裸开新窗"——web-contents-created 覆盖主窗与迷你条,
+  // 仅放行 http/https 交 shell.openExternal,其余(自定义协议/file/未知)静默拒绝,一律 deny 不新建窗口
+  app.on('web-contents-created', (_event, contents) => {
+    contents.setWindowOpenHandler(({ url }) => {
+      if (url.startsWith('http://') || url.startsWith('https://')) void shell.openExternal(url)
+      return { action: 'deny' }
+    })
+  })
+
   // ---- 客户端驱动与注册表:探测延后到窗口就绪后后台跑,注册表先以空态参与装配 ----
   const registry = new Registry()
   const drivers = new Map<string, AgentDriver>()

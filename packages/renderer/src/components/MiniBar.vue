@@ -3,8 +3,13 @@ import { computed, onMounted, onUnmounted, ref, watch } from 'vue'
 import GlassInput from '../ui/GlassInput.vue'
 import GlassSelect from '../ui/GlassSelect.vue'
 import Logo from './Logo.vue'
-import { readModelPref } from '../stores/app'
-import { CLIENT_FOLLOW_MODEL, REASONING_EFFORT_OPTIONS, parseChannelsAndModels } from '../labels'
+import { readModelPref, writeModelPref } from '../stores/app'
+import {
+  CLIENT_FOLLOW_MODEL,
+  REASONING_EFFORT_OPTIONS,
+  isModelLocked,
+  parseChannelsAndModels,
+} from '../labels'
 import type { AgentView, ReasoningEffort } from '@agent-drove/shared'
 
 // 迷你条是独立窗口生命周期,刻意不依赖面板 store,直连 api 保持轻量;
@@ -21,14 +26,47 @@ const modelId = ref('')
 const effort = ref<ReasoningEffort | ''>('')
 
 const currentAgent = computed(() => agents.value.find((a) => a.id === agentId.value))
-/** modelSwitch=none 的客户端没有可选模型,只展示哨兵项且不透传 modelId(与发布框同语义) */
-const modelLocked = computed(() => currentAgent.value?.capabilities.modelSwitch === 'none')
+/** 锁定单一口径(B-11/S-10):与发布框/续聊栏共用 labels.isModelLocked(含无可用模型) */
+const modelLocked = computed(() => isModelLocked(currentAgent.value))
 
 /** 迷你窗不展开渠道层级:parseChannelsAndModels 各渠道模型直接展平为一列 */
 const miniModelOptions = computed(() => {
   if (modelLocked.value) return [{ value: CLIENT_FOLLOW_MODEL, label: '跟随客户端' }]
   return parseChannelsAndModels(currentAgent.value?.models ?? []).flatMap((g) => g.models)
 })
+
+/** 模型 → 所属渠道(展平后回写记忆需要原始渠道 id;找不到按默认渠道) */
+const channelOfModel = computed(() => {
+  const map = new Map<string, string>()
+  for (const g of parseChannelsAndModels(currentAgent.value?.models ?? [])) {
+    for (const m of g.models) map.set(m.value, g.id)
+  }
+  return map
+})
+
+/**
+ * S-15:派发成功后把当前模型/档位写回与主面板同一记忆键,
+ * 避免迷你条的选择只对本次生效、主面板下次仍按旧记忆派发;
+ * 未显式选择(哨兵/锁定)时保留既有记忆,绝不用空值把主面板的选择降级。
+ */
+function persistMiniPref(): void {
+  if (!agentId.value) return
+  const prev = readModelPref(agentId.value)
+  const explicit = Boolean(
+    !modelLocked.value && modelId.value && modelId.value !== CLIENT_FOLLOW_MODEL,
+  )
+  writeModelPref(agentId.value, {
+    channelId: explicit
+      ? (channelOfModel.value.get(modelId.value) ?? prev?.channelId ?? 'default')
+      : (prev?.channelId ?? 'default'),
+    modelId: explicit ? modelId.value : (prev?.modelId ?? ''),
+    ...(effort.value
+      ? { reasoningEffort: effort.value }
+      : prev?.reasoningEffort
+        ? { reasoningEffort: prev.reasoningEffort }
+        : {}),
+  })
+}
 
 /** 仅支持思考档位的客户端显示档位下拉(选项单一来源 labels.ts) */
 const effortSupported = computed(() => currentAgent.value?.capabilities.reasoningEffort === true)
@@ -116,6 +154,7 @@ async function submit(): Promise<void> {
         : {}),
     })
     prompt.value = ''
+    persistMiniPref()
     void window.api.hideMini()
   } catch (e) {
     // 失败原位显示原因,草稿保留、窗口不关,用户可直接改后重发(R20)

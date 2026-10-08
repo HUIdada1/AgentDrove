@@ -218,7 +218,7 @@ const tooltipStyle = computed(() => {
 <style scoped>
 .g-tooltip {
   position: fixed;
-  z-index: 99999;
+  z-index: var(--z-tooltip);
   pointer-events: none;
   max-width: 360px;
   padding: 6px 11px;

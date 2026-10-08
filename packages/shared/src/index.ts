@@ -75,6 +75,12 @@ export interface FollowupQueueItem extends CoreFollowupQueueItem {
   mode?: TaskRecord['mode']
   toolPolicy?: TaskRecord['toolPolicy']
   reasoningEffort?: ReasoningEffort
+  /**
+   * A17:排队项附件显式收窄为 file/image,与 ContinueOptions.attachments 同口径——
+   * 覆盖 core 侧 TaskAttachment[](含 'directory'),渲染层附件入口不产出目录,
+   * 避免 'directory' 宽化经队列回传渲染层后要去处理一个不可能出现的 kind。
+   */
+  attachments?: Array<{ path: string; kind: 'file' | 'image' }>
 }
 
 export interface SkillDefinition {
@@ -252,6 +258,13 @@ export interface AgentView {
   usedTokensCycle?: number
   /** G5-02:周期累计消耗点数 */
   usedCreditsCycle?: number
+  /**
+   * K-03 周期窗口(仅套餐校准填了 cycleDays 时产出):周期起点与下一次重置日期,
+   * 本地日 YYYY-MM-DD(与 UsageView.day 同口径);边界落在本地零点、按 cycleDays 天切分。
+   * 缺省(自首次任务累计口径)不产出,渲染层据此回落「自首次任务累计(近似)」文案(见 P-20)。
+   */
+  cycleStartAt?: string
+  cycleResetAt?: string
   /** 用户是否手工校准了套餐 (Plan Override) */
   isOverridden?: boolean
   totalCredits?: number
@@ -308,6 +321,11 @@ export interface ContinueOptions {
   mode?: TaskRecord['mode']
   toolPolicy?: TaskRecord['toolPolicy']
   reasoningEffort?: ReasoningEffort
+  /**
+   * 本轮附件(K-07):缺省继承父任务 attachments;续聊与排队接续(processFollowupQueue)同口径透传。
+   * 只收渲染层附件入口真正产出的两种 kind(目录不参与,避免与 SubmitTaskDto 语义混淆)。
+   */
+  attachments?: Array<{ path: string; kind: 'file' | 'image' }>
 }
 
 /** 追问队列自动接续推送(P0-6,通道 followup:continued):渲染层据此切换选中并提示去处 */
@@ -362,6 +380,9 @@ export interface UsageView {
   totalCredits?: number
   /** 总额度 Tokens */
   totalTokens?: number
+  /** K-03 周期窗口(仅 cycleDays>0 的校准有值):周期起点/下次重置日期(本地日 YYYY-MM-DD) */
+  cycleStartAt?: string
+  cycleResetAt?: string
 }
 
 export interface MergeResult {
@@ -480,7 +501,12 @@ export interface AgentDroveApi extends PushEvents {
   // launch:app
   launchApp(agentId: string): Promise<LaunchChannel>
   // usage:get
-  usageGet(): Promise<UsageView[]>
+  /**
+   * 用量与额度查询(K-01):force=true 绕过主进程按日 quotaCache 现算并回写缓存
+   * (侧栏 ⟳ 手动刷新的现算通道),同时让 zcode 本地用量库的短 TTL 缓存失效;
+   * 缺省/force=false 命中当日缓存,与 agents:list 严格同源免双算。
+   */
+  usageGet(opts?: { force?: boolean }): Promise<UsageView[]>
   /** 极速额度查询(不触发慢速 CLI 探活),用于实时事件增量刷新 */
   quotaGet?(): Promise<Array<Partial<AgentView> & { agentId: string }>>
   // settings:get/update(含 schedulerPaused)

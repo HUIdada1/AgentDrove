@@ -1,18 +1,16 @@
 <script setup lang="ts">
-import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
+import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { useAppStore, setTheme } from '../stores/app'
 import GlassButton from '../ui/GlassButton.vue'
 import GlassMeter from '../ui/GlassMeter.vue'
 import GlassInput from '../ui/GlassInput.vue'
 import GlassModal from '../ui/GlassModal.vue'
 import Logo from './Logo.vue'
-import { formatQuotaNumber, formatTokens, formatAgentQuotaDisplay } from '../labels'
+// A-06:日常工作区 id 与分组展示名一律走 labels 单一口径,组件内不再自带字面量
+import { DAILY_PROJECT_ID, formatQuotaNumber, formatTokens, formatAgentQuotaDisplay } from '../labels'
 import type { AgentView, Project } from '@agent-drove/shared'
 
 const store = useAppStore()
-
-/** 内置日常工作区 id 由主进程(app.ts)定义,渲染层只做语义判断 */
-const DAILY_PROJECT_ID = 'daily'
 
 const notice = ref('')
 const renameTarget = ref<Project | null>(null)
@@ -25,21 +23,75 @@ const rescanning = ref(false)
 /** 工作区顶部切换胶囊弹层状态 */
 const showWsDropdown = ref(false)
 const railRef = ref<HTMLElement | null>(null)
+/** P-07:折叠态浮层以胶囊实测位置为锚点(浮层走 body,不受侧栏滚动容器裁切) */
+const capsuleRef = ref<HTMLElement | null>(null)
+const popoverTop = ref(12)
+
+const popoverStyle = computed(() => ({ left: '72px', top: `${popoverTop.value}px` }))
 
 function onGlobalClick(e: MouseEvent): void {
   const target = e.target as HTMLElement
-  if (!target.closest('.workspace-bar')) {
-    showWsDropdown.value = false
-  }
+  // 折叠态浮层 Teleport 到 body,点它不算「点外部」
+  if (!target.closest('.workspace-bar') && !target.closest('.ws-popover')) showWsDropdown.value = false
 }
 
-onMounted(() => window.addEventListener('click', onGlobalClick))
-onBeforeUnmount(() => window.removeEventListener('click', onGlobalClick))
+/** P-07:浮层(下拉/浮出面板)都可 Esc 关闭——一切浮层有退路 */
+function onGlobalKeydown(e: KeyboardEvent): void {
+  if (e.key === 'Escape' && showWsDropdown.value) showWsDropdown.value = false
+}
+
+onMounted(() => {
+  window.addEventListener('click', onGlobalClick)
+  window.addEventListener('keydown', onGlobalKeydown)
+})
+onBeforeUnmount(() => {
+  window.removeEventListener('click', onGlobalClick)
+  window.removeEventListener('keydown', onGlobalKeydown)
+})
+
+/** 展开发下拉、折叠开浮层;开合前记录胶囊位置,浮层与胶囊对齐 */
+function toggleWsDropdown(): void {
+  if (showWsDropdown.value) {
+    showWsDropdown.value = false
+    return
+  }
+  const rect = capsuleRef.value?.getBoundingClientRect()
+  if (rect) popoverTop.value = Math.max(8, Math.round(rect.top))
+  showWsDropdown.value = true
+}
+
+/** 收起/展开侧栏时关掉浮层,避免残留错位的面板 */
+watch(
+  () => store.railCollapsed.value,
+  () => {
+    showWsDropdown.value = false
+  },
+)
 
 /** 任务卡拖到工作区项上的悬停高亮(P0-2) */
 const dragOverProjectId = ref('')
 
-/** 今日用量按 agent 建索引:模板里每个客户端要读两次,避免每次渲染全表扫描 */
+/**
+ * A-08:胶囊 drop 落点——选中某工作区时即该项目;「全部工作区」态固定为日常工作区
+ * (不再拿 projects[0] 当替身,胶囊语义与投放落点一致)。
+ */
+const capsuleDropProject = computed<Project>(
+  () => store.selectedProject.value ?? { id: DAILY_PROJECT_ID, name: '日常', path: null, createdAt: 0 },
+)
+
+/** A-08:胶囊 title——拖拽悬停时直接说明投放目标(折叠态亦以此表达落点) */
+const capsuleTitle = computed(() => {
+  const target = capsuleDropProject.value
+  if (store.draggingTaskId.value && dragOverProjectId.value === target.id) {
+    return `松手投放到「${target.name}」`
+  }
+  const base = store.selectedProject.value
+    ? `当前工作区: ${store.selectedProject.value.name} (点击切换)`
+    : '全部工作区 (点击切换或投放卡片)'
+  return store.draggingTaskId.value ? `${base} · 投放目标:「${target.name}」` : base
+})
+
+/** G2-02/A-06:今日用量按 agent 建索引:模板里每个客户端要读两次,避免每次渲染全表扫描 */
 const usageByAgent = computed(() => {
   const map = new Map<string, number>()
   for (const row of store.usage.value) map.set(row.agentId, row.taskCount)
@@ -50,12 +102,25 @@ function usageOf(agent: AgentView): number {
   return usageByAgent.value.get(agent.id) ?? agent.usedToday ?? 0
 }
 
+/**
+ * C-06/C-08:余量口径单一事实源——优先 quotaOf 的现算快照,
+ * 快照缺失(尚未拉到)时回落 agents 旧内嵌字段,避免侧栏与设置页两处漂移。
+ */
+function quotaFields(agent: AgentView) {
+  const snapshot = store.quotaOf(agent.id)
+  return {
+    remainingCredits: snapshot?.remainingCredits ?? agent.remainingCredits,
+    remainingTokens: snapshot?.remainingTokens ?? agent.remainingTokens,
+    remainingPercent: snapshot?.remainingPercent ?? agent.remainingPercent,
+    totalCredits: snapshot?.totalCredits ?? agent.totalCredits,
+    totalTokens: snapshot?.totalTokens ?? agent.totalTokens,
+  }
+}
+
 function quotaInfo(agent: AgentView) {
   return formatAgentQuotaDisplay({
     plan: agent.plan,
-    remainingCredits: agent.remainingCredits,
-    remainingTokens: agent.remainingTokens,
-    remainingPercent: agent.remainingPercent,
+    ...quotaFields(agent),
     usedCreditsToday: agent.usedCreditsToday,
     usedTokensToday: agent.usedTokensToday,
     usedToday: usageOf(agent),
@@ -79,12 +144,13 @@ function pick(agent: AgentView): void {
     store.showToast(agentPickTitle(agent))
     return
   }
-  store.selectAgentContext(agent.id)
+  // A-03:选择 Agent = 进入其上下文(默认联动任务列筛选),统一走 setAgentContext
+  store.setAgentContext(agent.id)
 }
 
-/** 「全部对话」:显式清除会话绑定(G1-01:任务列筛选与绑定解耦,不再连带清除) */
+/** 「全部对话」:绑定与筛选同时清除(统一语义入口) */
 function clearAgentContext(): void {
-  store.agentContext.value = ''
+  store.setAgentContext('')
 }
 
 /** 可对话判定(R05):停用/非 headless 客户端置灰禁点 */
@@ -117,6 +183,32 @@ function pickProject(project: Project): void {
   store.selectedProjectId.value = store.selectedProjectId.value === project.id ? null : project.id
 }
 
+/** 下拉/浮层选项统一收口:选中并关闭面板(null=全部工作区) */
+function chooseProject(project: Project | null): void {
+  if (project) pickProject(project)
+  else store.selectedProjectId.value = null
+  showWsDropdown.value = false
+}
+
+/** 浮层里的「全部对话」:清除客户端绑定(与展开态同一入口) */
+function clearAgentBinding(): void {
+  store.setAgentContext('')
+  showWsDropdown.value = false
+}
+
+/** P-17:工作区项键盘可达——Enter/Space 与点击同语义 */
+function onWsItemKeydown(project: Project | null, event: KeyboardEvent): void {
+  if (event.key !== 'Enter' && event.key !== ' ') return
+  event.preventDefault()
+  chooseProject(project)
+}
+
+function onBindingKeydown(event: KeyboardEvent): void {
+  if (event.key !== 'Enter' && event.key !== ' ') return
+  event.preventDefault()
+  clearAgentBinding()
+}
+
 // ---- 任务卡拖入工作区(P0-2) ----
 function onWsDragOver(project: Project, event: DragEvent): void {
   if (!store.draggingTaskId.value) return
@@ -132,15 +224,21 @@ function onWsDragLeave(project: Project, event: DragEvent): void {
   if (dragOverProjectId.value === project.id) dragOverProjectId.value = ''
 }
 
+/** A-10/A-14:整批走 moveTasks;零变更时轻提示,不静默也不报错 */
 async function onWsDrop(project: Project, event: DragEvent): Promise<void> {
   event.preventDefault()
   if (dragOverProjectId.value === project.id) dragOverProjectId.value = ''
+  // 展开态下拉接收投放后收起,折叠态浮层不挡后续操作
+  if (!store.railCollapsed.value) showWsDropdown.value = false
   const taskId = store.draggingTaskId.value
   if (!taskId) return
   store.draggingTaskId.value = null
-  const task = store.tasks.value.find((t) => t.id === taskId)
-  if (!task || task.projectId === project.id) return
-  await store.moveTask(taskId, project.id)
+  const ids =
+    store.selection.value.has(taskId) && store.selection.value.size > 1
+      ? [...store.selection.value]
+      : [taskId]
+  const moved = await store.moveTasks(ids, project.id)
+  if (moved === 0) store.showToast('卡片已在该工作区')
 }
 
 async function addProject(): Promise<void> {
@@ -224,7 +322,9 @@ async function toggleEnabled(agent: AgentView): Promise<void> {
     return true
   }, '切换客户端状态失败')
   if (!done || !disabling || !wasContext) return
-  store.agentContext.value = ''
+  // B9:统一走 setAgentContext('')——直赋 agentContext 会漏清 filter.agentId,
+  // 留下「筛选仍按已停用客户端」的隐形空列表
+  store.setAgentContext('')
   store.showToast(`${agent.label} 已停用,发布框将回落到可用客户端`)
 }
 
@@ -268,12 +368,13 @@ function hasRunningTask(agentId: string): boolean {
 
 
 /**
- * R04:余量百分比,与余量文字同源同量纲。
+ * R04/C-06:余量百分比,与余量文字同源同量纲(quotaOf 优先)。
  * 返回 undefined = 未知态(未配置总量且无每日上限),不再虚构满格。
  */
 function quotaPct(agent: AgentView): number | undefined {
-  if (agent.remainingPercent !== undefined && Number.isFinite(agent.remainingPercent)) {
-    return Math.max(0, Math.min(100, Math.round(agent.remainingPercent)))
+  const percent = quotaFields(agent).remainingPercent
+  if (percent !== undefined && Number.isFinite(percent)) {
+    return Math.max(0, Math.min(100, Math.round(percent)))
   }
   if (agent.plan.dailyTaskCap > 0) {
     return Math.max(0, Math.round(((agent.plan.dailyTaskCap - usageOf(agent)) / agent.plan.dailyTaskCap) * 100))
@@ -284,65 +385,78 @@ function quotaPct(agent: AgentView): number | undefined {
 /** R04:余量阈值配色——>50% 绿 / 20%~50% 橙 / ≤20% 深橙 / 0 红 */
 function quotaColor(pct: number): string {
   if (pct <= 0) return 'var(--err)'
-  if (pct <= 20) return '#ea580c'
+  if (pct <= 20) return 'var(--warn-strong)'
   if (pct <= 50) return 'var(--warn)'
   return 'var(--ok)'
 }
 
-/** G1-06:客户端本地图标路径 → file:// URL(项目未注册自定义资源协议,生产以 file:// 加载、
- * CSP img-src 'self' 放行 file: 图片,dev 模式 CSP 被剥离;仅 logoPath 存在时调用,
- * 无 logo 客户端回落首字母,当前各驱动尚未上报 logoPath,默认渲染与现状一致) */
+/** C-05:余量告急(≤20%)——就地给校准入口 */
+function quotaLow(agent: AgentView): boolean {
+  const pct = quotaPct(agent)
+  return pct !== undefined && pct <= 20
+}
+
+/**
+ * G1-06:客户端本地图标路径 → file:// URL(项目未注册自定义资源协议,生产以 file:// 加载;
+ * B11:生产 CSP 实为 `img-src 'self' data:`,不含 file:,故 file:// 图标会被拦下、
+ * 不生效——当前各驱动尚未上报 logoPath,该分支默认不触发,现状渲染与首字母一致)
+ */
 function logoUrl(agent: AgentView): string {
   const p = (agent.logoPath ?? '').replace(/\\/g, '/').replace(/^\/+/, '')
   return encodeURI(`file:///${p}`)
 }
 
-/** G1-06:轻量额度刷新——只走 usage:get,不触发探活;失败经 run 就地提示 */
+/** C-01/C-06:手动刷新按钮状态——防重入 + 旋转态 */
+const refreshing = ref(false)
+
+/** G1-06/C-01:轻量额度刷新——只走 usage:get,不触发探活;force 现算绕过按日缓存 */
 async function refreshUsage(): Promise<void> {
-  await run(() => store.refreshUsage(), '刷新额度失败')
+  if (refreshing.value) return
+  refreshing.value = true
+  try {
+    await run(() => store.refreshUsage(true), '刷新额度失败')
+  } finally {
+    refreshing.value = false
+  }
 }
 
 /**
- * R04:余量文字与进度条同源同量纲——估算值前缀「约」,未配置额度显示「未设置额度」,
- * credits 取不到数据显示「—」(删除原 217 行的次数兜底,不再出现「余 0/0 次」假象)。
+ * C-05:跳设置页用量区——设置页按需挂载,用量卡片出现后再滚到位
+ * (有限重试,超时静默放弃,不阻塞用户手动查找)。
  */
-function quotaRemainingText(agent: AgentView): string {
-  const cap = agent.plan.dailyTaskCap
-  const used = usageOf(agent)
-  if (agent.plan.quotaKind === 'credits') {
-    // totalCredits 为套餐总量估算口径,剩余值统一前缀「约」
-    if (agent.remainingCredits !== undefined) {
-      return `余约 ${formatQuotaNumber(agent.remainingCredits)} 点`
+async function openUsageSection(): Promise<void> {
+  await run(() => store.refreshSettings(), '读取设置失败')
+  store.view.value = 'settings'
+  let tries = 0
+  const seek = (): void => {
+    const card = Array.from(document.querySelectorAll('section.card')).find(
+      (el) => el.querySelector('h2')?.textContent?.trim() === '用量',
+    )
+    if (card) {
+      card.scrollIntoView({ block: 'start', behavior: 'smooth' })
+      return
     }
-    if (agent.usedCreditsToday !== undefined) {
-      return `今日约 ${formatQuotaNumber(agent.usedCreditsToday)} 点`
-    }
-    return '—'
+    if (++tries < 20) window.setTimeout(seek, 50)
   }
-  if (agent.plan.quotaKind === 'daily') {
-    if (cap > 0) return `余 ${Math.max(0, cap - used)}/${cap} 次`
-    return '未设置额度'
-  }
-  // subscription 订阅制:剩余/消耗 Token 均为本应用统计估算;全部缺位 = 未设置额度
-  if (agent.remainingTokens !== undefined) {
-    return `余约 ${formatTokens(agent.remainingTokens)} tok`
-  }
-  if (agent.usedTokensToday) {
-    return `今日约 ${formatTokens(agent.usedTokensToday)} tok`
-  }
-  if (cap > 0) return `余 ${Math.max(0, cap - used)}/${cap} 次`
-  return '未设置额度'
+  void nextTick(() => seek())
 }
 
-/** R04:余量行文案——余量为 0 时以「额度已用尽」警示替代数值 */
-function quotaStatusText(agent: AgentView): string {
-  if (quotaPct(agent) === 0) return '额度已用尽'
-  return quotaRemainingText(agent)
+/**
+ * K-03/C-08:周期口径行——有 cycleDays 校准的客户端显示周期窗口(本地日 YYYY-MM-DD),
+ * 否则如实标注「自首次任务累计（近似）」。
+ */
+function cycleLine(agent: AgentView): string {
+  const snapshot = store.quotaOf(agent.id)
+  const start = snapshot?.cycleStartAt ?? agent.cycleStartAt
+  const reset = snapshot?.cycleResetAt ?? agent.cycleResetAt
+  if (start && reset) return `周期 ${start} ~ ${reset}（${reset} 重置）`
+  return '自首次任务累计（近似）'
 }
 
-/** R04:tooltip 与主行同口径;移除恒近总量的「剩余 Token」误导项,标注估算口径 */
+/** R04:tooltip 与主行同口径;移除恒近总量的「剩余 Token」误导项,标注估算口径与周期口径 */
 function agentDetailTitle(agent: AgentView): string {
   const pct = quotaPct(agent)
+  const fields = quotaFields(agent)
   const cap = agent.plan.dailyTaskCap
   const parts = [
     `${agent.label}${agent.version ? ' ' + agent.version : ''}`,
@@ -350,10 +464,12 @@ function agentDetailTitle(agent: AgentView): string {
     `模式: ${agent.plan.name || agent.plan.quotaKind}`,
     `今日已派任务: ${usageOf(agent)}${cap > 0 ? `/${cap}` : ''} 次`,
     `额度余量: ${pct !== undefined ? `${pct}%` : '未知(未设置额度)'}`,
+    `额度周期: ${cycleLine(agent)}`,
   ]
+  if (agent.isOverridden) parts.push('额度来源: 用户手动校准')
   if (agent.plan.quotaKind === 'credits') {
-    if (agent.remainingCredits !== undefined) {
-      parts.push(`剩余点数: 约 ${formatQuotaNumber(agent.remainingCredits)} 点`)
+    if (fields.remainingCredits !== undefined) {
+      parts.push(`剩余点数: 约 ${formatQuotaNumber(fields.remainingCredits)} 点`)
     }
     if (agent.usedCreditsToday !== undefined) {
       parts.push(`今日消耗: 约 ${formatQuotaNumber(agent.usedCreditsToday)} 点`)
@@ -362,6 +478,14 @@ function agentDetailTitle(agent: AgentView): string {
     parts.push(`今日消耗: 约 ${formatTokens(agent.usedTokensToday)} tok`)
   }
   if (pct === 0) parts.push('额度已用尽')
+  // B10:折叠态没有「校准」按钮,文案不承诺不存在的入口
+  if (quotaLow(agent)) {
+    parts.push(
+      store.railCollapsed.value
+        ? '额度告急: 展开侧栏后可校准'
+        : '额度告急: 点卡片上的「校准」直达设置页用量区',
+    )
+  }
   if (agent.cacheHitRateToday !== undefined && agent.cacheHitRateToday > 0) {
     parts.push(`缓存命中率: ${agent.cacheHitRateToday}%`)
   }
@@ -379,7 +503,7 @@ function agentDetailTitle(agent: AgentView): string {
         size="sm"
         class="fold"
         :title="store.railCollapsed.value ? '展开侧栏' : '收起侧栏'"
-        @click="store.railCollapsed.value = !store.railCollapsed.value"
+        @click="store.setRailCollapsed(!store.railCollapsed.value, { userInitiated: true })"
       >
         {{ store.railCollapsed.value ? '»' : '«' }}
       </GlassButton>
@@ -404,35 +528,51 @@ function agentDetailTitle(agent: AgentView): string {
       <!-- 顶部工作区环境胶囊:将工作区从平铺列表中剥离，侧栏空间全量让渡给智能体主航道 -->
       <div class="workspace-bar" :class="{ collapsed: store.railCollapsed.value }">
         <div
+          ref="capsuleRef"
           class="ws-capsule glass"
           :class="{
             active: Boolean(store.selectedProjectId.value),
-            'drop-target': dragOverProjectId === (store.selectedProjectId.value ?? DAILY_PROJECT_ID),
+            'drop-target': dragOverProjectId === capsuleDropProject.id,
           }"
-          :title="store.selectedProject.value ? `当前工作区: ${store.selectedProject.value.name} (点击切换)` : '全部工作区 (点击切换或投放卡片)'"
-          @click="showWsDropdown = !showWsDropdown"
-          @dragover="onWsDragOver(store.selectedProject.value ?? store.projects.value[0] ?? ({ id: DAILY_PROJECT_ID, name: '日常' } as any), $event)"
-          @dragleave="onWsDragLeave(store.selectedProject.value ?? store.projects.value[0] ?? ({ id: DAILY_PROJECT_ID, name: '日常' } as any), $event)"
-          @drop="onWsDrop(store.selectedProject.value ?? store.projects.value[0] ?? ({ id: DAILY_PROJECT_ID, name: '日常' } as any), $event)"
+          :title="capsuleTitle"
+          @click="toggleWsDropdown"
+          @dragover="onWsDragOver(capsuleDropProject, $event)"
+          @dragleave="onWsDragLeave(capsuleDropProject, $event)"
+          @drop="onWsDrop(capsuleDropProject, $event)"
         >
           <span class="ws-ico" aria-hidden="true">📁</span>
           <span v-if="!store.railCollapsed.value" class="ws-label">
             {{ store.selectedProject.value ? store.selectedProject.value.name : '全部工作区' }}
           </span>
+          <!-- A-08:悬停投放时明示落点(「全部工作区」态固定投放到日常) -->
+          <span
+            v-if="!store.railCollapsed.value && dragOverProjectId === capsuleDropProject.id"
+            class="ws-drop-hint"
+          >
+            投放到 {{ capsuleDropProject.name }}
+          </span>
           <span v-if="!store.railCollapsed.value" class="ws-arrow" :class="{ rotated: showWsDropdown }">▾</span>
         </div>
 
-        <!-- 工作区下拉管理菜单 -->
+        <!-- 工作区下拉管理菜单(展开态) -->
         <Transition name="fade-slide">
-          <div v-if="showWsDropdown && !store.railCollapsed.value" class="ws-dropdown glass custom-scroll" @click.stop>
+          <div
+            v-if="showWsDropdown && !store.railCollapsed.value"
+            class="ws-dropdown glass custom-scroll"
+            role="menu"
+            @click.stop
+          >
             <div class="ws-dropdown-header">
               <span>工作区切换</span>
               <button class="ws-add-link" type="button" @click="addProject">＋ 新增</button>
             </div>
             <div
               class="ws-drop-item"
+              role="menuitem"
+              tabindex="0"
               :class="{ active: store.selectedProjectId.value === null }"
-              @click="store.selectedProjectId.value = null; showWsDropdown = false"
+              @click="chooseProject(null)"
+              @keydown="onWsItemKeydown(null, $event)"
             >
               <span class="p-name">📁 全部工作区</span>
             </div>
@@ -440,14 +580,17 @@ function agentDetailTitle(agent: AgentView): string {
               v-for="project in store.projects.value"
               :key="project.id"
               class="ws-drop-item"
+              role="menuitem"
+              tabindex="0"
               :class="{
                 active: store.selectedProjectId.value === project.id,
                 'drop-target': dragOverProjectId === project.id,
               }"
-              @click="pickProject(project); showWsDropdown = false"
+              @click="chooseProject(project)"
+              @keydown="onWsItemKeydown(project, $event)"
               @dragover="onWsDragOver(project, $event)"
               @dragleave="onWsDragLeave(project, $event)"
-              @drop="onWsDrop(project, $event); showWsDropdown = false"
+              @drop="onWsDrop(project, $event)"
             >
               <div class="p-info">
                 <span class="p-name">{{ project.name }}</span>
@@ -471,6 +614,56 @@ function agentDetailTitle(agent: AgentView): string {
           </div>
         </Transition>
       </div>
+
+      <!-- A-07:折叠态浮层——fixed 浮出到 rail 右侧,含工作区切换/新增/清除客户端绑定;
+           走 Teleport 到 body,既不受 .scroll 横向裁切,也不受 rail 玻璃层 containing block 影响 -->
+      <Teleport to="body">
+        <Transition name="fade-slide">
+          <div
+            v-if="showWsDropdown && store.railCollapsed.value"
+            class="ws-popover glass"
+            :style="popoverStyle"
+            role="menu"
+            @click.stop
+          >
+            <div class="ws-dropdown-header">
+              <span>工作区</span>
+              <button class="ws-add-link" type="button" @click="addProject">＋ 新增</button>
+            </div>
+            <button
+              type="button"
+              role="menuitem"
+              class="ws-popover-item"
+              :class="{ active: store.selectedProjectId.value === null }"
+              @click="chooseProject(null)"
+            >
+              📁 全部工作区
+            </button>
+            <button
+              v-for="project in store.projects.value"
+              :key="project.id"
+              type="button"
+              role="menuitem"
+              class="ws-popover-item"
+              :class="{ active: store.selectedProjectId.value === project.id }"
+              @click="chooseProject(project)"
+            >
+              <span class="p-name">{{ project.name }}</span>
+              <span class="p-path">{{ project.path ? pathTail(project.path) : '未绑定目录' }}</span>
+            </button>
+            <div class="ws-popover-sep" aria-hidden="true" />
+            <button
+              type="button"
+              role="menuitem"
+              class="ws-popover-item"
+              @click="clearAgentBinding"
+              @keydown="onBindingKeydown"
+            >
+              ✕ 全部对话(清除客户端绑定)
+            </button>
+          </div>
+        </Transition>
+      </Teleport>
 
       <div class="section-title" v-if="!store.railCollapsed.value">
         <span>智能体列表</span>
@@ -548,6 +741,16 @@ function agentDetailTitle(agent: AgentView): string {
             <span v-else class="glyph" aria-hidden="true">{{ agent.label.slice(0, 1) }}</span>
             <span class="status-dot" :class="healthClass(agent)" :title="agent.health?.reason ?? '未探活'" />
             <span v-if="hasRunningTask(agent.id)" class="running-ring" aria-hidden="true" />
+            <!-- C-08:折叠态在 glyph 下补 9px 百分比微字,余量不再依赖悬停 tooltip;无数据渲染灰点 -->
+            <span
+              v-if="store.railCollapsed.value"
+              class="glyph-pct num"
+              :class="{ 'is-dot': quotaPct(agent) === undefined }"
+              :style="quotaPct(agent) !== undefined ? { color: quotaColor(quotaPct(agent) ?? 100) } : undefined"
+              :title="quotaPct(agent) !== undefined ? `额度余量 ${quotaPct(agent)}%` : '额度未配置'"
+            >
+              {{ quotaPct(agent) !== undefined ? `${quotaPct(agent)}%` : '•' }}
+            </span>
           </div>
 
           <span v-if="!store.railCollapsed.value" class="meta">
@@ -596,10 +799,22 @@ function agentDetailTitle(agent: AgentView): string {
                 缓存 {{ agent.cacheHitRateToday }}%
               </span>
               <span class="spacer" />
+              <!-- C-05:余量告急(≤20%)就地给校准入口,直达设置页用量区 -->
+              <button
+                v-if="quotaLow(agent)"
+                type="button"
+                class="calibrate-btn"
+                title="额度告急,前往设置页用量区校准"
+                @click.stop="openUsageSection"
+              >
+                校准
+              </button>
               <button
                 type="button"
                 class="refresh-icon-btn"
-                title="刷新额度"
+                :class="{ spin: refreshing }"
+                :disabled="refreshing"
+                :title="refreshing ? '正在刷新额度…' : '刷新额度(现算)'"
                 @click.stop="refreshUsage"
               >
                 ⟳
@@ -940,7 +1155,8 @@ function agentDetailTitle(agent: AgentView): string {
 
 .rail.collapsed .agent {
   justify-content: center;
-  padding: 10px 6px;
+  /* C-08:底部留出余量微字的位置 */
+  padding: 10px 6px 16px;
 }
 
 .glyph-wrap {
@@ -1009,8 +1225,8 @@ function agentDetailTitle(agent: AgentView): string {
 }
 
 .status-dot.ok {
-  background: #10b981;
-  box-shadow: 0 0 6px rgba(16, 185, 129, 0.4);
+  background: var(--ok);
+  box-shadow: 0 0 6px color-mix(in srgb, var(--ok) 40%, transparent);
 }
 
 .status-dot.bad {
@@ -1030,6 +1246,14 @@ function agentDetailTitle(agent: AgentView): string {
   100% { transform: rotate(360deg); }
 }
 
+/* A-19:悬停时状态标签让位给右上角操作胶囊,消除对「运行中/已校准」的遮挡
+   (布局不动,仅淡出;信息在同卡 tooltip 内仍可查) */
+.agent:hover .calibrated-tag,
+.agent:hover .running-tag,
+.agent:hover .plan-tag {
+  opacity: 0;
+}
+
 .plan-tag {
   font-size: 10px;
   color: var(--muted);
@@ -1037,6 +1261,7 @@ function agentDetailTitle(agent: AgentView): string {
   padding: 1px 6px;
   border-radius: 4px;
   border: 1px solid var(--accent-line);
+  transition: opacity 140ms var(--ease);
 }
 
 /* 阶梯 2: 独立极简进度槽 */
@@ -1111,8 +1336,65 @@ function agentDetailTitle(agent: AgentView): string {
   transition: color 140ms;
 }
 
-.refresh-icon-btn:hover {
+.refresh-icon-btn:hover:not(:disabled) {
   color: var(--accent-strong);
+}
+
+.refresh-icon-btn:disabled {
+  cursor: progress;
+  color: var(--accent-strong);
+}
+
+/* C-01:刷新进行中旋转,并挡住重入(同一时刻只刷一轮) */
+.refresh-icon-btn.spin {
+  display: inline-block;
+  animation: refreshSpin 0.9s linear infinite;
+}
+
+@keyframes refreshSpin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+/* C-05:额度告急时的校准入口(余量 ≤20% 才出现) */
+.calibrate-btn {
+  flex: none;
+  border: 1px solid color-mix(in srgb, var(--warn-strong) 45%, transparent);
+  border-radius: 4px;
+  background: color-mix(in srgb, var(--warn-strong) 14%, transparent);
+  color: var(--warn-strong);
+  font-size: 10px;
+  line-height: 1.5;
+  padding: 0 5px;
+  cursor: pointer;
+  transition: filter 140ms var(--ease);
+}
+
+.calibrate-btn:hover {
+  filter: brightness(1.12);
+}
+
+/* C-08:折叠态余量微字——贴在 glyph 下缘,不展开侧栏也能看到百分比 */
+.rail.collapsed .glyph-pct {
+  position: absolute;
+  left: 50%;
+  bottom: -7px;
+  transform: translateX(-50%);
+  font-size: 9px;
+  line-height: 1;
+  padding: 1px 4px;
+  border-radius: 4px;
+  background: var(--surface);
+  border: 1px solid var(--line);
+  font-weight: 700;
+  z-index: 3;
+  pointer-events: none;
+}
+
+.rail.collapsed .glyph-pct.is-dot {
+  color: var(--faint);
+  font-weight: 400;
 }
 
 /* 悬浮操作微胶囊 */
@@ -1214,6 +1496,18 @@ function agentDetailTitle(agent: AgentView): string {
   transform: rotate(180deg);
 }
 
+/* A-08:拖拽悬停时明示投放目标 */
+.ws-drop-hint {
+  flex: none;
+  font-size: 10px;
+  font-weight: 600;
+  color: #fff;
+  background: var(--accent);
+  border-radius: 999px;
+  padding: 1px 7px;
+  white-space: nowrap;
+}
+
 .workspace-bar.collapsed .ws-capsule {
   justify-content: center;
   padding: 0;
@@ -1228,7 +1522,7 @@ function agentDetailTitle(agent: AgentView): string {
   top: calc(100% + 4px);
   left: 0;
   right: 0;
-  z-index: 2200;
+  z-index: var(--z-popover);
   background: var(--surface);
   border: 1px solid var(--accent-line);
   border-radius: var(--radius-md);
@@ -1239,6 +1533,64 @@ function agentDetailTitle(agent: AgentView): string {
   display: flex;
   flex-direction: column;
   gap: 3px;
+}
+
+/* A-07:折叠态浮出面板——fixed 到 rail 右侧(Teleport 到 body),横向不被 .scroll 裁切 */
+.ws-popover {
+  position: fixed;
+  z-index: var(--z-popover);
+  width: 220px;
+  max-height: 70vh;
+  overflow-y: auto;
+  padding: 6px;
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  background: var(--surface);
+  border: 1px solid var(--accent-line);
+  border-radius: var(--radius-md);
+  box-shadow: 0 12px 32px rgba(0, 0, 0, 0.4);
+}
+
+.ws-popover-item {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 1px;
+  width: 100%;
+  text-align: left;
+  font: inherit;
+  font-size: 12px;
+  color: var(--text);
+  background: transparent;
+  border: none;
+  border-radius: var(--radius-sm);
+  padding: 6px 8px;
+  cursor: pointer;
+  transition: background 120ms var(--ease), color 120ms var(--ease);
+}
+
+.ws-popover-item:hover,
+.ws-popover-item:focus-visible {
+  background: var(--surface-dim);
+  outline: none;
+}
+
+.ws-popover-item.active {
+  background: var(--accent-dim);
+  color: var(--accent-strong);
+  font-weight: 600;
+}
+
+.ws-popover-item .p-path {
+  font-size: 10px;
+  color: var(--faint);
+}
+
+.ws-popover-sep {
+  height: 1px;
+  margin: 3px 4px;
+  background: var(--line);
 }
 
 .ws-dropdown-header {
@@ -1275,6 +1627,12 @@ function agentDetailTitle(agent: AgentView): string {
 
 .ws-drop-item:hover {
   background: var(--surface-dim);
+}
+
+/* P-17:下拉项键盘可达——Tab 落到该项时给出可见焦点 */
+.ws-drop-item:focus-visible {
+  outline: 2px solid var(--accent-line);
+  outline-offset: -2px;
 }
 
 .ws-drop-item.active {
@@ -1334,6 +1692,7 @@ function agentDetailTitle(agent: AgentView): string {
   border-radius: 999px;
   border: 1px solid var(--accent-line);
   animation: runPulse 1.8s ease-in-out infinite;
+  transition: opacity 140ms var(--ease);
 }
 
 @keyframes runPulse {
@@ -1425,9 +1784,9 @@ function agentDetailTitle(agent: AgentView): string {
 .cache-badge {
   font-size: 10px;
   font-weight: 700;
-  color: #10b981;
-  background: color-mix(in srgb, #10b981 12%, transparent);
-  border: 1px solid color-mix(in srgb, #10b981 28%, transparent);
+  color: var(--ok);
+  background: color-mix(in srgb, var(--ok) 12%, transparent);
+  border: 1px solid color-mix(in srgb, var(--ok) 28%, transparent);
   padding: 0 4px;
   border-radius: 4px;
   line-height: 1.4;
@@ -1468,6 +1827,7 @@ function agentDetailTitle(agent: AgentView): string {
   border-radius: 4px;
   padding: 0 4px;
   line-height: 1.4;
+  transition: opacity 140ms var(--ease);
 }
 
 .quota-sub {

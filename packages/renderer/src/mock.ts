@@ -211,13 +211,18 @@ export function installDevMock(): void {
       const parent = findTask(taskId)
       return mock.tasksSubmit({ agentId: parent.agentId, prompt: parent.prompt, origin: 'panel' })
     },
-    tasksContinue: async (taskId, prompt) => {
+    // K-07:签名与契约对齐(第三参 ContinueOptions),覆盖项缺省继承父任务——
+    // 与 core.continueConversation 同语义,附件/模型/档位在 dev 直开时不静默丢
+    tasksContinue: async (taskId, prompt, options) => {
       const parent = findTask(taskId)
       return mock.tasksSubmit({
         agentId: parent.agentId,
         prompt,
         sessionId: parent.sessionId,
         resumeLatest: parent.resumeLatest,
+        modelId: options?.modelId ?? parent.modelId,
+        mode: options?.mode ?? parent.mode,
+        attachments: options?.attachments ?? parent.attachments,
       })
     },
     tasksCancel: async (taskId) => {
@@ -345,7 +350,8 @@ export function installDevMock(): void {
     },
     healthCheck: async () => ({ ok: true, at: Date.now() }),
     launchApp: async () => 'deep-link',
-    usageGet: async () => {
+    // K-01:签名与契约对齐(force);mock 无按日缓存,任何一次调用都是现算
+    usageGet: async (_opts?: { force?: boolean }) => {
       const today = new Date()
       const day = `${today.getFullYear()}-${String(today.getMonth() + 1).padStart(2, '0')}-${String(today.getDate()).padStart(2, '0')}`
       return agents.map((a) => ({

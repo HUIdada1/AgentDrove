@@ -183,6 +183,11 @@ export interface FollowupQueueItem {
   mode?: TaskMode
   toolPolicy?: ToolPolicy
   reasoningEffort?: ReasoningEffort
+  /**
+   * 排队时随项记录的本轮附件(K-07):自动接续(processFollowupQueue)按它派发;
+   * 缺省沿用父任务 attachments(与本轮模型/档位覆盖同款"缺省继承"语义)。
+   */
+  attachments?: TaskAttachment[]
 }
 
 /**
@@ -197,6 +202,11 @@ export interface ContinueOptions {
   mode?: TaskMode
   toolPolicy?: ToolPolicy
   reasoningEffort?: ReasoningEffort
+  /**
+   * 本轮附件(K-07):缺省继承父任务 attachments;排队场景随 FollowupQueueItem 落库,
+   * 自动接续时同样缺省继承父任务。只收 file/image(渲染层附件入口的实际产出)。
+   */
+  attachments?: Array<{ path: string; kind: 'file' | 'image' }>
 }
 
 /** 追问队列自动接续推送(P0-6):父任务完成后排队消息落地为新任务 */

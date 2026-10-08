@@ -160,6 +160,157 @@ function mergeZcodeRaw(stats: UsageStatsSnapshot, raw: ZcodeUsageRaw): void {
   )
 }
 
+/** K-03:周期窗口;resetMs 仅"按 cycleDays 对齐"的固定窗口有值 */
+interface CycleWindow {
+  startMs: number
+  resetMs?: number
+}
+
+/**
+ * K-03/A15:周期起点口径。
+ * - 缺省(cycleDays 未设/<=0):保持既有行为——min(最早任务创建时间, 今日零点),无重置时刻;
+ * - cycleDays>0:以「本地日序号」(本地年月日经 UTC 折算的整数天,与 DST 无关)为锚按 cycleDays 天切分,
+ *   含今日的一段即当前周期;起点与重置时刻都由日历运算(年/月/日 加减)求得并落在本地零点,
+ *   不再用 86400000 毫秒做减法——夏令时区的一天可能是 23/25 小时,毫秒推算会让窗口边界偏移。
+ * 单一事实源:余量计算与校准快照必须走同一函数,否则滚动扣减的基准与当前值口径错位。
+ */
+function resolveCycleWindow(
+  ctx: AppContext,
+  agentId: string,
+  todayStartMs: number,
+  cycleDays?: number,
+): CycleWindow {
+  if (cycleDays && cycleDays > 0) {
+    const today = new Date(todayStartMs)
+    const year = today.getFullYear()
+    const month = today.getMonth()
+    const date = today.getDate()
+    // 仅用于取模定位"今天处在周期第几天":UTC 折算把本地年月日映射为稳定整数天序号
+    const dayIndex = Math.round(Date.UTC(year, month, date) / 86_400_000)
+    const offsetDays = ((dayIndex % cycleDays) + cycleDays) % cycleDays
+    // 日历加减:Date 自行处理跨月/跨年与 DST,起点与重置点必然落在本地零点
+    return {
+      startMs: new Date(year, month, date - offsetDays).getTime(),
+      resetMs: new Date(year, month, date - offsetDays + cycleDays).getTime(),
+    }
+  }
+  return {
+    startMs: Math.min(ctx.store.firstTaskCreatedAt(agentId) ?? todayStartMs, todayStartMs),
+  }
+}
+
+/** A16:累计口径(无固定窗口)的周期起点哨兵;固定窗口取本地日串(与 usage.day 同口径) */
+const CUMULATIVE_CYCLE_KEY = 'cumulative'
+
+/** A16:当前周期的起点标识,校准快照与现算窗口据此判断周期是否已滚动 */
+function cycleStartKey(window: CycleWindow): string {
+  return window.resetMs !== undefined ? localDayOf(window.startMs) : CUMULATIVE_CYCLE_KEY
+}
+
+/** 周期/今日双口径统计快照(zcode 本地权威库已合并) */
+interface QuotaStatsSnapshot {
+  window: CycleWindow
+  cycle: UsageStatsSnapshot
+  today: UsageStatsSnapshot
+}
+
+/**
+ * 周期与今日两个口径的统计(G5-09 + K-02/K-03):余量计算与校准快照共用同一函数。
+ * zcode 叠加本地权威库用量(5s TTL 缓存内不再开库,一次开库同时取周期与今日两个聚合)。
+ */
+function computeQuotaStats(
+  ctx: AppContext,
+  profile: AgentProfile,
+  todayStartMs: number,
+  cycleDays?: number,
+): QuotaStatsSnapshot {
+  const window = resolveCycleWindow(ctx, profile.id, todayStartMs, cycleDays)
+  // G5-02:今日口径独立保留(usedTokensToday/usedCreditsToday 仍为今日累计),
+  // 与周期口径在 tooltip 中可区分——两个统计各查一次,首任务就在今日时复用同一次查询。
+  const cycle = ctx.store.agentUsageStats(profile.id, window.startMs)
+  const today =
+    window.startMs === todayStartMs ? cycle : ctx.store.agentUsageStats(profile.id, todayStartMs)
+
+  if (profile.id === 'zcode') {
+    let raw: ZcodeUsagePair
+    if (zcodeUsageCache && Date.now() - zcodeUsageCache.at < ZCODE_USAGE_CACHE_TTL_MS) {
+      raw = zcodeUsageCache.raw
+    } else {
+      raw = readZcodeLocalUsage(ctx, window.startMs, todayStartMs)
+      zcodeUsageCache = { at: Date.now(), raw }
+    }
+    if (raw.cycle) mergeZcodeRaw(cycle, raw.cycle)
+    if (raw.today) mergeZcodeRaw(today, raw.today)
+  }
+  return { window, cycle, today }
+}
+
+/**
+ * K-02 模式 B 余量滚动扣减:remaining = base − max(0, 当前周期消耗 − 校准快照)。
+ * - base 优先新字段 remainingCreditsBase/remainingTokensBase,旧数据回落 remainingCredits/remainingTokens
+ *   (旧数据里它就是用户当时填的剩余值,即 base 初值,零迁移);
+ * - 无校准快照(旧 override)时不滚动、原样展示 base:用户填的值已含校准前消耗,
+ *   拿全周期消耗去减会重复扣减导致余量凭空塌到 0;重新校准一次即带快照进入滚动。
+ */
+function rolledRemaining(
+  base: number | undefined,
+  calibratedConsumed: number | undefined,
+  consumedNow: number,
+  decimals: number,
+): number | undefined {
+  if (base === undefined) return undefined
+  if (calibratedConsumed === undefined) return Math.max(0, base)
+  const raw = base - Math.max(0, consumedNow - calibratedConsumed)
+  return Math.max(0, decimals > 0 ? Number(raw.toFixed(decimals)) : Math.round(raw))
+}
+
+/**
+ * A16:PlanOverrideConfig 的本地扩展——记录"校准时所在周期起点"(本地日串,累计口径记 'cumulative')。
+ * 该字段随 config.planOverrides 原样落盘/读回(mergeConfig 不裁剪 planOverrides 的键),
+ * 契约类型后续收敛到 core 的 PlanOverrideConfig 时此处直接删。
+ */
+type PlanOverrideWithCycleStart = PlanOverrideConfig & { calibratedCycleStart?: string }
+
+/**
+ * A16 跨周期重锚:校准快照记录的周期起点与当前周期不一致 = 周期已滚动,把消耗基准重锚为当前周期
+ * 消耗并落盘——本轮余量回到 base,随后按新周期的新增消耗正常递减;不再因旧快照大于当前消耗
+ * 被 max(0, …) 吃掉、余量整周期冻结在 base。
+ * 向后兼容:旧数据缺 calibratedCycleStart(或无滚动快照)时不判定也不写盘,维持既有滚动行为。
+ */
+function reanchorPlanOverride(
+  ctx: AppContext,
+  agentId: string,
+  override: PlanOverrideWithCycleStart | undefined,
+  cycleKey: string,
+  cycleStats: UsageStatsSnapshot,
+): PlanOverrideWithCycleStart | undefined {
+  if (!override || override.calibratedCycleStart === undefined) return override
+  if (override.calibratedCycleStart === cycleKey) return override
+  const credits = override.calibratedConsumedCredits
+  const tokens = override.calibratedConsumedTokens
+  if (credits === undefined && tokens === undefined) return override
+  const next: PlanOverrideWithCycleStart = {
+    ...override,
+    calibratedCycleStart: cycleKey,
+    ...(credits !== undefined ? { calibratedConsumedCredits: cycleStats.usedCredits } : {}),
+    ...(tokens !== undefined ? { calibratedConsumedTokens: cycleStats.usedTokens } : {}),
+  }
+  // 必须落盘:否则每次现算都以当时消耗为基准,余量会永久停在 base 不再递减
+  try {
+    const config = ctx.getConfig()
+    ctx.saveConfig({
+      ...config,
+      planOverrides: { ...(config.planOverrides ?? {}), [agentId]: next },
+    })
+  } catch (error) {
+    ctx.logger.warn('周期滚动重锚写盘失败,本轮按重锚值计算', {
+      agent: agentId,
+      error: error instanceof Error ? error.message : String(error),
+    })
+  }
+  return next
+}
+
 /**
  * R03:quota 计算输出统一「展示口径」——remainingPercent 为剩余百分比,
  * 未配置 totalCredits/totalTokens 且无 dailyTaskCap 时返回 undefined(未知态),
@@ -172,36 +323,21 @@ function computeAgentQuotaAndUsage(
   todayStartMs: number,
 ) {
   const usedToday = ctx.store.countOf(profile.id, day)
-  // G5-02:余量口径修正——套餐总量是周期量,余量按"总量−周期累计"计算
-  // (起点=min(最早任务,今日零点)),不再"总量−仅今日消耗"(跨日累积从不计入,余量系统性虚高)。
-  // 复核修订:今日口径独立保留(usedTokensToday/usedCreditsToday 仍为今日累计),
-  // 与周期口径在 tooltip 中可区分——两个统计各查一次,首任务就在今日时复用同一次查询。
-  const cycleStartMs = Math.min(
-    ctx.store.firstTaskCreatedAt(profile.id) ?? todayStartMs,
-    todayStartMs,
-  )
-  const cycleStats = ctx.store.agentUsageStats(profile.id, cycleStartMs)
-  const todayStats =
-    cycleStartMs === todayStartMs
-      ? cycleStats
-      : ctx.store.agentUsageStats(profile.id, todayStartMs)
-
-  // 若为 zcode,叠加本地权威 ~/.zcode/cli/db/db.sqlite 的用量(G5-09:5s TTL 缓存内不再开库,
-  // 一次开库同时取周期与今日两个聚合)
-  if (profile.id === 'zcode') {
-    let raw: ZcodeUsagePair
-    if (zcodeUsageCache && Date.now() - zcodeUsageCache.at < ZCODE_USAGE_CACHE_TTL_MS) {
-      raw = zcodeUsageCache.raw
-    } else {
-      raw = readZcodeLocalUsage(ctx, cycleStartMs, todayStartMs)
-      zcodeUsageCache = { at: Date.now(), raw }
-    }
-    if (raw.cycle) mergeZcodeRaw(cycleStats, raw.cycle)
-    if (raw.today) mergeZcodeRaw(todayStats, raw.today)
-  }
-
   const config = ctx.getConfig()
-  const override = config.planOverrides?.[profile.id]
+  const stored = config.planOverrides?.[profile.id] as PlanOverrideWithCycleStart | undefined
+
+  // G5-02:余量口径修正——套餐总量是周期量,余量按"总量−周期累计"计算,
+  // 不再"总量−仅今日消耗"(跨日累积从不计入,余量系统性虚高)。
+  // K-03:周期起点缺省仍为 min(最早任务,今日零点);校准填了 cycleDays 时按固定窗口对齐。
+  const stats = computeQuotaStats(ctx, profile, todayStartMs, stored?.cycleDays)
+  // A16:滚动扣减前校验周期是否已滚动,跨周期则先把快照重锚为当前消耗(不再冻结)
+  const override = reanchorPlanOverride(
+    ctx,
+    profile.id,
+    stored,
+    cycleStartKey(stats.window),
+    stats.cycle,
+  )
 
   // 1. 基准配置优先应用用户 Plan Override
   const plan = {
@@ -220,16 +356,30 @@ function computeAgentQuotaAndUsage(
   // R03:未知态 = undefined,不虚构满格
   let remainingPercent: number | undefined
 
+  // K-02:显式剩余值(模式 B)按后续消耗滚动递减,基准与快照同源
+  const explicitCredits = rolledRemaining(
+    override?.remainingCreditsBase ?? override?.remainingCredits,
+    override?.calibratedConsumedCredits,
+    stats.cycle.usedCredits,
+    1,
+  )
+  const explicitTokens = rolledRemaining(
+    override?.remainingTokensBase ?? override?.remainingTokens,
+    override?.calibratedConsumedTokens,
+    stats.cycle.usedTokens,
+    0,
+  )
+
   if (plan.quotaKind === 'credits') {
-    if (override?.remainingCredits !== undefined) {
-      // G5-02 模式 B:用户直接填当前剩余值,原样展示(启用本应用前的用量无法回溯,
-      // 不再由总量倒推,也不叠加统计消耗重复扣减);校准后可随时再校准
-      remainingCredits = Math.max(0, Number(override.remainingCredits.toFixed(1)))
+    if (explicitCredits !== undefined) {
+      // G5-02 模式 B:用户直接填当前剩余值(启用本应用前的用量无法回溯,
+      // 不再由总量倒推);K-02 起按此后新增消耗递减,校准值是基准而非恒定值
+      remainingCredits = explicitCredits
       if (totalCredits && totalCredits > 0) {
         remainingPercent = Math.max(0, Math.min(100, Math.round((remainingCredits / totalCredits) * 100)))
       }
     } else if (totalCredits && totalCredits > 0) {
-      remainingCredits = Math.max(0, Number((totalCredits - cycleStats.usedCredits).toFixed(1)))
+      remainingCredits = Math.max(0, Number((totalCredits - stats.cycle.usedCredits).toFixed(1)))
       remainingPercent = Math.max(0, Math.min(100, Math.round((remainingCredits / totalCredits) * 100)))
     } else if (plan.dailyTaskCap > 0) {
       remainingPercent = Math.max(0, Math.round(((plan.dailyTaskCap - usedToday) / plan.dailyTaskCap) * 100))
@@ -239,22 +389,22 @@ function computeAgentQuotaAndUsage(
     if (plan.dailyTaskCap > 0) {
       remainingPercent = Math.max(0, Math.round(((plan.dailyTaskCap - usedToday) / plan.dailyTaskCap) * 100))
     }
-    if (override?.remainingTokens !== undefined) {
-      // G5-02 模式 B:显式剩余 Token 值原样展示
-      remainingTokens = Math.max(0, override.remainingTokens)
+    if (explicitTokens !== undefined) {
+      // G5-02 模式 B:显式剩余 Token 值(按后续消耗递减)
+      remainingTokens = explicitTokens
     } else if (totalTokens && totalTokens > 0) {
-      remainingTokens = Math.max(0, totalTokens - cycleStats.usedTokens)
+      remainingTokens = Math.max(0, totalTokens - stats.cycle.usedTokens)
     }
   } else {
     // subscription 订阅制:无 Token 总量且无每日上限时保持未知态
-    if (override?.remainingTokens !== undefined) {
-      // G5-02 模式 B:显式剩余 Token 值原样展示
-      remainingTokens = Math.max(0, override.remainingTokens)
+    if (explicitTokens !== undefined) {
+      // G5-02 模式 B:显式剩余 Token 值(按后续消耗递减)
+      remainingTokens = explicitTokens
       if (totalTokens && totalTokens > 0) {
         remainingPercent = Math.max(0, Math.min(100, Math.round((remainingTokens / totalTokens) * 100)))
       }
     } else if (totalTokens && totalTokens > 0) {
-      remainingTokens = Math.max(0, totalTokens - cycleStats.usedTokens)
+      remainingTokens = Math.max(0, totalTokens - stats.cycle.usedTokens)
       remainingPercent = Math.max(0, Math.min(100, Math.round((remainingTokens / totalTokens) * 100)))
     } else if (plan.dailyTaskCap > 0) {
       remainingPercent = Math.max(0, Math.round(((plan.dailyTaskCap - usedToday) / plan.dailyTaskCap) * 100))
@@ -264,18 +414,22 @@ function computeAgentQuotaAndUsage(
   return {
     usedToday,
     // 今日口径(独立保留,tooltip 与渲染层"今日约 X 点"文案的事实源)
-    usedTokensToday: todayStats.usedTokens,
-    usedCreditsToday: todayStats.usedCredits,
-    cachedTokensToday: todayStats.cachedTokens,
-    cacheHitRateToday: todayStats.cacheHitRate,
+    usedTokensToday: stats.today.usedTokens,
+    usedCreditsToday: stats.today.usedCredits,
+    cachedTokensToday: stats.today.cachedTokens,
+    cacheHitRateToday: stats.today.cacheHitRate,
     // G5-02:周期口径累计(余量计算的事实源),tooltip 与"今日"口径区分
-    usedTokensCycle: cycleStats.usedTokens,
-    usedCreditsCycle: cycleStats.usedCredits,
+    usedTokensCycle: stats.cycle.usedTokens,
+    usedCreditsCycle: stats.cycle.usedCredits,
     remainingCredits,
     remainingTokens,
     remainingPercent,
     totalCredits,
     totalTokens,
+    // K-03:仅"按 cycleDays 对齐"的固定窗口产出周期窗口(本地日串,与 usage.day 同口径),
+    // 累计口径不产出,由渲染层回落近似文案
+    cycleStartAt: stats.window.resetMs !== undefined ? localDayOf(stats.window.startMs) : undefined,
+    cycleResetAt: stats.window.resetMs !== undefined ? localDayOf(stats.window.resetMs) : undefined,
     isOverridden: !!override,
   }
 }
@@ -301,6 +455,20 @@ export function registerIpcHandlers(ctx: AppContext): void {
     byAgent: Map<string, AgentQuotaResult>
   } | null = null
 
+  /** 现算整批 quota 并回写当日缓存(agents:list 与 usage:get 共用的落缓存点) */
+  const computeQuotaMap = (
+    profiles: AgentProfile[],
+    day: string,
+    todayStartMs: number,
+  ): Map<string, AgentQuotaResult> => {
+    const byAgent = new Map<string, AgentQuotaResult>()
+    for (const profile of profiles) {
+      byAgent.set(profile.id, computeAgentQuotaAndUsage(ctx, profile, day, todayStartMs))
+    }
+    quotaCache = { day, byAgent }
+    return byAgent
+  }
+
   const buildAgentViews = async (): Promise<AgentView[]> => {
     const day = today()
     const now = new Date()
@@ -310,10 +478,11 @@ export function registerIpcHandlers(ctx: AppContext): void {
     const healths = await Promise.all(
       profiles.map((profile) => ctx.health.check(profile.id).catch(() => undefined)),
     )
-    const quotaByAgent = new Map<string, AgentQuotaResult>()
+    // R03:缓存本批 quota(按日失效),供 usage:get 复用免双算
+    const quotaByAgent = computeQuotaMap(profiles, day, todayStartMs)
     const views = profiles.map((profile, index) => {
-      const quota = computeAgentQuotaAndUsage(ctx, profile, day, todayStartMs)
-      quotaByAgent.set(profile.id, quota)
+      // 同一批 profiles 现算,键必然存在
+      const quota = quotaByAgent.get(profile.id)!
       return {
         id: profile.id,
         label: profile.label,
@@ -341,13 +510,14 @@ export function registerIpcHandlers(ctx: AppContext): void {
         // G5-02:周期口径消耗,tooltip 区分"今日/周期"
         usedTokensCycle: quota.usedTokensCycle,
         usedCreditsCycle: quota.usedCreditsCycle,
+        // K-03:周期窗口(仅校准填了 cycleDays 时有值)
+        cycleStartAt: quota.cycleStartAt,
+        cycleResetAt: quota.cycleResetAt,
         isOverridden: quota.isOverridden,
         totalCredits: quota.totalCredits,
         totalTokens: quota.totalTokens,
       }
     })
-    // R03:缓存本批 quota(按日失效),供 usage:get 复用免双算
-    quotaCache = { day, byAgent: quotaByAgent }
     return views
   }
 
@@ -635,17 +805,26 @@ export function registerIpcHandlers(ctx: AppContext): void {
     return ctx.launcher.launchClient(profile)
   })
 
-  ipcMain.handle('usage:get', (): UsageView[] => {
+  ipcMain.handle('usage:get', (_e, opts?: { force?: boolean }): UsageView[] => {
     const day = today()
     const now = new Date()
     const todayStartMs = new Date(now.getFullYear(), now.getMonth(), now.getDate()).getTime()
+    // K-01:force(侧栏 ⟳ 手动刷新)必须现算——绕过当日 quotaCache,并让 zcode 本地用量库的
+    // 5s TTL 缓存一并失效(zcode 是唯一会读本地 sqlite 的客户端,否则点完刷新看到的还是上一拍的数);
+    // 现算结果回写当日缓存,随后的 agents:list 复用同一批口径。
+    if (opts?.force) {
+      quotaCache = null
+      zcodeUsageCache = null
+    }
+    const profiles = ctx.registry.list()
     // R03:命中当日缓存复用 agents:list 刚算好的 quota,不再重复执行 computeAgentQuotaAndUsage;
-    // 仅在尚无当日缓存(启动后先调 usage)或跨零点(day 失效)时现算
+    // 仅在尚无当日缓存(启动后先调 usage)、跨零点(day 失效)或 force 时现算
     const cached = quotaCache?.day === day ? quotaCache.byAgent : null
-    return ctx.registry.list().map((profile) => {
+    const quotaByAgent = cached ?? computeQuotaMap(profiles, day, todayStartMs)
+    return profiles.map((profile) => {
       const usage = ctx.store.usageOf(profile.id, day)
-      const quota =
-        cached?.get(profile.id) ?? computeAgentQuotaAndUsage(ctx, profile, day, todayStartMs)
+      // 同一批 profiles 现算,键必然存在
+      const quota = quotaByAgent.get(profile.id)!
       return {
         agentId: profile.id,
         label: profile.label,
@@ -662,6 +841,9 @@ export function registerIpcHandlers(ctx: AppContext): void {
         remainingPercent: quota.remainingPercent,
         totalCredits: quota.totalCredits,
         totalTokens: quota.totalTokens,
+        // K-03:周期窗口(仅校准填了 cycleDays 时有值;缺省口径渲染层回落"累计"文案)
+        cycleStartAt: quota.cycleStartAt,
+        cycleResetAt: quota.cycleResetAt,
       }
     })
   })
@@ -684,17 +866,60 @@ export function registerIpcHandlers(ctx: AppContext): void {
 
   // G5-02:单客户端套餐校准(设置页写入,含"直接填当前剩余值"模式 B);
   // patch=null 清除该校准恢复注册默认。写入即广播,侧栏余量立即按新校准呈现。
+  // K-02:模式 B 写入时记录"当时周期消耗"快照,余量此后按新增消耗滚动递减。
+  // A16:快照同时记录"校准时所在周期起点",跨周期自动重锚;改周期天数时同步刷新快照基准。
   ipcMain.handle(
     'settings:set-plan-override',
     (_e, agentId: string, patch: PlanOverrideConfig | null): AppConfig => {
       const prev = ctx.getConfig()
       const planOverrides: Record<string, PlanOverrideConfig> = { ...(prev.planOverrides ?? {}) }
       if (patch) {
-        planOverrides[agentId] = { ...planOverrides[agentId], ...patch }
+        const stored = planOverrides[agentId] as PlanOverrideWithCycleStart | undefined
+        const merged: PlanOverrideWithCycleStart = { ...stored, ...patch }
+        const writesRemaining =
+          patch.remainingCredits !== undefined || patch.remainingTokens !== undefined
+        // A16-③:cycleDays 变化会换周期窗口,既有消耗基准必须按新窗口同步刷新,否则口径错位
+        const cycleChanged =
+          patch.cycleDays !== undefined && patch.cycleDays !== (stored?.cycleDays ?? 0)
+        if (writesRemaining || cycleChanged) {
+          // 快照必须与余量计算同源(computeQuotaStats 含 zcode 本地库合并值),否则基准与当前值口径错位;
+          // 校准目标不在注册表(理论不该发生)时只写原值,退化为旧语义而不是抛错打断保存
+          const profile = ctx.registry.list().find((p) => p.id === agentId)
+          if (profile) {
+            const now = new Date()
+            const todayStartMs = new Date(now.getFullYear(), now.getMonth(), now.getDate()).getTime()
+            const stats = computeQuotaStats(ctx, profile, todayStartMs, merged.cycleDays)
+            // A16-①:记录校准时所在周期起点(累计口径记 'cumulative'),供跨周期重锚判定
+            merged.calibratedCycleStart = cycleStartKey(stats.window)
+            if (writesRemaining) {
+              if (patch.remainingCredits !== undefined) {
+                merged.remainingCreditsBase = patch.remainingCredits
+                merged.calibratedConsumedCredits = stats.cycle.usedCredits
+              }
+              if (patch.remainingTokens !== undefined) {
+                merged.remainingTokensBase = patch.remainingTokens
+                merged.calibratedConsumedTokens = stats.cycle.usedTokens
+              }
+              merged.calibratedAt = Date.now()
+            } else {
+              // 只改周期天数(base 未改):把消耗基准刷到新窗口下的当前消耗,
+              // 余量仍从 base 起随后续消耗递减,不出现"新窗口消耗小于旧快照"的冻结
+              if (merged.calibratedConsumedCredits !== undefined) {
+                merged.calibratedConsumedCredits = stats.cycle.usedCredits
+              }
+              if (merged.calibratedConsumedTokens !== undefined) {
+                merged.calibratedConsumedTokens = stats.cycle.usedTokens
+              }
+            }
+          }
+        }
+        planOverrides[agentId] = merged
       } else {
         delete planOverrides[agentId]
       }
       ctx.saveConfig({ ...prev, planOverrides })
+      // 校准即口径变更:让按日 quotaCache 失效,避免紧随其后的 usage:get 仍按旧校准回报
+      quotaCache = null
       ctx.notify('agents:changed')
       return ctx.getConfig()
     },

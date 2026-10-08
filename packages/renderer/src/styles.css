@@ -23,6 +23,13 @@
   --radius-lg: 16px;
   --radius-md: 12px;
   --radius-sm: 9px;
+  /* 浮层层级(C-16):drawer(1100) < modal(1200),popover/toast/tooltip 依次更高;
+     各组件一律消费令牌,不再写魔法 z-index */
+  --z-modal: 1200;
+  --z-drawer: 1100;
+  --z-popover: 1300;
+  --z-toast: 1400;
+  --z-tooltip: 1500;
   /* 自定义标题栏高度:主窗布局按它让位(App 壳与设置页 calc(100vh - 本值)) */
   --titlebar-h: 42px;
   --mono: 'Cascadia Mono', 'JetBrains Mono', Consolas, monospace;
@@ -55,6 +62,10 @@
   --chip-bg: rgba(152, 184, 210, 0.12);
   --card-shadow: 0 1px 2px rgba(2, 6, 12, 0.22), 0 10px 30px rgba(2, 6, 12, 0.16);
   --glow-accent: 0 6px 20px rgba(23, 214, 158, 0.3);
+
+  /* 状态强色(C-19):余量 ≤20% 告警橙 / 关闭按钮 hover 红(暗色取同源值) */
+  --warn-strong: #ea580c;
+  --close-hover: #d83b34;
 }
 
 /* —— 亮色:雾白底,玻璃面偏白 —— */
@@ -90,6 +101,10 @@
   --ok: #1d9e6b;
   --warn: #ad7717;
   --err: #c84f49;
+
+  /* 状态强色(C-19)亮色适配:橙/红各加深一档,保证雾白底上的对比度 */
+  --warn-strong: #c2410c;
+  --close-hover: #b8413a;
 }
 
 * {

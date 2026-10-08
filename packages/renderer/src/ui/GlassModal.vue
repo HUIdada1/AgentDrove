@@ -53,11 +53,11 @@ onBeforeUnmount(() => window.removeEventListener('keydown', onKeydown))
 </template>
 
 <style scoped>
-/* 遮罩:深色压暗 + 轻模糊,让底下的四栏 shell 退成背景 */
+/* 遮罩:深色压暗 + 轻模糊,让底下的四栏 shell 退成背景;层级走 K-05 令牌(drawer 1100 < modal 1200) */
 .g-modal-mask {
   position: fixed;
   inset: 0;
-  z-index: 1000;
+  z-index: var(--z-modal);
   display: flex;
   align-items: center;
   justify-content: center;

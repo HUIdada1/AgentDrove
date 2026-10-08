@@ -72,7 +72,7 @@ const api: AgentDroveApi = {
 
   healthCheck: (agentId, options) => ipcRenderer.invoke('health:check', agentId, safeClone(options)),
   launchApp: (agentId) => ipcRenderer.invoke('launch:app', agentId),
-  usageGet: () => ipcRenderer.invoke('usage:get'),
+  usageGet: (opts) => ipcRenderer.invoke('usage:get', safeClone(opts)),
   quotaGet: () => ipcRenderer.invoke('quota:get'),
 
   settingsGet: () => ipcRenderer.invoke('settings:get'),

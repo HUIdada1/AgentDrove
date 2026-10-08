@@ -8,6 +8,27 @@ import type { ReasoningEffort } from '@agent-drove/shared'
  */
 export const CLIENT_FOLLOW_MODEL = 'client-follow'
 
+/** 日常工作区分组 id(A-06):任务未选工作区时的归属,与主进程内置项目 id 逐字一致 */
+export const DAILY_PROJECT_ID = 'daily'
+
+/**
+ * projectId → 分组键归一(A-06):null/undefined 一律归「日常」。
+ * 任务列的组键、落点判定与卡片徽标共用此函数,禁止各处再各写 `?? 'daily'` 字面量。
+ */
+export function normalizeProjectGroupId(pid?: string | null): string {
+  return pid ?? DAILY_PROJECT_ID
+}
+
+/** 分组展示名(A-06):日常 → 「日常」;其余按 id 查项目名,查不到兜底「日常」 */
+export function projectGroupLabel(
+  pid: string | null | undefined,
+  projects: { id: string; name: string }[],
+): string {
+  const id = normalizeProjectGroupId(pid)
+  if (id === DAILY_PROJECT_ID) return '日常'
+  return projects.find((p) => p.id === id)?.name ?? '日常'
+}
+
 /**
  * 任务状态中文文案:键取自 core 的 TaskState 联合,
  * core 新增状态时此处编译期报错,避免各组件各维护一份而漂移。
@@ -81,9 +102,6 @@ export const EFFORT_HINT_TEXT: Record<ReasoningEffort | '', string> = {
   high: '高:深度推理,适合复杂任务,耗时最长',
 }
 
-/** 历史兼容别名(旧名死导入暂存):与唯一源同引用,待消费方迁移到 REASONING_EFFORT_OPTIONS 后移除 */
-export const REASONING_OPTIONS = REASONING_EFFORT_OPTIONS
-
 /**
  * 格式化任务所使用的模型名称:
  * 1. 若为 client-follow 哨兵,显示 "跟随客户端";
@@ -145,18 +163,18 @@ export function formatQuotaNumber(n?: number): string {
   return String(Math.round(n * 10) / 10)
 }
 
+/**
+ * 卡片与列表展示口径的标准结果(R04):只保留调用点实际消费的字段——
+ * primaryText 供 tooltip,primaryValue/primaryUnit 供主行,dailyValue/dailyUnit 供今日对比行。
+ * 零消费字段(kind/percent/colorVar/statusBadge/subText/isOverridden 输出)已删:
+ * 颜色与百分比由消费方(AgentRail 的 quotaColor/quotaPct)自行判定,避免此处再养一份口径。
+ */
 export interface FormattedQuotaMetric {
   primaryText: string
-  subText?: string
-  percent?: number
-  isOverridden?: boolean
-  kind?: 'credits' | 'tokens' | 'daily' | 'unlimited'
-  colorVar?: string
   primaryValue?: string
   primaryUnit?: string
   dailyValue?: string
   dailyUnit?: string
-  statusBadge?: string
 }
 
 /** 统一卡片与列表展示口径的标准工厂函数 */
@@ -172,56 +190,26 @@ export function formatAgentQuotaDisplay(agent: {
 }): FormattedQuotaMetric {
   const cap = agent.plan?.dailyTaskCap ?? 0
   const used = agent.usedToday ?? 0
-  const pct = agent.remainingPercent !== undefined && Number.isFinite(agent.remainingPercent)
-    ? Math.max(0, Math.min(100, Math.round(agent.remainingPercent)))
-    : cap > 0
-      ? Math.max(0, Math.round(((cap - used) / cap) * 100))
-      : undefined
-
-  const colorVar =
-    pct === undefined
-      ? 'var(--accent)'
-      : pct <= 0
-        ? 'var(--err)'
-        : pct <= 20
-          ? '#ea580c'
-          : pct <= 50
-            ? 'var(--warn)'
-            : 'var(--ok)'
 
   if (agent.plan?.quotaKind === 'credits') {
     if (agent.remainingCredits !== undefined) {
       return {
         primaryText: `余 ${formatQuotaNumber(agent.remainingCredits)} 点`,
-        subText: agent.usedCreditsToday ? `今日 ${formatQuotaNumber(agent.usedCreditsToday)} 点` : undefined,
-        percent: pct,
-        isOverridden: agent.isOverridden,
-        kind: 'credits',
-        colorVar,
         primaryValue: formatQuotaNumber(agent.remainingCredits),
         primaryUnit: '点',
         dailyValue: agent.usedCreditsToday ? formatQuotaNumber(agent.usedCreditsToday) : undefined,
         dailyUnit: '点',
-        statusBadge: pct === 0 ? '已用尽' : agent.isOverridden ? '已校准' : undefined,
       }
     }
     if (agent.usedCreditsToday !== undefined) {
       return {
         primaryText: `今日 ${formatQuotaNumber(agent.usedCreditsToday)} 点`,
-        percent: pct,
-        isOverridden: agent.isOverridden,
-        kind: 'credits',
-        colorVar,
         primaryValue: formatQuotaNumber(agent.usedCreditsToday),
         primaryUnit: '点(今日)',
-        statusBadge: agent.isOverridden ? '已校准' : undefined,
       }
     }
     return {
       primaryText: '—',
-      percent: pct,
-      kind: 'credits',
-      colorVar,
       primaryValue: '—',
       primaryUnit: '',
     }
@@ -232,20 +220,12 @@ export function formatAgentQuotaDisplay(agent: {
       const remainingCount = Math.max(0, cap - used)
       return {
         primaryText: `余 ${remainingCount}/${cap} 次`,
-        percent: pct,
-        isOverridden: agent.isOverridden,
-        kind: 'daily',
-        colorVar,
         primaryValue: `${remainingCount}/${cap}`,
         primaryUnit: '次',
-        statusBadge: remainingCount === 0 ? '已用尽' : undefined,
       }
     }
     return {
       primaryText: '未设上限',
-      percent: undefined,
-      kind: 'unlimited',
-      colorVar: 'var(--ok)',
       primaryValue: '无限制',
       primaryUnit: '',
     }
@@ -255,25 +235,15 @@ export function formatAgentQuotaDisplay(agent: {
   if (agent.remainingTokens !== undefined) {
     return {
       primaryText: `余 ${formatTokens(agent.remainingTokens)} tok`,
-      subText: agent.usedTokensToday ? `今日 ${formatTokens(agent.usedTokensToday)} tok` : undefined,
-      percent: pct,
-      isOverridden: agent.isOverridden,
-      kind: 'tokens',
-      colorVar,
       primaryValue: formatTokens(agent.remainingTokens),
       primaryUnit: 'tok',
       dailyValue: agent.usedTokensToday ? formatTokens(agent.usedTokensToday) : undefined,
       dailyUnit: 'tok',
-      statusBadge: pct === 0 ? '已用尽' : undefined,
     }
   }
   if (agent.usedTokensToday) {
     return {
       primaryText: `今日 ${formatTokens(agent.usedTokensToday)} tok`,
-      percent: pct,
-      isOverridden: agent.isOverridden,
-      kind: 'tokens',
-      colorVar,
       primaryValue: formatTokens(agent.usedTokensToday),
       primaryUnit: 'tok(今日)',
     }
@@ -282,20 +252,12 @@ export function formatAgentQuotaDisplay(agent: {
     const remainingCount = Math.max(0, cap - used)
     return {
       primaryText: `余 ${remainingCount}/${cap} 次`,
-      percent: pct,
-      isOverridden: agent.isOverridden,
-      kind: 'daily',
-      colorVar,
       primaryValue: `${remainingCount}/${cap}`,
       primaryUnit: '次',
-      statusBadge: remainingCount === 0 ? '已用尽' : undefined,
     }
   }
   return {
     primaryText: '未配置额度',
-    percent: undefined,
-    kind: 'unlimited',
-    colorVar: 'var(--accent)',
     primaryValue: '未配置',
     primaryUnit: '',
   }
@@ -369,6 +331,22 @@ export function parseChannelsAndModels(
     name: grp.name,
     models: grp.models,
   }))
+}
+
+/**
+ * 模型锁定单一口径(B-11):无该客户端 / 无可用模型 / 客户端不支持切换且模型数 ≤1 时锁定。
+ * 锁定态只展示「跟随客户端」哨兵项且不下发 modelId——发布框、续聊栏与迷你条三处
+ * 此前各写各的判定(迷你条漏了模型数条件),统一改消费此函数。
+ */
+export function isModelLocked(
+  agent?:
+    | { models?: Array<{ id: string }>; capabilities?: { modelSwitch?: string } }
+    | null,
+): boolean {
+  if (!agent) return true
+  const models = agent.models ?? []
+  if (models.length === 0) return true
+  return agent.capabilities?.modelSwitch === 'none' && models.length <= 1
 }
 
 

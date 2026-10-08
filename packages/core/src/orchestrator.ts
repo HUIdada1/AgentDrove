@@ -293,6 +293,7 @@ export class Orchestrator {
           mode: options.mode,
           toolPolicy: options.toolPolicy,
           reasoningEffort: options.reasoningEffort,
+          attachments: options.attachments,
         })
       }
       throw new Error('任务运行中:请等待完成或先取消,再继续对话')
@@ -308,6 +309,8 @@ export class Orchestrator {
       mode: options?.mode ?? parent.mode,
       toolPolicy: options?.toolPolicy ?? parent.toolPolicy,
       reasoningEffort: options?.reasoningEffort ?? parent.reasoningEffort,
+      // K-07:本轮附件缺省继承父任务,不传即沿用,避免续聊静默丢附件
+      attachments: options?.attachments ?? parent.attachments,
       parentId: parent.id,
       origin: 'panel',
       skills: options?.skills ?? parent.skills,
@@ -323,12 +326,15 @@ export class Orchestrator {
     return next
   }
 
-  /** 加入排队消息:当父任务完成后自动接续执行;overrides 为本轮覆盖参数(P0-6),缺省沿用父任务 */
+  /** 加入排队消息:当父任务完成后自动接续执行;overrides 为本轮覆盖参数(P0-6/K-07),缺省沿用父任务 */
   enqueueFollowup(
     taskId: string,
     prompt: string,
     skills?: string[],
-    overrides?: Pick<ContinueOptions, 'modelId' | 'mode' | 'toolPolicy' | 'reasoningEffort'>,
+    overrides?: Pick<
+      ContinueOptions,
+      'modelId' | 'mode' | 'toolPolicy' | 'reasoningEffort' | 'attachments'
+    >,
   ): FollowupQueueItem {
     const parent = this.taskOf(taskId)
     if (!parent) throw new Error(`unknown task: ${taskId}`)
@@ -343,6 +349,7 @@ export class Orchestrator {
     if (overrides?.mode !== undefined) item.mode = overrides.mode
     if (overrides?.toolPolicy !== undefined) item.toolPolicy = overrides.toolPolicy
     if (overrides?.reasoningEffort !== undefined) item.reasoningEffort = overrides.reasoningEffort
+    if (overrides?.attachments !== undefined) item.attachments = overrides.attachments
     const queue = this.followupQueues.get(taskId) ?? []
     queue.push(item)
     this.followupQueues.set(taskId, queue)
@@ -863,6 +870,8 @@ export class Orchestrator {
       mode: nextItem.mode ?? completedTask.mode,
       toolPolicy: nextItem.toolPolicy ?? completedTask.toolPolicy,
       reasoningEffort: nextItem.reasoningEffort ?? completedTask.reasoningEffort,
+      // K-07:排队时记录的本轮附件优先,缺省继承父任务 attachments
+      attachments: nextItem.attachments ?? completedTask.attachments,
       parentId: completedTask.id,
       origin: 'panel',
       skills: nextItem.skills ?? completedTask.skills,

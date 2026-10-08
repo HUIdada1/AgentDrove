@@ -373,7 +373,8 @@ onBeforeUnmount(() => {
   max-width: 320px;
   max-height: 240px;
   overflow-y: auto;
-  z-index: 1000;
+  /* C-16/A19:消费浮层令牌,确保下拉在抽屉(1100)/模态(1200)之上 */
+  z-index: var(--z-popover);
   background: var(--bg-veil), var(--bg);
   backdrop-filter: var(--glass-blur);
   -webkit-backdrop-filter: var(--glass-blur);

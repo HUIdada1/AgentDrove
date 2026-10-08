@@ -25,6 +25,8 @@ const props = withDefaults(
 const emit = defineEmits<{
   'update:modelValue': [value: string]
   send: []
+  /** 剪贴板携带文件时转发(调用方入附件),文本粘贴不受影响 */
+  paste: [files: FileList]
 }>()
 
 const el = ref<HTMLInputElement | HTMLTextAreaElement | null>(null)
@@ -33,6 +35,17 @@ function onInput(event: Event): void {
   emit('update:modelValue', (event.target as HTMLInputElement | HTMLTextAreaElement).value)
   // 输入路径同步增高,避免经 watch 的一帧迟滞
   syncGrow()
+}
+
+/**
+ * S-06:粘贴文件(截图/复制的文件)入附件——clipboardData.files 非空时阻止默认粘贴,
+ * 由调用方按自身附件规则收纳;纯文本粘贴(无 files)不拦截,原样落输入框。
+ */
+function onPaste(event: ClipboardEvent): void {
+  const files = event.clipboardData?.files
+  if (!files || files.length === 0) return
+  event.preventDefault()
+  emit('paste', files)
 }
 
 /** 自动增高:先置 auto 取内容实际高度,再夹到显式上限(若有);CSS max-height 始终兜底 */
@@ -78,6 +91,7 @@ defineExpose({ focus })
       :disabled="props.disabled"
       spellcheck="false"
       @input="onInput"
+      @paste="onPaste"
     />
     <input
       v-else
@@ -89,6 +103,7 @@ defineExpose({ focus })
       :disabled="props.disabled"
       spellcheck="false"
       @input="onInput"
+      @paste="onPaste"
     />
     <GlassButton
       v-if="props.sendLabel"

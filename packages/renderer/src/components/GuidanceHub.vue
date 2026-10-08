@@ -76,6 +76,10 @@ async function rescanAgents(): Promise<void> {
         <span class="tip-dot" />
         <span class="tip-text">任务执行中若需调整思路，点击会话右上角的<strong>“终止”</strong>即可安全中断</span>
       </div>
+      <div class="tip-item">
+        <span class="tip-dot" />
+        <span class="tip-text">选中任务后按 <code>Alt</code> + <code>↑</code> / <code>↓</code> 可在其所属工作区内微调顺序（也可右键卡片选「调整位置」）</span>
+      </div>
     </div>
   </div>
 </template>
