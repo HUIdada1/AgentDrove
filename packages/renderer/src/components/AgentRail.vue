@@ -1460,7 +1460,7 @@ function agentDetailTitle(agent: AgentView): string {
 
 .ws-capsule:hover {
   border-color: var(--accent-line);
-  background: var(--surface);
+  background: var(--surface-bright);
 }
 
 .ws-capsule.active {
@@ -1672,7 +1672,7 @@ function agentDetailTitle(agent: AgentView): string {
 }
 
 .op-mini:hover {
-  background: var(--surface);
+  background: var(--surface-bright);
   color: var(--text);
 }
 

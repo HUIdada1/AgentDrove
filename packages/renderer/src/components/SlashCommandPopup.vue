@@ -154,7 +154,8 @@ defineExpose({ onKeydown })
   border: 1px solid var(--accent-line);
   border-radius: var(--radius-md);
   box-shadow: var(--glass-shadow);
-  z-index: 100;
+  /* C-16:消费浮层令牌(与 GlassSelect/ModelSelector 同层),不再写魔法 z-index */
+  z-index: var(--z-popover);
   overflow: hidden;
   backdrop-filter: var(--glass-blur);
 }

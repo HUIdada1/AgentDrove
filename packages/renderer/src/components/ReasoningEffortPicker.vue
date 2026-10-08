@@ -100,7 +100,7 @@ function select(val: ReasoningEffort | ''): void {
 
 .pill-btn:hover {
   color: var(--text);
-  background: var(--surface);
+  background: var(--surface-bright);
 }
 
 .pill-btn.active {

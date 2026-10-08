@@ -34,11 +34,19 @@ const uid = `g-select-${++selectSeq}`
 
 const isOpen = ref(false)
 const containerRef = ref<HTMLElement | null>(null)
-const alignRight = ref(false)
-/** R02:下方空间不足面板高度时向上弹出(bottom: calc(100% + 4px)) */
-const openUp = ref(false)
-/** R02:面板高度 clamp 到视口内较大一侧的可用空间,翻转后顶部不再被 overflow:hidden 裁切 */
+/** Teleport 到 body 的弹层引用:outside-click/focusout 需同时把它算作「组件内」 */
+const panelRef = ref<HTMLElement | null>(null)
+/** R02/A20:面板高度 clamp 到视口内较大一侧的可用空间,任何窗口高度下都不溢出 */
 const panelMaxH = ref(PANEL_MAX_H)
+/** A20:fixed 定位坐标(视口坐标)——弹层不受 .session/.g-modal-body 等 overflow 祖先裁切 */
+const panelPos = ref<{ top: number; bottom: number; left: number; right: number }>({
+  top: 0,
+  bottom: 0,
+  left: 0,
+  right: 0,
+})
+/** 触发器宽度:弹层至少与触发器同宽 */
+const triggerW = ref(90)
 /** R02:标准键盘导航的当前高亮项(仅移动高亮,Enter 才提交) */
 const focusIndex = ref(-1)
 
@@ -72,21 +80,55 @@ function selectedIndexOf(options: Array<{ value: string; label: string }>): numb
   return options.findIndex((o) => String(o.value) === String(props.modelValue))
 }
 
+/** openUp 只影响渲染取 top 还是 bottom,存进 panelPos 让 style 计算消费 */
+const useOpenUp = ref(false)
+const useAlignRight = ref(false)
+
 /**
- * 打开时按触发器视口坐标测量(R02):剩余空间参照 window 而非任何滚动容器,
- * 因此不会被 .session 等祖先的 overflow:hidden 在容器顶缘裁掉;
- * 下方不足面板高度时翻转向下为向上,并把面板高度 clamp 到可用更大的一侧。
+ * 打开/视口变化时按触发器视口坐标测量(A20):
+ * 弹层经 Teleport 落在 body 下并以 fixed 定位,不再受 .session / .g-modal-body 等
+ * overflow 祖先裁切;下方不足面板高度时向上弹出,高度按所选方向的实际可用空间
+ * clamp(不设 80px 硬下限,迷你窗 150px 高也贴边不溢出);上下坐标再 clamp 进视口,
+ * 触发器被滚出视口时面板仍贴边可见;右缘空间不足时改由 right 定位,窄窗不横向溢出。
  */
 function measurePanel(): void {
   const rect = containerRef.value?.getBoundingClientRect()
   if (!rect) return
-  const spaceBelow = window.innerHeight - rect.bottom - 4
-  const spaceAbove = rect.top - 4
-  openUp.value = spaceBelow < PANEL_MAX_H && spaceAbove > spaceBelow
-  panelMaxH.value = Math.max(80, Math.min(PANEL_MAX_H, Math.max(spaceBelow, spaceAbove)))
-  // 右缘溢出保护(沿用现状 260 阈值):靠右对齐
-  alignRight.value = window.innerWidth - rect.left < 260
+  const GAP = 4
+  const MARGIN = 8
+  const spaceBelow = window.innerHeight - rect.bottom - GAP
+  const spaceAbove = rect.top - GAP
+  const openUp = spaceBelow < PANEL_MAX_H && spaceAbove > spaceBelow
+  triggerW.value = rect.width
+  // 面板上下边视口坐标,clamp 到视口内(触发器被滚动带出视口时面板仍贴边可见,绝不没入视口外)
+  const topY = Math.min(Math.max(rect.bottom + GAP, MARGIN), window.innerHeight - MARGIN)
+  const bottomY = Math.min(Math.max(rect.top - GAP, MARGIN), window.innerHeight - MARGIN)
+  const avail = openUp ? bottomY - MARGIN : window.innerHeight - topY - MARGIN
+  panelMaxH.value = Math.min(PANEL_MAX_H, Math.max(avail, 40))
+  const alignRight = window.innerWidth - rect.left < 260
+  panelPos.value = {
+    top: topY,
+    bottom: window.innerHeight - bottomY,
+    left: rect.left,
+    right: window.innerWidth - rect.right,
+  }
+  // openUp 只影响渲染取 top 还是 bottom,存进 panelPos 让 style 计算消费
+  useOpenUp.value = openUp
+  useAlignRight.value = alignRight
 }
+
+/** 弹层内联样式:方向 + 视口坐标 + 高度/最小宽度 */
+const panelStyle = computed(() => {
+  const p = panelPos.value
+  return {
+    top: useOpenUp.value ? 'auto' : `${p.top}px`,
+    bottom: useOpenUp.value ? `${p.bottom}px` : 'auto',
+    left: useAlignRight.value ? 'auto' : `${p.left}px`,
+    right: useAlignRight.value ? `${p.right}px` : 'auto',
+    maxHeight: `${panelMaxH.value}px`,
+    minWidth: `${triggerW.value}px`,
+  }
+})
 
 function openDropdown(): void {
   measurePanel()
@@ -117,9 +159,11 @@ function selectOption(opt: { value: string; label: string }): void {
 }
 
 function onClickOutside(event: MouseEvent): void {
-  if (containerRef.value && !containerRef.value.contains(event.target as Node)) {
-    isOpen.value = false
-  }
+  const target = event.target as Node
+  if (containerRef.value?.contains(target)) return
+  // 弹层 Teleport 到 body 后不在 container 内,单独放行
+  if (panelRef.value?.contains(target)) return
+  isOpen.value = false
 }
 
 /** R02:WAI-ARIA combobox 键盘惯例——↓↑ 只移动高亮,Enter/空格确认,Esc 关闭不改值,Home/End 跳首尾 */
@@ -203,22 +247,37 @@ watch(
   { flush: 'sync' },
 )
 
-/** G4-04:失焦收起——Tab 把焦点移出组件后立即收起面板(relatedTarget 为 null 视为外部) */
+/** G4-04:失焦收起——Tab 把焦点移出组件后立即收起面板;
+ * 弹层 Teleport 到 body 后搜索框不在 container 内,relatedTarget 落在 panel 内同样放行 */
 function onFocusout(event: FocusEvent): void {
   const related = event.relatedTarget as Node | null
-  if (!related || !containerRef.value?.contains(related)) {
+  if (!related) {
     isOpen.value = false
+    return
   }
+  if (containerRef.value?.contains(related)) return
+  if (panelRef.value?.contains(related)) return
+  isOpen.value = false
+}
+
+/** A20:窗口尺寸变化/任意祖先滚动时面板跟随重定位(fixed 坐标基于视口,须同步刷新) */
+function onViewportChange(): void {
+  if (isOpen.value) measurePanel()
 }
 
 onMounted(() => {
   document.addEventListener('click', onClickOutside)
   containerRef.value?.addEventListener('focusout', onFocusout)
+  window.addEventListener('resize', onViewportChange)
+  // capture:true 捕获所有滚动容器(含 .g-modal-body/.session 内部滚动),面板不脱锚
+  window.addEventListener('scroll', onViewportChange, true)
 })
 
 onBeforeUnmount(() => {
   document.removeEventListener('click', onClickOutside)
   containerRef.value?.removeEventListener('focusout', onFocusout)
+  window.removeEventListener('resize', onViewportChange)
+  window.removeEventListener('scroll', onViewportChange, true)
 })
 </script>
 
@@ -245,14 +304,16 @@ onBeforeUnmount(() => {
       </span>
     </div>
 
-    <transition name="g-popper-fade">
-      <div
-        v-if="isOpen"
-        class="g-dropdown-popper glass"
-        :class="{ 'align-right': alignRight, 'open-up': openUp }"
-        role="listbox"
-        :style="{ maxHeight: `${panelMaxH}px` }"
-      >
+    <!-- A20:弹层 Teleport 到 body + fixed 定位,任何 overflow 祖先(会话列/模态滚动区/迷你窗)都不裁切 -->
+    <Teleport to="body">
+      <transition name="g-popper-fade">
+        <div
+          v-if="isOpen"
+          ref="panelRef"
+          class="g-dropdown-popper glass"
+          :style="panelStyle"
+          role="listbox"
+        >
         <!-- G4-04:searchable 即时过滤框,置于面板顶部并 sticky 不随选项滚走 -->
         <input
           v-if="searchable"
@@ -285,8 +346,9 @@ onBeforeUnmount(() => {
           <span class="g-option-label">{{ opt.label }}</span>
           <span v-if="String(opt.value) === String(modelValue)" class="g-check" aria-hidden="true">✓</span>
         </div>
-      </div>
-    </transition>
+        </div>
+      </transition>
+    </Teleport>
   </div>
 </template>
 
@@ -363,14 +425,12 @@ onBeforeUnmount(() => {
   pointer-events: none;
 }
 
-/* 下拉浮层面板 */
+/* 下拉浮层面板(A20:fixed 视口定位,经 Teleport 落在 body 下) */
 .g-dropdown-popper {
-  position: absolute;
-  top: calc(100% + 4px);
-  left: 0;
-  min-width: 100%;
+  position: fixed;
+  min-width: 90px;
   width: max-content;
-  max-width: 320px;
+  max-width: min(320px, calc(100vw - 20px));
   max-height: 240px;
   overflow-y: auto;
   /* C-16/A19:消费浮层令牌,确保下拉在抽屉(1100)/模态(1200)之上 */
@@ -382,17 +442,6 @@ onBeforeUnmount(() => {
   border-radius: var(--radius-sm);
   padding: 4px;
   box-shadow: var(--glass-shadow), 0 8px 24px rgba(0, 0, 0, 0.38);
-}
-
-.g-dropdown-popper.align-right {
-  left: auto;
-  right: 0;
-}
-
-/* R02:贴底翻转——下方空间不足时向上弹出,配合内联 maxHeight clamp 不被视口裁切 */
-.g-dropdown-popper.open-up {
-  top: auto;
-  bottom: calc(100% + 4px);
 }
 
 .g-option {

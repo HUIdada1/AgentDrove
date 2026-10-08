@@ -649,6 +649,11 @@ async function loadOlderForTurn(taskId: string): Promise<void> {
   }
 }
 
+/** S-05:流内气泡的文案编辑态(同一时刻只编辑一条);声明须先于下方 immediate watcher——
+ * watcher 回调经 cancelQueueEdit 同步访问,若声明在后则 setup 期即 TDZ 抛错 */
+const queueEditingId = ref('')
+const queueEditingText = ref('')
+
 watch(
   () => store.selectedTaskId.value,
   (id, prevId) => {
@@ -923,10 +928,6 @@ async function sendContinue(): Promise<void> {
 function missingQueueChannel(): void {
   store.showToast('排队消息通道未就绪,请升级主进程后重试')
 }
-
-/** S-05:流内气泡的文案编辑态(同一时刻只编辑一条) */
-const queueEditingId = ref('')
-const queueEditingText = ref('')
 
 /** 函数 ref:编辑框挂载即聚焦(v-for 内字符串 ref 会退化为数组,故用回调形式) */
 function setQueueEditRef(el: Element | ComponentPublicInstance | null): void {
@@ -3108,7 +3109,7 @@ function timeOf(at: number): string {
 }
 
 .q-btn:hover {
-  background: var(--surface);
+  background: var(--surface-bright);
   color: var(--text);
   border-color: var(--accent-line);
 }

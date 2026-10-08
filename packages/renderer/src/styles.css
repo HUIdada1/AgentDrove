@@ -56,6 +56,11 @@
   --glass-shadow: 0 14px 44px rgba(2, 6, 12, 0.46);
   --glass-sheen: linear-gradient(155deg, rgba(255, 255, 255, 0.045), transparent 42%);
   --field-bg: rgba(10, 16, 24, 0.42);
+  /* 面底三档:--surface 供浮层弹板(必须近实心,背景内容不得穿透);
+     --surface-dim 常态次级面 / --surface-bright 悬停高亮面(半透叠加在玻璃上) */
+  --surface: rgba(19, 29, 42, 0.94);
+  --surface-dim: rgba(152, 184, 210, 0.08);
+  --surface-bright: rgba(152, 184, 210, 0.16);
   --line: rgba(152, 184, 210, 0.09);
   --line-strong: rgba(152, 184, 210, 0.26);
   --grid-line: rgba(152, 184, 210, 0.05);
@@ -87,6 +92,10 @@
   --glass-shadow: 0 12px 38px rgba(30, 52, 72, 0.13);
   --glass-sheen: linear-gradient(155deg, rgba(255, 255, 255, 0.32), transparent 46%);
   --field-bg: rgba(255, 255, 255, 0.66);
+  /* 面底三档:语义同暗色,亮色取雾白实底/浅灰叠加 */
+  --surface: rgba(255, 255, 255, 0.95);
+  --surface-dim: rgba(23, 42, 60, 0.06);
+  --surface-bright: rgba(23, 42, 60, 0.1);
   --line: rgba(23, 42, 60, 0.09);
   --line-strong: rgba(23, 42, 60, 0.28);
   --grid-line: rgba(23, 42, 60, 0.045);

@@ -44,13 +44,19 @@ interface FlatOption {
 const isOpen = ref(false)
 const keyword = ref('')
 const selectorRef = ref<HTMLElement | null>(null)
+/** Teleport 到 body 的弹层引用:outside-click/focusout 需同时把它算作「组件内」 */
+const panelRef = ref<HTMLElement | null>(null)
 const searchRef = ref<HTMLInputElement | null>(null)
 /** 下方空间不足面板高度时向上弹出,与 GlassSelect 同款翻转 */
 const openUp = ref(false)
 /** 右缘溢出时靠右对齐 */
 const alignRight = ref(false)
-/** 面板高度 clamp 到视口内可用空间,翻转后顶层不被 overflow:hidden 裁切 */
+/** 面板高度 clamp 到视口内可用空间(A20:不设硬下限,矮窗/迷你窗不溢出) */
 const panelMaxH = ref(PANEL_MAX_H)
+/** A20:fixed 视口坐标——弹层不受会话列等 overflow 祖先裁切 */
+const panelPos = ref({ top: 0, bottom: 0, left: 0, right: 0 })
+/** 触发器宽度:弹层至少与触发器同宽 */
+const triggerW = ref(120)
 /** 键盘导航高亮项(仅移动高亮,Enter 才提交) */
 const focusIndex = ref(-1)
 
@@ -136,15 +142,42 @@ function currentIndexOf(list: FlatOption[]): number {
   return list.findIndex((o) => o.modelId === props.currentModelId)
 }
 
+/** A20:按触发器视口坐标测量;弹层经 Teleport fixed 定位,不被任何 overflow 祖先裁切 */
 function measurePanel(): void {
   const rect = selectorRef.value?.getBoundingClientRect()
   if (!rect) return
-  const spaceBelow = window.innerHeight - rect.bottom - 4
-  const spaceAbove = rect.top - 4
+  const GAP = 6
+  const MARGIN = 8
+  const spaceBelow = window.innerHeight - rect.bottom - GAP
+  const spaceAbove = rect.top - GAP
   openUp.value = spaceBelow < PANEL_MAX_H && spaceAbove > spaceBelow
-  panelMaxH.value = Math.max(160, Math.min(PANEL_MAX_H, Math.max(spaceBelow, spaceAbove)))
+  triggerW.value = rect.width
+  // 面板上下边视口坐标,clamp 到视口内(触发器被滚动带出视口时面板仍贴边可见)
+  const topY = Math.min(Math.max(rect.bottom + GAP, MARGIN), window.innerHeight - MARGIN)
+  const bottomY = Math.min(Math.max(rect.top - GAP, MARGIN), window.innerHeight - MARGIN)
+  const avail = openUp.value ? bottomY - MARGIN : window.innerHeight - topY - MARGIN
+  panelMaxH.value = Math.min(PANEL_MAX_H, Math.max(avail, 40))
   alignRight.value = window.innerWidth - rect.left < PANEL_W
+  panelPos.value = {
+    top: topY,
+    bottom: window.innerHeight - bottomY,
+    left: rect.left,
+    right: window.innerWidth - rect.right,
+  }
 }
+
+/** 弹层内联样式:方向 + 视口坐标 + 高度/最小宽度 */
+const panelStyle = computed(() => {
+  const p = panelPos.value
+  return {
+    top: openUp.value ? 'auto' : `${p.top}px`,
+    bottom: openUp.value ? `${p.bottom}px` : 'auto',
+    left: alignRight.value ? 'auto' : `${p.left}px`,
+    right: alignRight.value ? `${p.right}px` : 'auto',
+    maxHeight: `${panelMaxH.value}px`,
+    minWidth: `${triggerW.value}px`,
+  }
+})
 
 function openDropdown(): void {
   if (props.disabled) return
@@ -170,17 +203,28 @@ function selectOption(opt: FlatOption): void {
 }
 
 function onClickOutside(event: MouseEvent): void {
-  if (selectorRef.value && !selectorRef.value.contains(event.target as Node)) {
-    isOpen.value = false
-  }
+  const target = event.target as Node
+  if (selectorRef.value?.contains(target)) return
+  // 弹层 Teleport 到 body 后不在 selector 内,单独放行
+  if (panelRef.value?.contains(target)) return
+  isOpen.value = false
 }
 
-/** 失焦收起:Tab 把焦点移出组件后立即收起面板(relatedTarget 为 null 视为外部) */
+/** 失焦收起:Tab 把焦点移出组件后立即收起面板;搜索框在弹层内(Teleport),relatedTarget 落其中同样放行 */
 function onFocusout(event: FocusEvent): void {
   const related = event.relatedTarget as Node | null
-  if (!related || !selectorRef.value?.contains(related)) {
+  if (!related) {
     isOpen.value = false
+    return
   }
+  if (selectorRef.value?.contains(related)) return
+  if (panelRef.value?.contains(related)) return
+  isOpen.value = false
+}
+
+/** A20:窗口尺寸变化/任意祖先滚动时面板跟随重定位(fixed 坐标基于视口,须同步刷新) */
+function onViewportChange(): void {
+  if (isOpen.value) measurePanel()
 }
 
 /** combobox 键盘惯例:↓↑ 只移动高亮,Enter 确认,Esc 关闭不改值,Home/End 跳首尾 */
@@ -264,11 +308,16 @@ watch(
 onMounted(() => {
   document.addEventListener('click', onClickOutside)
   selectorRef.value?.addEventListener('focusout', onFocusout)
+  window.addEventListener('resize', onViewportChange)
+  // capture:true 捕获所有滚动容器(会话列/模态滚动区),面板不脱锚
+  window.addEventListener('scroll', onViewportChange, true)
 })
 
 onBeforeUnmount(() => {
   document.removeEventListener('click', onClickOutside)
   selectorRef.value?.removeEventListener('focusout', onFocusout)
+  window.removeEventListener('resize', onViewportChange)
+  window.removeEventListener('scroll', onViewportChange, true)
 })
 </script>
 
@@ -297,15 +346,16 @@ onBeforeUnmount(() => {
       <span class="chevron" :class="{ rotated: isOpen }">▾</span>
     </div>
 
-    <!-- 弹层面板 -->
-    <Transition name="fade-slide">
-      <div
-        v-if="isOpen"
-        class="model-popover glass"
-        :class="{ 'open-up': openUp, 'align-right': alignRight }"
-        :style="{ maxHeight: `${panelMaxH}px` }"
-        @click.stop
-      >
+    <!-- 弹层面板(A20:Teleport 到 body + fixed 定位,不被会话列等 overflow 祖先裁切) -->
+    <Teleport to="body">
+      <Transition name="fade-slide">
+        <div
+          v-if="isOpen"
+          ref="panelRef"
+          class="model-popover glass"
+          :style="panelStyle"
+          @click.stop
+        >
         <div class="search-box">
           <!-- B14:持焦的搜索框才是 combobox——aria-controls 指向下方 listbox,
                aria-activedescendant 指向当前高亮项(↓↑ 只移高亮不改 DOM 焦点) -->
@@ -393,6 +443,7 @@ onBeforeUnmount(() => {
         </div>
       </div>
     </Transition>
+    </Teleport>
   </div>
 </template>
 
@@ -427,7 +478,7 @@ onBeforeUnmount(() => {
 
 .model-selector-wrapper:hover:not(.disabled) .model-trigger {
   border-color: var(--accent-line);
-  background: var(--surface);
+  background: var(--surface-bright);
 }
 
 .model-selector-wrapper:focus-visible .model-trigger,
@@ -482,11 +533,10 @@ onBeforeUnmount(() => {
 }
 
 .model-popover {
-  position: absolute;
-  top: calc(100% + 6px);
-  left: 0;
+  /* A20:fixed 视口定位(经 Teleport 落在 body 下),宽高均 clamp 到视口内 */
+  position: fixed;
   z-index: var(--z-popover);
-  width: 320px;
+  width: min(320px, calc(100vw - 20px));
   max-height: 380px;
   display: flex;
   flex-direction: column;
@@ -497,17 +547,6 @@ onBeforeUnmount(() => {
   box-sizing: border-box;
   background: var(--surface);
   backdrop-filter: blur(20px);
-}
-
-/* S-08:下方空间不足时向上弹出;近右缘时靠右对齐,窄窗不被裁切 */
-.model-popover.open-up {
-  top: auto;
-  bottom: calc(100% + 6px);
-}
-
-.model-popover.align-right {
-  left: auto;
-  right: 0;
 }
 
 .search-box {

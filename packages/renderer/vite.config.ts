@@ -23,6 +23,7 @@ export default defineConfig({
     alias: [
       { find: /^node:crypto$/, replacement: nodeShim },
       { find: /^node:path$/, replacement: nodeShim },
+      { find: /^node:os$/, replacement: nodeShim },
     ],
   },
   // 版本号进运行时常量,关于卡直接读,免一次 IPC 往返
