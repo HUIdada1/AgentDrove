@@ -1,5 +1,11 @@
 # Changelog
 
+## v0.7.0 (2026-10-08)
+
+4b9eaae feat(core+main+renderer+shared): 操作逻辑三路审计整改(合并方案45项全落地+两轮审核34项修复)
+08c4af3 chore(checkpoint): 本轮整改前基线快照(工作区既有未提交改动)
+2fd083f chore(release): v0.6.0 版本同步与 CHANGELOG
+
 ## v0.6.0 (2026-10-05)
 
 e3bcbf6 feat(core+main+renderer): 操作逻辑全面整改(五路审核65项发现→44条整改项全落地:Agent上下文单一语义与toggle/卡片分组拖拽与批量选择/模型档位记忆复位与续聊覆盖角标/追问队列SQLite持久化/额度校准与真实余量/布局空间守卫与恢复/斜杠面板与技能预设可达)
