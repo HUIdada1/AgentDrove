@@ -1,5 +1,10 @@
 # Changelog
 
+## v0.7.1 (2026-10-08)
+
+e4079ae fix(renderer): 单选选择器透明穿透与弹层裁切全量整改
+6c45c2d chore(release): v0.7.0 版本同步与 CHANGELOG
+
 ## v0.7.0 (2026-10-08)
 
 4b9eaae feat(core+main+renderer+shared): 操作逻辑三路审计整改(合并方案45项全落地+两轮审核34项修复)
